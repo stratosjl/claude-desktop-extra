@@ -22,8 +22,7 @@ const PRELOAD_STUB = "/*preload*/";
 
 // Runs the module; returns the IPC handlers, the global it exports, the
 // web-contents-created listener and the diag lines it logged.
-function load(profileDir, env, opts) {
-  opts = opts || {};
+function load(profileDir, env) {
   const handlers = {};
   const appListeners = {};
   const diag = [];
@@ -36,9 +35,8 @@ function load(profileDir, env, opts) {
   };
   const src = readFileSync(join(ROOT, "js/custom_models_main.js"), "utf8")
     .replace('"__CDB_CM_PRELOAD_SRC__"', JSON.stringify(PRELOAD_STUB));
-  const sandbox = { require: (m) => (m === "electron" ? electron
-      : (opts.modules && opts.modules[m]) || Module.createRequire(import.meta.url)(m)),
-    process: { platform: opts.platform || "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
+  const sandbox = { require: (m) => (m === "electron" ? electron : Module.createRequire(import.meta.url)(m)),
+    process: { platform: "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
     fetch: (url, init) => { sandbox.__fetchCalls.push({ url, init }); return sandbox.__fetchImpl(url, init); } };
   sandbox.__fetchCalls = [];
   sandbox.__fetchImpl = () => Promise.resolve(new Response(JSON.stringify({ id: "msg" }), { status: 200 }));
@@ -1662,52 +1660,6 @@ async function settle() { await new Promise((r) => setTimeout(r, 10)); }
   ok(cfg.webSearch === "" && diag.some((l) => /webSearch names deepseek-chat, which more than one provider lists - name one of claude-deepseek-deepseek-chat, claude-or-deepseek-chat - web search stays on Anthropic/.test(l)),
      "a hand-written reference to a shared name is not guessed: the log names the two to choose from");
   rmSync(dir, { recursive: true, force: true });
-}
-
-// --- Windows: a profile path with a space goes through its 8.3 short form ---
-// The Windows build (scripts/windows/build-windows.sh) runs this module with
-// userData under C:\Users\<name>, which often has a space BUN_OPTIONS cannot
-// carry. The short-name lookup is cmd's job; it is stubbed here.
-{
-  const dir = mkdtempSync(join(tmpdir(), "cdb cm win-"));
-  writeFileSync(join(dir, "claude-desktop-extra.jsonc"), PROVIDERS);
-  switchOn(dir);
-  const calls = [];
-  let answer = "/short/CDBCMW~1\r\n";
-  const cp = { execFileSync: (file, args, o) => { calls.push({ file, args, o }); return answer; } };
-  const { api, diag } = load(dir, { ComSpec: "C:\\Windows\\system32\\cmd.exe" }, { platform: "win32", modules: { child_process: cp } });
-  const env = api.cliEnv();
-  ok(env.BUN_OPTIONS === "--preload=/short/CDBCMW~1/custom-models/preload.js",
-     "win32: the preload is passed through the short profile path: " + env.BUN_OPTIONS);
-  ok(calls.length === 1 && calls[0].file === "C:\\Windows\\system32\\cmd.exe" &&
-     calls[0].args.join(" ") === '/d /c for %I in ("' + dir + '") do @echo %~sI' &&
-     calls[0].o.windowsVerbatimArguments === true && calls[0].o.windowsHide === true,
-     "win32: only the profile directory is shortened, by cmd, quoted verbatim and hidden");
-  ok(env.CDB_CUSTOM_MODELS_ROUTES === join(dir, "custom-models", "routes.json"),
-     "win32: the other paths travel in their own variables, spaces and all");
-  api.cliEnv();
-  ok(calls.length === 1, "win32: the short form is looked up once per profile");
-  const spawnOpts = { env: Object.assign({ PATH: "x" }, env) };
-  api.remoteSpawn(spawnOpts);
-  ok(!("BUN_OPTIONS" in spawnOpts.env) && !("CDB_CUSTOM_MODELS_JSON" in spawnOpts.env),
-     "win32: an SSH/WSL session still loses the short-form preload");
-  // A volume without 8.3 names: cmd echoes the long path back.
-  answer = dir + "\r\n";
-  const r2 = load(dir, {}, { platform: "win32", modules: { child_process: cp } });
-  ok(JSON.stringify(r2.api.cliEnv()) === "{}" && r2.diag.some((l) => /8\.3 short name/.test(l)),
-     "win32 without short names: the session is left alone, and the log says why");
-  // Characters cmd would expand are never handed to it.
-  const calls0 = calls.length;
-  const pct = mkdtempSync(join(tmpdir(), "cdb cm %x%-"));
-  writeFileSync(join(pct, "claude-desktop-extra.jsonc"), PROVIDERS);
-  switchOn(pct);
-  const r3 = load(pct, {}, { platform: "win32", modules: { child_process: cp } });
-  ok(JSON.stringify(r3.api.cliEnv()) === "{}" && calls.length === calls0, "win32: a path with % is not passed to cmd");
-  // Linux keeps refusing a path with a space, without asking anyone.
-  const r4 = load(dir, {}, { modules: { child_process: cp } });
-  ok(JSON.stringify(r4.api.cliEnv()) === "{}" && calls.length === calls0, "linux: a path with a space is still refused, no lookup");
-  rmSync(dir, { recursive: true, force: true });
-  rmSync(pct, { recursive: true, force: true });
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -56,14 +56,6 @@ Panel tabs and Files quick open depend on DOM anchors in remote claude.ai code; 
 | [`fix_profile_window_title.nim`](../patches/core/fix_profile_window_title.nim) | Puts the profile name in the window title (`Claude (work)`), so profiles are tellable apart in Alt-Tab and the taskbar |
 | [`fix_quick_entry_cli_toggle.nim`](../patches/core/fix_quick_entry_cli_toggle.nim) | Makes `claude-desktop --toggle` open [Quick Entry](quick-entry.md) in milliseconds over a socket instead of spawning Electron - fast enough to bind to a global hotkey. The same socket takes one short command per connection, so `claude-desktop --reload-theme` makes the running app re-read its [theme](themes.md) config and re-apply it, replying with a one-line JSON result. Also logs one `[quick-entry] shown ...` line per Quick Entry show (textarea size, focus, font, colors) for reports like [#281](https://github.com/patrickjaja/claude-desktop-extra/issues/281) |
 
-## Windows build
-
-**1 patch**, applied only by the Windows build ([docs/windows.md](windows.md)) together with the shared patches it carries (custom models, the Extra settings page and its bridge, the profile window title). The Linux packages never apply it.
-
-| Patch | What it does & why it exists |
-|-------|------------------------------|
-| [`add_windows_profiles.nim`](../patches/windows/add_windows_profiles.nim) | Does the Linux launcher's job for a Start Menu shortcut: `claude.exe --profile=NAME` points the app at `%APPDATA%\Claude-NAME` (through upstream's own `CLAUDE_USER_DATA_DIR`) and Claude Code at `%USERPROFILE%\.claude-NAME`, and routes `claude://` sign-in callbacks to the profile that opened the sign-in page. Injected into `index.pre.js`, which reads the data folder and takes the single-instance lock before anything else runs |
-
 ## Linux compatibility
 
 **37 patches**, always on and nothing to configure. Upstream ships the same JS bundle to every platform; these open `darwin`/`win32`-only gates for Linux, or fix behavior that only misfires in a Linux desktop environment. Each one is either a feature you would otherwise not have at all, or a bug you would otherwise hit.
