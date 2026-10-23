@@ -1,0 +1,165 @@
+name: Upstream Sync
+
+# Daily: keep this fork on upstream (patrickjaja/claude-desktop-extra) and
+# publish a new Windows build when anything moved.
+#
+#   1. sync     - GitHub's own "Sync fork" (merge-upstream API) on master. The
+#                 fork only ADDS files (its edits to upstream files live in
+#                 scripts/windows/upstream-overlay.patch), so this never
+#                 conflicts.
+#   2. build    - when upstream moved or Anthropic shipped a new Windows
+#                 version: Build Windows (build x64 + arm64, boot the x64
+#                 build on a Windows runner) and publish windows-v<version>.
+#                 A failed check publishes nothing.
+#   3. report   - on any failure, an issue with the run link and a prompt to
+#                 fix it with Claude (when Issues are enabled on the repo;
+#                 otherwise the run summary). GitHub also emails the failure.
+#
+# Syncing commits that change upstream's own .github/workflows/ files needs a
+# token with the `workflow` scope: add a fine-grained personal access token as
+# the SYNC_TOKEN secret (repository: this fork; permissions: Contents and
+# Workflows read/write). Without it the default token syncs everything else
+# and the run reports what it could not do.
+
+on:
+  schedule:
+    - cron: '51 4 * * *' # 07:51 Athens in summer time, 06:51 in winter
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Rebuild and republish the Windows release even if nothing changed'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      merge_type: ${{ steps.sync.outputs.merge_type }}
+      windows_latest: ${{ steps.win.outputs.latest }}
+      windows_published: ${{ steps.win.outputs.published }}
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: Sync master with upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          set -uo pipefail
+          resp=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f branch=master 2>&1)
+          rc=$?
+          echo "$resp"
+          if [ "$rc" -ne 0 ]; then
+            if grep -qi 'workflow' <<<"$resp"; then
+              echo "::error::Upstream changed files under .github/workflows/, which the default token may not push. Add a SYNC_TOKEN secret (see the header of this workflow)."
+            else
+              echo "::error::Sync fork failed (a conflict means a fork commit changed an upstream file; move that change into scripts/windows/upstream-overlay.patch)."
+            fi
+            exit 1
+          fi
+          type=$(jq -r '.merge_type // "none"' <<<"$resp")
+          echo "merge_type=${type}" >> "$GITHUB_OUTPUT"
+          echo "Sync: ${type}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare Windows versions
+        id: win
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(curl -fsSL --retry 3 https://downloads.claude.ai/releases/win32/x64/RELEASES \
+            | sed '1s/^\xEF\xBB\xBF//; s/\r$//' \
+            | sed -n 's/^[0-9A-Fa-f]\{40\} AnthropicClaude-\(.*\)-full\.nupkg [0-9]*$/\1/p' | sort -V | tail -1)
+          [ -n "$latest" ] || { echo "::error::no version in Anthropic's RELEASES"; exit 1; }
+          published=$(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \
+            | sed -n 's/^windows-v//p' | sort -V | tail -1)
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          echo "published=${published}" >> "$GITHUB_OUTPUT"
+          echo "Windows: Anthropic ${latest}, published ${published:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Decide
+        id: decide
+        env:
+          MERGE_TYPE: ${{ steps.sync.outputs.merge_type }}
+          LATEST: ${{ steps.win.outputs.latest }}
+          PUBLISHED: ${{ steps.win.outputs.published }}
+          FORCE: ${{ inputs.force_build }}
+        run: |
+          if [ "$MERGE_TYPE" != "none" ] || [ "$LATEST" != "$PUBLISHED" ] || [ "$FORCE" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Rebuilding and publishing the Windows release." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing new." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      publish: true
+      ref: master
+
+  report:
+    needs: [sync, build]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Report the failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SYNC: ${{ needs.sync.result }}
+          BUILD: ${{ needs.build.result }}
+          LATEST: ${{ needs.sync.outputs.windows_latest }}
+        run: |
+          set -uo pipefail
+          title="Automatic update failed"
+          body=$(cat <<EOF
+          The daily [Upstream Sync run](${RUN_URL}) failed: sync **${SYNC}**, Windows build **${BUILD}** (Anthropic Windows ${LATEST:-unknown}). Nothing was published.
+
+          To fix it with Claude, open a Claude Code session on this repository and paste:
+
+          > The daily Upstream Sync workflow failed: ${RUN_URL}. Read its logs, find the cause and fix it on a branch with a PR to master. Follow AGENTS.md's patch strictness rules. If the Windows overlay no longer applies, re-fit scripts/windows/upstream-overlay.patch (see scripts/windows/prepare-sources.sh). If a Windows-set patch no longer matches the new bundle, re-fit it. When the PR's Build Windows checks are green, merge it and run Upstream Sync again.
+          EOF
+          )
+          printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number -q '.[0].number' 2>/dev/null)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body" ||
+              echo "::warning::could not comment on issue #$existing"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body" ||
+              echo "::warning::could not open an issue (Issues may be disabled on this repository); the report is in this run's summary"
+          fi
+
+  resolve:
+    needs: [sync, build]
+    if: success() && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Close the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search 'in:title "Automatic update failed"' --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$n" ]; then
+            gh issue close "$n" -R "$GITHUB_REPOSITORY" --comment "Fixed: [this run](${RUN_URL}) synced, built and published." || true
+          fi

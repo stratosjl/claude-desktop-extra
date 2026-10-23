@@ -4,7 +4,9 @@
 # Runs on Linux (CI or a dev box), like the other packages: downloads
 # Anthropic's official Windows build (the Squirrel .nupkg the official
 # installer fetches), verifies it against the RELEASES manifest, patches
-# app.asar with the Windows patch set (scripts/apply_patches.py --windows),
+# app.asar with the Windows patch set (apply_patches.py --windows, from a copy
+# of the sources with scripts/windows/upstream-overlay.patch applied - see
+# scripts/windows/prepare-sources.sh),
 # repacks it, rewrites the asar integrity hash embedded in claude.exe, and
 # zips the result with an installer script.
 #
@@ -26,7 +28,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PATCHES_DIR="$REPO_DIR/patches"
 PKG_DIR="$REPO_DIR/packaging/windows"
 BASE_URL="https://downloads.claude.ai/releases/win32"
 
@@ -124,10 +125,13 @@ mkdir -p "$WORK/app"
 # ---------------------------------------------------------------------------
 # 3. Patch
 # ---------------------------------------------------------------------------
+# The Windows build's sources: this repo plus the overlay of upstream files.
+SRC="$WORK/src"
+"$SCRIPT_DIR/prepare-sources.sh" "$SRC"
 log "Compiling patches"
-make -C "$PATCHES_DIR" -j"$(nproc)" >/dev/null
+make -C "$SRC/patches" -j"$(nproc)" >/dev/null
 log "Applying the Windows patch set"
-python3 "$REPO_DIR/scripts/apply_patches.py" --windows "$PATCHES_DIR" "$WORK/app"
+python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 
 log "Validating JavaScript syntax"
 bad=0

@@ -1,10 +1,9 @@
 # Build every patch source into a same-named executable next to it.
 #
-# Sources live in four category subdirectories:
+# Sources live in three category subdirectories:
 #   linux/      Linux compatibility fixes (always on)
 #   core/       always-on infrastructure (themes, extra settings, profiles)
 #   community/  optional value-add features
-#   windows/    Windows build only (scripts/windows/build-windows.sh)
 #
 # Usage:
 #   make -j$(nproc)      # parallel build (default target = all)
@@ -22,7 +21,7 @@
 NIM       ?= nim
 NIMFLAGS  ?= c -d:release --opt:speed --mm:orc --hints:off
 
-SRCS := $(wildcard linux/*.nim community/*.nim core/*.nim windows/*.nim)
+SRCS := $(wildcard linux/*.nim community/*.nim core/*.nim)
 BINS := $(SRCS:.nim=)
 
 ifeq ($(strip $(SRCS)),)
@@ -146,9 +145,6 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
 # The flag catalog the Extra settings page renders is parsed out of this file's
 # .jsonc template at runtime.
 core/add_growthbook_overrides: ../js/growthbook_overrides.js
-
-# Windows build only: profile selection and sign-in callback routing.
-windows/add_windows_profiles: ../js/windows_profiles_main.js
 
 clean:
 	@rm -rf $(BINS) .nimcache

@@ -54,9 +54,10 @@ The model routing loads a preload into the Claude Code CLI through `BUN_OPTIONS`
 `scripts/windows/build-windows.sh` runs on Linux, like the other packages:
 
 1. Reads `https://downloads.claude.ai/releases/win32/<arch>/RELEASES` (what the official installer reads), downloads the full Squirrel `.nupkg` and checks its size and SHA1 against it.
-2. Extracts `app.asar` and applies the Windows patch set: `scripts/apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (custom models, the Extra settings page and its bridge, the profile window title), then everything in `patches/windows/`. The strictness rules are the same as on Linux: a patch that does not match fails the build.
-3. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
-4. Drops the Squirrel updater (the build is portable and does not auto-update) and zips `app\` with `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` and `VERSION.txt`.
+2. Prepares the sources: `scripts/windows/prepare-sources.sh` copies the repo to a temp folder and applies `scripts/windows/upstream-overlay.patch` there (see [Staying in sync with upstream](#staying-in-sync-with-upstream)).
+3. Extracts `app.asar` and applies the Windows patch set from that copy: `apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (custom models, the Extra settings page and its bridge, the profile window title), then everything in `patches/windows/`. The strictness rules are the same as on Linux: a patch that does not match fails the build.
+4. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
+5. Drops the Squirrel updater (the build is portable and does not auto-update) and zips `app\` with `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` and `VERSION.txt`.
 
 ```bash
 scripts/windows/build-windows.sh                    # current release, x64
@@ -64,6 +65,30 @@ scripts/windows/build-windows.sh --arch arm64
 scripts/windows/build-windows.sh --nupkg AnthropicClaude-3.6556.2-full.nupkg --sha1 <SHA1>
 ```
 
-Needs Node 24+, Nim with the `regex` package, `asar` (or `npx`), `curl`, `unzip` and `zip`. The **Build Windows** workflow (`.github/workflows/build-windows.yml`) builds both architectures, boots the x64 build on a Windows runner with a test profile (checking that the patched bundle loads and logs its startup lines), and publishes a release when dispatched with `publish`.
+Needs Node 24+, Nim with the `regex` package, `asar` (or `npx`), `curl`, `unzip` and `zip`. The **Build Windows** workflow (`.github/workflows/build-windows.yml`) builds both architectures, boots the x64 build on a Windows runner with a test profile (checking that the patched bundle loads and logs its startup lines), and publishes a release when run with `publish`.
 
 The Windows version stream is not the Linux one (Windows usually ships first), so a Windows build can meet a bundle the patches were not yet re-fitted to; the build then fails like a Linux build would.
+
+## Staying in sync with upstream
+
+This fork follows [patrickjaja/claude-desktop-extra](https://github.com/patrickjaja/claude-desktop-extra), which ships the Linux packages.
+
+- **The fork only adds files.** Its few edits to upstream files are kept in `scripts/windows/upstream-overlay.patch` and applied to a copy at build time, never committed in place:
+  - the `win32` gates in `js/custom_models_main.js` and `js/extra_settings_main.js`;
+  - the Models-only Settings → Extra nav on Windows (`js/extra_settings_page.js`);
+  - the custom models 8.3 short-path fallback;
+  - `apply_patches.py --windows`, the `patches/windows` Makefile rule;
+  - the Windows cases in two upstream tests.
+
+  So syncing master with upstream never conflicts. If upstream rewrites one of those lines, `prepare-sources.sh` fails loudly instead.
+- **Daily automation:** the **Upstream Sync** workflow (`.github/workflows/upstream-sync.yml`) runs every morning:
+  1. syncs master with GitHub's "Sync fork";
+  2. compares Anthropic's current Windows version with the newest `windows-v` release;
+  3. when either moved, runs Build Windows with `publish`.
+
+  A failed check publishes nothing. The failure is reported in an issue (when Issues are enabled on the repo, otherwise in the run summary; GitHub also emails failed scheduled runs), with a ready-to-paste prompt for fixing it with Claude. A later successful run closes that issue.
+- **Workflow files:** syncing upstream commits that change `.github/workflows/` needs a token with the workflow permission. Add a fine-grained personal access token as the `SYNC_TOKEN` repository secret (this repository only; Contents and Workflows: read and write).
+- **Changing the overlay:**
+  1. run `scripts/windows/prepare-sources.sh /tmp/src`;
+  2. edit the files in `/tmp/src`;
+  3. run `git -C /tmp/src diff > scripts/windows/upstream-overlay.patch`.

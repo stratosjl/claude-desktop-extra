@@ -1,8 +1,13 @@
 name: Build Windows
 
 # The portable Windows 11 build (docs/windows.md): Anthropic's official Windows
-# package, patched with the Windows patch set (scripts/apply_patches.py
-# --windows), integrity hash rewritten, zipped with an installer script.
+# package, patched with the Windows patch set (apply_patches.py --windows on a
+# copy of the sources with scripts/windows/upstream-overlay.patch applied),
+# integrity hash rewritten, zipped with an installer script.
+#
+# Runs on PRs that touch the Windows build, by hand, and from the daily
+# upstream-sync.yml (workflow_call) when upstream or Anthropic's Windows
+# version moved.
 #
 # Built on Linux like every other package, then booted on a real Windows runner:
 # a broken integrity hash or a patch that throws at startup shows up there, not
@@ -19,6 +24,21 @@ on:
         description: 'Publish the zips as a GitHub release (tag windows-v<version>)'
         type: boolean
         default: false
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      publish:
+        type: boolean
+        default: false
+      ref:
+        description: 'Commit or branch to build (empty = the triggering commit)'
+        type: string
+        default: ''
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
   pull_request:
     branches: [master]
     paths:
@@ -29,13 +49,16 @@ on:
       - 'js/custom_models_*.js'
       - 'js/extra_settings_*.js'
       - 'scripts/apply_patches.py'
+      - 'patches/Makefile'
+      - 'scripts/tests/community/test-custom-models-main.mjs'
+      - 'scripts/tests/core/test-extra-settings-dom.mjs'
       - '.github/workflows/build-windows.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: build-windows-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -52,8 +75,11 @@ jobs:
         arch: [x64, arm64]
     outputs:
       version: ${{ steps.build.outputs.version }}
+      sha: ${{ steps.build.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Node, Nim, asar
         run: |
@@ -68,10 +94,15 @@ jobs:
           npm install -g "@electron/asar@${ASAR_VERSION}"
           nimble install -y regex
 
-      - name: Feature tests (custom models, Extra settings, Windows profiles)
+      - name: Feature tests on the overlaid sources
         run: |
-          node scripts/tests/community/test-custom-models-main.mjs
-          node scripts/tests/windows/test-windows-profiles.mjs
+          set -euo pipefail
+          src="$RUNNER_TEMP/src"
+          scripts/windows/prepare-sources.sh "$src"
+          node "$src/scripts/tests/community/test-custom-models-main.mjs"
+          node "$src/scripts/tests/windows/test-windows-profiles.mjs"
+          # The runner image ships Google Chrome, which this test finds itself.
+          node "$src/scripts/tests/core/test-extra-settings-dom.mjs"
 
       - name: Build
         id: build
@@ -86,6 +117,7 @@ jobs:
           zip=$(ls dist/*.zip)
           v=$(basename "$zip" | sed -n 's/^claude-desktop-extra-\(.*\)-windows-.*\.zip$/\1/p')
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -135,7 +167,7 @@ jobs:
           Write-Host 'claude.exe booted the patched bundle under profile ci'
 
   publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: ${{ inputs.publish }}
     needs: [build, smoke-test]
     runs-on: ubuntu-24.04
     permissions:
@@ -149,6 +181,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          SHA: ${{ needs.build.outputs.sha }}
         run: |
           set -euo pipefail
           tag="windows-v${VERSION}"
@@ -158,7 +191,7 @@ jobs:
           else
             # --latest=false: "Latest" stays the Linux release, which the
             # pacman repo (releases/latest/download) and version-check read.
-            gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$SHA" --latest=false \
               --title "Claude Desktop Extra for Windows ${VERSION}" --notes "$notes" \
               dist/*.zip dist/*.sha256
           fi

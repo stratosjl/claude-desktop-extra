@@ -155,16 +155,12 @@ jobs:
           }
 
           HIGHEST_VERSION=$(echo "$RELEASES_JSON" | python3 -c "
-          import sys, json, re
+          import sys, json
           releases = json.load(sys.stdin)
           versions = []
           for r in releases:
-              # Linux releases only: v<version>[-<pkgrel>]. Other tags in the
-              # repo (windows-v<version>, see build-windows.yml) are skipped.
-              m = re.fullmatch(r'v?(\d+(?:\.\d+)*)(?:-.*)?', r['tag_name'])
-              if not m:
-                  continue
-              base = m.group(1)
+              tag = r['tag_name'].lstrip('v')
+              base = tag.split('-')[0] if '-' in tag else tag
               parts = [int(x) for x in base.split('.')]
               versions.append((parts, base))
           if versions:

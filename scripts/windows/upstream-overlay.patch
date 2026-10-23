@@ -1,0 +1,417 @@
+diff --git a/js/custom_models_main.js b/js/custom_models_main.js
+index daa08d8..5db6719 100644
+--- a/js/custom_models_main.js
++++ b/js/custom_models_main.js
+@@ -57,7 +57,8 @@
+  */
+ ;/*__CDB_CUSTOM_MODELS__*/(function () {
+   "use strict";
+-  if (typeof process === "undefined" || process.platform !== "linux") return;
++  // Linux, and the Windows build (scripts/windows/build-windows.sh).
++  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
+   if (globalThis.__cdbCustomModels) return;
+ 
+   var _electron = require("electron");
+@@ -248,7 +249,9 @@
+   }
+ 
+   function expandHome(p) {
+-    return typeof p === "string" && p.indexOf("~/") === 0 ? _path.join(_os.homedir(), p.slice(2)) : p;
++    // A leading ~\ too on Windows, where that is how a home-relative path is written.
++    var home = typeof p === "string" && (p.indexOf("~/") === 0 || (process.platform === "win32" && p.indexOf("~\\") === 0));
++    return home ? _path.join(_os.homedir(), p.slice(2)) : p;
+   }
+   function secretsPath() {
+     var d = pathFor(SUBDIR);
+@@ -1171,6 +1174,35 @@
+       return null;
+     }
+   }
++  // Windows only: the preload path with its profile directory in 8.3 short
++  // form (C:\Users\JOHNSM~1\...\Claude), so it carries no space. Only the
++  // profile directory is shortened: the custom-models\preload.js tail stays
++  // spelled out, which remoteSpawn() recognises. null when the volume does not
++  // generate short names or the path holds a character cmd would expand.
++  var shortPathCache = Object.create(null);
++  function shortPreloadPath(p) {
++    if (process.platform !== "win32") return null;
++    var profileDir = _path.dirname(_path.dirname(p));
++    var tail = p.slice(profileDir.length);
++    if (/\s/.test(tail) || /["%^!&|<>]/.test(profileDir)) return null;
++    if (!(profileDir in shortPathCache)) {
++      var short = null;
++      try {
++        // windowsVerbatimArguments: Node's own quoting (\") means nothing to
++        // cmd. The path is checked above for every character cmd treats
++        // specially inside quotes.
++        var out = require("child_process").execFileSync(process.env.ComSpec || "cmd.exe",
++          ["/d", "/c", "for %I in (\"" + profileDir + "\") do @echo %~sI"],
++          { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true, timeout: 5000 });
++        var line = String(out).split(/\r?\n/)[0].trim();
++        if (line && !/\s/.test(line) && _path.isAbsolute(line)) short = line;
++      } catch (e) { log("short path lookup failed: " + (e && e.message ? e.message : String(e))); }
++      shortPathCache[profileDir] = short;
++      if (short) log("profile path has a space; the preload is loaded through its short form " + short);
++    }
++    return shortPathCache[profileDir] ? shortPathCache[profileDir] + tail : null;
++  }
++
+   // The routing payload the preload works from: providers with their keys,
+   // models with what the sanitiser needs, the app-wide web-search target.
+   function routesPayload(cfg) {
+@@ -1230,9 +1262,12 @@
+       var preload = ensurePreload();
+       if (!preload) return {};
+       // BUN_OPTIONS is split on whitespace: a preload path with a space in it
+-      // would load nothing, or break the CLI's start. Leave the session alone.
++      // would load nothing, or break the CLI's start. On Windows, where the
++      // user folder often has one (C:\Users\John Smith), try its 8.3 short
++      // form first; otherwise leave the session alone.
++      if (/\s/.test(preload)) preload = shortPreloadPath(preload) || preload;
+       if (/\s/.test(preload)) {
+-        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry - sessions are not routed");
++        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry" + (process.platform === "win32" ? " (and the volume gave no space-free 8.3 short name)" : "") + " - sessions are not routed");
+         return {};
+       }
+       syncRoutes();
+diff --git a/js/extra_settings_main.js b/js/extra_settings_main.js
+index 50a3da5..552d169 100644
+--- a/js/extra_settings_main.js
++++ b/js/extra_settings_main.js
+@@ -26,7 +26,9 @@
+  */
+ ;/*__CDB_EXTRA_SETTINGS__*/(function () {
+   "use strict";
+-  if (typeof process === "undefined" || process.platform !== "linux") return;
++  // Linux, and the Windows build (scripts/windows/build-windows.sh), which
++  // ships this page with the Models panel only (see NAV_ITEMS in the page).
++  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
+ 
+   var _electron = require("electron");
+   var _app = _electron.app;
+diff --git a/js/extra_settings_page.js b/js/extra_settings_page.js
+index 0036574..c7f0e50 100644
+--- a/js/extra_settings_page.js
++++ b/js/extra_settings_page.js
+@@ -563,6 +563,13 @@
+     { kind: "flags", label: "Anthropic", icon: ICON_FLAGS, tooltip: "Anthropic Features" },
+     { kind: "deploy", label: "Deployment", icon: ICON_DEPLOY }
+   ];
++  // The Windows build (scripts/windows/build-windows.sh) carries custom models
++  // only: the other panels drive patches it does not include, or Linux paths
++  // (/etc/claude-desktop) that do not exist there.
++  var WINDOWS_NAV = { models: true };
++  if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
++    NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
++  }
+ 
+   function applyAttrs(node, map) {
+     Object.keys(map).forEach(function (k) { node.setAttribute(k, map[k]); });
+diff --git a/patches/Makefile b/patches/Makefile
+index d740a96..8d1877b 100644
+--- a/patches/Makefile
++++ b/patches/Makefile
+@@ -1,9 +1,10 @@
+ # Build every patch source into a same-named executable next to it.
+ #
+-# Sources live in three category subdirectories:
++# Sources live in four category subdirectories:
+ #   linux/      Linux compatibility fixes (always on)
+ #   core/       always-on infrastructure (themes, extra settings, profiles)
+ #   community/  optional value-add features
++#   windows/    Windows build only (scripts/windows/build-windows.sh)
+ #
+ # Usage:
+ #   make -j$(nproc)      # parallel build (default target = all)
+@@ -21,7 +22,7 @@
+ NIM       ?= nim
+ NIMFLAGS  ?= c -d:release --opt:speed --mm:orc --hints:off
+ 
+-SRCS := $(wildcard linux/*.nim community/*.nim core/*.nim)
++SRCS := $(wildcard linux/*.nim community/*.nim core/*.nim windows/*.nim)
+ BINS := $(SRCS:.nim=)
+ 
+ ifeq ($(strip $(SRCS)),)
+@@ -146,5 +147,8 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
+ # .jsonc template at runtime.
+ core/add_growthbook_overrides: ../js/growthbook_overrides.js
+ 
++# Windows build only: profile selection and sign-in callback routing.
++windows/add_windows_profiles: ../js/windows_profiles_main.js
++
+ clean:
+ 	@rm -rf $(BINS) .nimcache
+diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
+index 8cc014f..61d651d 100644
+--- a/scripts/apply_patches.py
++++ b/scripts/apply_patches.py
+@@ -11,7 +11,11 @@ target location.
+ Target files are staged on tmpfs so each patch reads/writes the staged copy,
+ and only one real disk write happens per target at the end.
+ 
+-Usage: apply_patches.py <patches_dir> <app_dir>
++Usage: apply_patches.py [--windows] <patches_dir> <app_dir>
++
++--windows applies the Windows build's set instead (scripts/windows/
++build-windows.sh): the WINDOWS_PATCH_SET patches from the category subdirs,
++then every patch in patches/windows/, which no Linux build discovers.
+ 
+ <app_dir> is the directory that contains app.asar.contents/, i.e. the same
+ path that build-patched-tarball.sh uses as "$WORK_DIR/app".
+@@ -35,6 +39,22 @@ PATCH_SUBDIRS = ("linux", "core", "community")
+ # remove a patch.
+ EXPECTED_PATCH_COUNT = 61
+ 
++# The Windows build (--windows). patches/windows/ holds the Windows-only
++# patches; they are applied AFTER the shared ones (on a shared target, their
++# prefix injections then land ahead of the others). Pinned like
++# EXPECTED_PATCH_COUNT.
++WINDOWS_SUBDIR = "windows"
++EXPECTED_WINDOWS_PATCH_COUNT = 1
++# Shared patches the Windows build carries: custom models, the Settings ->
++# Extra page that configures them, and the profile name in the window title.
++# Everything else is Linux-specific or not ported yet (docs/windows.md).
++WINDOWS_PATCH_SET = (
++    "add_feature_custom_models",
++    "add_feature_extra_settings",
++    "add_feature_extra_settings_bridge",
++    "fix_profile_window_title",
++)
++
+ # Byte strings that only ever appear in a bundle one of our builds already
+ # patched: every injected identifier starts with `__cdb`, and
+ # `__nav_spoof_applied` is the marker of the navigator spoof removed for issue
+@@ -214,12 +234,58 @@ def run_nim_patch(nim_bin: Path, target_file: Path) -> bool:
+         return False
+ 
+ 
++def select_windows_sources(patches_dir: Path, sources):
++    """The Windows build's patches: WINDOWS_PATCH_SET, then patches/windows/."""
++    by_stem = {pf.stem: (pf, t, ty) for pf, t, ty in sources}
++    missing = [n for n in WINDOWS_PATCH_SET if n not in by_stem]
++    if missing:
++        print(
++            f"[ERROR] WINDOWS_PATCH_SET names patch(es) that do not exist: "
++            f"{', '.join(missing)}",
++            file=sys.stderr,
++        )
++        sys.exit(1)
++    # Keep the shared patches in their usual (basename) order.
++    shared = [s for s in sources if s[0].stem in WINDOWS_PATCH_SET]
++    win_dir = patches_dir / WINDOWS_SUBDIR
++    if not win_dir.is_dir():
++        print(f"[ERROR] Missing patch directory: {win_dir}", file=sys.stderr)
++        sys.exit(1)
++    own = []
++    for pf in sorted((p for p in win_dir.iterdir() if p.is_file()), key=lambda p: p.name):
++        target_spec, ptype = parse_headers(pf)
++        if target_spec and ptype:
++            own.append((pf, target_spec, ptype))
++    if len(own) != EXPECTED_WINDOWS_PATCH_COUNT:
++        print(
++            f"\n[ERROR] Discovered {len(own)} Windows patch source(s) in "
++            f"{win_dir}, expected {EXPECTED_WINDOWS_PATCH_COUNT}.\n"
++            "        If you added or removed one, update "
++            "EXPECTED_WINDOWS_PATCH_COUNT in this script.",
++            file=sys.stderr,
++        )
++        sys.exit(1)
++    print(
++        f"  Windows build: {len(shared)} shared patch(es) + {len(own)} "
++        f"Windows patch(es)"
++    )
++    return shared + own
++
++
+ def main():
+-    if len(sys.argv) != 3:
+-        print("Usage: apply_patches.py <patches_dir> <app_dir>", file=sys.stderr)
++    args = sys.argv[1:]
++    windows = False
++    if args[:1] == ["--windows"]:
++        windows = True
++        args = args[1:]
++    if len(args) != 2:
++        print(
++            "Usage: apply_patches.py [--windows] <patches_dir> <app_dir>",
++            file=sys.stderr,
++        )
+         sys.exit(1)
+-    patches_dir = Path(sys.argv[1]).resolve()
+-    app_dir = Path(sys.argv[2]).resolve()
++    patches_dir = Path(args[0]).resolve()
++    app_dir = Path(args[1]).resolve()
+ 
+     if not patches_dir.is_dir():
+         print(f"[ERROR] patches_dir not found: {patches_dir}", file=sys.stderr)
+@@ -268,6 +334,9 @@ def main():
+         )
+         sys.exit(1)
+ 
++    if windows:
++        sources = select_windows_sources(patches_dir, sources)
++
+     replace_jobs = []  # list[(patch_file, real_target)]
+     nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
+ 
+diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
+index d2bf756..eff89ca 100755
+--- a/scripts/run-feature-tests.sh
++++ b/scripts/run-feature-tests.sh
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env bash
+-# Run every feature test harness under scripts/tests/{community,core}/.
++# Run every feature test harness under scripts/tests/{community,core,linux,windows}/.
+ #
+ # WHY THIS EXISTS
+ # ---------------
+@@ -19,6 +19,7 @@
+ #   scripts/run-feature-tests.sh community    # one category only
+ #   scripts/run-feature-tests.sh core
+ #   scripts/run-feature-tests.sh linux
++#   scripts/run-feature-tests.sh windows
+ 
+ set -uo pipefail
+ 
+@@ -29,18 +30,18 @@ TESTS_DIR="$SCRIPT_DIR/tests"
+ # `git mv` changes what gets discovered, this fails rather than quietly reporting
+ # a green run over a shrunken suite - the same reasoning as EXPECTED_PATCH_COUNT
+ # in scripts/apply_patches.py. Bump this when you add or remove a harness.
+-EXPECTED_TEST_HARNESSES=47
++EXPECTED_TEST_HARNESSES=48
+ 
+-CATEGORIES=(community core linux)
++CATEGORIES=(community core linux windows)
+ 
+ usage() {
+-    echo "Usage: $(basename "$0") [community|core|linux]" >&2
++    echo "Usage: $(basename "$0") [community|core|linux|windows]" >&2
+     exit 2
+ }
+ 
+ case "${1-}" in
+     "")            ENFORCE_COUNT=true ;;
+-    community|core|linux) CATEGORIES=("$1"); ENFORCE_COUNT=false ;;
++    community|core|linux|windows) CATEGORIES=("$1"); ENFORCE_COUNT=false ;;
+     -h|--help)     usage ;;
+     *)             echo "[ERROR] Unknown category: $1" >&2; usage ;;
+ esac
+diff --git a/scripts/tests/community/test-custom-models-main.mjs b/scripts/tests/community/test-custom-models-main.mjs
+index 691ba23..78c947b 100644
+--- a/scripts/tests/community/test-custom-models-main.mjs
++++ b/scripts/tests/community/test-custom-models-main.mjs
+@@ -22,7 +22,8 @@ const PRELOAD_STUB = "/*preload*/";
+ 
+ // Runs the module; returns the IPC handlers, the global it exports, the
+ // web-contents-created listener and the diag lines it logged.
+-function load(profileDir, env) {
++function load(profileDir, env, opts) {
++  opts = opts || {};
+   const handlers = {};
+   const appListeners = {};
+   const diag = [];
+@@ -35,8 +36,9 @@ function load(profileDir, env) {
+   };
+   const src = readFileSync(join(ROOT, "js/custom_models_main.js"), "utf8")
+     .replace('"__CDB_CM_PRELOAD_SRC__"', JSON.stringify(PRELOAD_STUB));
+-  const sandbox = { require: (m) => (m === "electron" ? electron : Module.createRequire(import.meta.url)(m)),
+-    process: { platform: "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
++  const sandbox = { require: (m) => (m === "electron" ? electron
++      : (opts.modules && opts.modules[m]) || Module.createRequire(import.meta.url)(m)),
++    process: { platform: opts.platform || "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
+     fetch: (url, init) => { sandbox.__fetchCalls.push({ url, init }); return sandbox.__fetchImpl(url, init); } };
+   sandbox.__fetchCalls = [];
+   sandbox.__fetchImpl = () => Promise.resolve(new Response(JSON.stringify({ id: "msg" }), { status: 200 }));
+@@ -1662,5 +1664,51 @@ async function settle() { await new Promise((r) => setTimeout(r, 10)); }
+   rmSync(dir, { recursive: true, force: true });
+ }
+ 
++// --- Windows: a profile path with a space goes through its 8.3 short form ---
++// The Windows build (scripts/windows/build-windows.sh) runs this module with
++// userData under C:\Users\<name>, which often has a space BUN_OPTIONS cannot
++// carry. The short-name lookup is cmd's job; it is stubbed here.
++{
++  const dir = mkdtempSync(join(tmpdir(), "cdb cm win-"));
++  writeFileSync(join(dir, "claude-desktop-extra.jsonc"), PROVIDERS);
++  switchOn(dir);
++  const calls = [];
++  let answer = "/short/CDBCMW~1\r\n";
++  const cp = { execFileSync: (file, args, o) => { calls.push({ file, args, o }); return answer; } };
++  const { api, diag } = load(dir, { ComSpec: "C:\\Windows\\system32\\cmd.exe" }, { platform: "win32", modules: { child_process: cp } });
++  const env = api.cliEnv();
++  ok(env.BUN_OPTIONS === "--preload=/short/CDBCMW~1/custom-models/preload.js",
++     "win32: the preload is passed through the short profile path: " + env.BUN_OPTIONS);
++  ok(calls.length === 1 && calls[0].file === "C:\\Windows\\system32\\cmd.exe" &&
++     calls[0].args.join(" ") === '/d /c for %I in ("' + dir + '") do @echo %~sI' &&
++     calls[0].o.windowsVerbatimArguments === true && calls[0].o.windowsHide === true,
++     "win32: only the profile directory is shortened, by cmd, quoted verbatim and hidden");
++  ok(env.CDB_CUSTOM_MODELS_ROUTES === join(dir, "custom-models", "routes.json"),
++     "win32: the other paths travel in their own variables, spaces and all");
++  api.cliEnv();
++  ok(calls.length === 1, "win32: the short form is looked up once per profile");
++  const spawnOpts = { env: Object.assign({ PATH: "x" }, env) };
++  api.remoteSpawn(spawnOpts);
++  ok(!("BUN_OPTIONS" in spawnOpts.env) && !("CDB_CUSTOM_MODELS_JSON" in spawnOpts.env),
++     "win32: an SSH/WSL session still loses the short-form preload");
++  // A volume without 8.3 names: cmd echoes the long path back.
++  answer = dir + "\r\n";
++  const r2 = load(dir, {}, { platform: "win32", modules: { child_process: cp } });
++  ok(JSON.stringify(r2.api.cliEnv()) === "{}" && r2.diag.some((l) => /8\.3 short name/.test(l)),
++     "win32 without short names: the session is left alone, and the log says why");
++  // Characters cmd would expand are never handed to it.
++  const calls0 = calls.length;
++  const pct = mkdtempSync(join(tmpdir(), "cdb cm %x%-"));
++  writeFileSync(join(pct, "claude-desktop-extra.jsonc"), PROVIDERS);
++  switchOn(pct);
++  const r3 = load(pct, {}, { platform: "win32", modules: { child_process: cp } });
++  ok(JSON.stringify(r3.api.cliEnv()) === "{}" && calls.length === calls0, "win32: a path with % is not passed to cmd");
++  // Linux keeps refusing a path with a space, without asking anyone.
++  const r4 = load(dir, {}, { modules: { child_process: cp } });
++  ok(JSON.stringify(r4.api.cliEnv()) === "{}" && calls.length === calls0, "linux: a path with a space is still refused, no lookup");
++  rmSync(dir, { recursive: true, force: true });
++  rmSync(pct, { recursive: true, force: true });
++}
++
+ console.log(`\n${pass} passed, ${fail} failed`);
+ process.exit(fail ? 1 : 0);
+diff --git a/scripts/tests/core/test-extra-settings-dom.mjs b/scripts/tests/core/test-extra-settings-dom.mjs
+index 6416ab0..fd0fb84 100644
+--- a/scripts/tests/core/test-extra-settings-dom.mjs
++++ b/scripts/tests/core/test-extra-settings-dom.mjs
+@@ -1915,6 +1915,16 @@ async function run() {
+   const items = ourItems();
+   const box = navbox();
+ 
++  // --- the Windows build: the page runs with navigator.platform "Win32" and
++  //     offers the Models panel only (scripts/windows/build-windows.sh).
++  if (kind === "windows") {
++    ok(items.length === 1, "Windows: one row was added (" + items.length + ")");
++    ok(items.length === 1 && items[0].textContent.trim() === "Models",
++       "Windows: the row is Models (" + (items[0] ? items[0].textContent.trim() : "none") + ")");
++    if (items.length === 1) await assertPanelMounts(items[0]);
++    return;
++  }
++
+   ok(items.length === LABELS.length, LABELS.length + " rows were added (" + items.length + ")");
+   ok(!!document.querySelector(".cdbx-navgroup"), "the rainbow Extra label is in the DOM");
+   ok(document.querySelector(".cdbx-navgroup").textContent === "Extra", "it says Extra");
+@@ -2530,6 +2540,9 @@ window.cdbExtra = {
+ };
+ </script>
+ <script>
++${name === "windows" ? 'Object.defineProperty(navigator, "platform", { get: function () { return "Win32"; } });' : ""}
++</script>
++<script>
+ // Exactly how the main process delivers it: the source as one evaluated string,
+ // whose value is the status line executeJavaScript() logs.
+ var __status = eval(${JSON.stringify(PAGE_JS)});
+@@ -2564,7 +2577,8 @@ const scenarios = [
+   ["es-testid", FIXTURE_ES(true)],
+   ["es-labels", FIXTURE_ES(false)],
+   ["no-headers", FIXTURE_NO_HEADERS],
+-  ["bare", FIXTURE_BARE]
++  ["bare", FIXTURE_BARE],
++  ["windows", FIXTURE_REAL(true, false)]
+ ];
+ 
+ let pass = 0;

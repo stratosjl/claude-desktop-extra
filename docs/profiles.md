@@ -2,8 +2,6 @@
 
 How the profile system works, end to end. For the short version, see [Multiple Profiles in the README](../README.md#multiple-profiles).
 
-On Windows, profiles work through Start Menu shortcuts instead of the launcher: see [windows.md](windows.md#profiles).
-
 Run several Claude Desktop instances side by side, each logged in to a different account, with fully isolated state for both Desktop and the Claude Code CLI it spawns. Useful for separating work from personal accounts, juggling SSO tenants, or testing config without touching your main install.
 
 ### Quick start

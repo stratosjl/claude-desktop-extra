@@ -242,10 +242,6 @@ Run on Bedrock, Vertex AI, Azure AI Foundry or any Anthropic-compatible gateway,
 
 Use models from other providers (DeepSeek, Kimi, GLM, MiniMax, Qwen, OpenRouter, a gateway, or Anthropic's API on your API credit) in the Code tab's model picker, next to Anthropic's. Sessions on them use your own key; everything else stays on your subscription. Off by default: add a provider in Settings → Extra → Models and turn it on. Details: [docs/custom-models.md](docs/custom-models.md).
 
-## Windows 11 (experimental)
-
-A portable Windows build of Anthropic's official Windows app with [custom models](#custom-models) and multiple profiles: unzip, run `Install.cmd`, and add profiles with `Install.cmd -Profile work`. Built by the **Build Windows** workflow. Details and caveats (unsigned exe, no auto-update): [docs/windows.md](docs/windows.md).
-
 ## Feature Flag Overrides (advanced)
 
 Override Anthropic's server-side feature flags in `~/.config/Claude/claude-desktop-extra.jsonc`, or flip them in Settings → Extra → Anthropic Features. Details: [docs/feature-flags.md](docs/feature-flags.md).
