@@ -155,7 +155,9 @@ jobs:
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber dist/*.zip dist/*.sha256
           else
-            gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            # --latest=false: "Latest" stays the Linux release, which the
+            # pacman repo (releases/latest/download) and version-check read.
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
               --title "Claude Desktop Extra for Windows ${VERSION}" --notes "$notes" \
               dist/*.zip dist/*.sha256
           fi
