@@ -938,5 +938,27 @@ const ANTHROPIC = "https://api.anthropic.com/v1/messages";
   ok(!!api, "no FetchSession (older Bun): the preload loads as before");
 }
 
+// --- which binary it hooks ---------------------------------------------------
+// Outside selftest the preload hooks fetch only inside the Claude Code binary:
+// claude on Linux, claude.exe in the Windows app (binaryName for win32). Any
+// other Bun program that inherits BUN_OPTIONS is left alone.
+{
+  const hooks = (execPath) => {
+    const rawFetch = () => Promise.resolve(new Response("{}"));
+    const sandbox = {
+      require: (m) => Module.createRequire(import.meta.url)(m),
+      process: { env: { CDB_CUSTOM_MODELS_JSON: JSON.stringify(CONFIG) }, pid: 4242, execPath },
+      Bun: {}, fetch: rawFetch, Response, Headers, URL, Buffer, console, TextDecoder, TextEncoder, ReadableStream
+    };
+    sandbox.globalThis = sandbox;
+    vm.runInNewContext(readFileSync(join(ROOT, "js/custom_models_preload.js"), "utf8"), vm.createContext(sandbox));
+    return sandbox.fetch !== rawFetch;
+  };
+  ok(hooks("/home/u/.config/Claude/claude-code/2.1.300/claude"), "hooks fetch in claude (Linux)");
+  ok(hooks("/opt/Claude/claude-code/2.1.300/claude.exe"), "hooks fetch in claude.exe (the Windows app's binary name)");
+  ok(!hooks("/usr/bin/bun"), "leaves another Bun program alone");
+  ok(!hooks("/opt/x/bun.exe"), "leaves another Bun program alone (.exe)");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

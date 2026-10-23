@@ -21,6 +21,10 @@
 // flag write plus a published stop promise that starts await - since it was
 // written; this file is the GNOME side catching up. Run headless: the bridge is a
 // stub, no portal and no GNOME needed.
+//
+// Cases 8-12 cover the default display: with no display selected, a screenshot
+// targets the monitor `screens` marks is_shared (the portal session streams only
+// what the user shared in the consent dialog), queried after session-start.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -31,9 +35,18 @@ const EXECUTOR = path.join(ROOT, "js", "cu_linux_executor.js");
 
 // session-start takes CONSENT_MS (the XDG RemoteDesktop dialog); everything else is instant.
 // reply(sub, args) may return a string (stdout) or throw (the subprocess failed);
-// subcommands it does not handle answer "{}".
-function makeRig(consentMs, reply) {
-  const log = [];
+// subcommands it does not handle answer "{}". displays (optional) are the
+// Electron displays; displays[displays.primaryIdx || 0] is Electron's primary.
+// delays (optional, mutable) maps a subcommand to its reply delay in ms;
+// reply.onCall(sub, args), when set, computes stdout at CALL time instead.
+// The GNOME session daemon's runtime files, which the executor checks before a
+// portal command to notice a daemon that `claude-desktop --reset-screen-sharing`
+// ended or that crashed: socket present by default, no pidfile (pid null).
+// Case [22] changes them. stopped = the stopped-by-user marker the daemon
+// writes when the user clicks "Stop sharing" (case [25]).
+const rigSocket = { present: true, pid: null, stopped: false };
+function makeRig(consentMs, reply, displays, delays) {
+  const log = [], argv = [];
   const cp = {
     execFileSync(bin, args) {
       const base = path.basename(String(bin));
@@ -47,19 +60,22 @@ function makeRig(consentMs, reply) {
       const base = path.basename(String(bin));
       const sub = (args || [])[0];
       log.push("CALL " + sub);
-      const delay = sub === "session-start" ? consentMs : 0;
+      argv.push((args || []).join(" "));
+      const delay = sub === "session-start" ? consentMs : ((delays && delays[sub]) || 0);
+      const early = reply && reply.onCall ? reply.onCall(sub, args) : undefined;
       setTimeout(() => {
         log.push("DONE " + sub);
         let out = "{}";
-        if (reply) { try { out = reply(sub, args) ?? "{}"; } catch (e) { cb(e, "", String(e.message)); return; } }
+        if (early !== undefined) out = early;
+        else if (reply) { try { out = reply(sub, args) ?? "{}"; } catch (e) { cb(e, "", String(e.message)); return; } }
         cb(null, out, "");
       }, delay);
     },
     spawn() { return { on() {}, unref() {} }; }
   };
   const electron = {
-    screen: { getAllDisplays: () => [], getPrimaryDisplay: () => ({ id: 1, bounds: {x:0,y:0,width:1,height:1}, workArea:{x:0,y:0,width:1,height:1}, scaleFactor:1, label:"e" }), getCursorScreenPoint: () => ({x:0,y:0}) },
-    desktopCapturer: { getSources: async () => [] },
+    screen: { getAllDisplays: () => displays || [], getPrimaryDisplay: () => (displays && displays[displays.primaryIdx || 0]) || ({ id: 1, bounds: {x:0,y:0,width:1,height:1}, workArea:{x:0,y:0,width:1,height:1}, scaleFactor:1, label:"e" }), getCursorScreenPoint: () => ({x:0,y:0}) },
+    desktopCapturer: { getSources: async () => { log.push("CAPTURER"); return []; } },
     clipboard: { readText: () => "", writeText: () => {} },
     nativeImage: {}
   };
@@ -68,7 +84,12 @@ function makeRig(consentMs, reply) {
     if (id === "electron") return electron;
     if (id === "path") return path;
     if (id === "os") return os;
-    if (id === "fs") return { readFileSync: () => Buffer.alloc(0), writeFileSync(){}, unlinkSync(){}, existsSync: () => false, renameSync(){}, accessSync(){ throw new Error("no"); }, readdirSync: () => [], statSync: () => ({ isDirectory: () => false }) };
+    if (id === "fs") return {
+      readFileSync: (p) => String(p).endsWith("/gnome-portal-bridge/session.pid") ? String(rigSocket.pid) : Buffer.alloc(0),
+      writeFileSync(){}, unlinkSync(){},
+      existsSync: (p) => String(p).endsWith("/gnome-portal-bridge/session.sock") ? rigSocket.present
+        : String(p).endsWith("/gnome-portal-bridge/session.pid") ? rigSocket.pid !== null
+        : String(p).endsWith("/gnome-portal-bridge/stopped-by-user") ? rigSocket.stopped : false, renameSync(){}, accessSync(){ throw new Error("no"); }, readdirSync: () => [], statSync: () => ({ isDirectory: () => false }) };
     throw new Error("unexpected require " + id);
   };
   globalThis.__cdbDiag = (m) => log.push("DIAG " + String(m));
@@ -83,7 +104,7 @@ function makeRig(consentMs, reply) {
   new Function("require", "process", src)(requireStub, process);
   const ex = globalThis.__linuxExecutor;
   log.length = 0;
-  return { ex, log, restore(){ delete globalThis.__linuxExecutor; } };
+  return { ex, log, argv, cp, restore(){ delete globalThis.__linuxExecutor; } };
 }
 
 
@@ -240,6 +261,914 @@ console.log("\n[7] a failed `screens` enumeration is retried after the cooldown 
   } finally {
     Date.now = realNow;
     rig.restore();
+  }
+}
+
+// ── Default display = the monitor shared in the portal dialog (#293) ──────────
+// The screenshot handler (js/cu_handler_injection.js), staged the way sub-patch 6
+// of fix_computer_use_linux.nim stages it, run against the real executor above.
+const INJECTION = path.join(ROOT, "js", "cu_handler_injection.js");
+function buildHandler() {
+  let src = readFileSync(INJECTION, "utf8").trim();
+  for (const [ph, v] of [["__SELF__", "__self"], ["__MAKE_DISPATCH__", "__dispatch"], ["__STATE__", "__state"],
+                         ["__TOOL_NAME__", "__tool"], ["__INPUT__", "__input"], ["__SESSION__", "__session"]]) {
+    src = src.split(ph).join(v);
+  }
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const fn = new AsyncFunction("process", "require", "__self", "__dispatch", "__state", "__tool", "__input", "__session", src);
+  return (tool, input) => fn({ platform: "linux", env: process.env }, () => ({}), {}, null, {}, tool, input || {}, {});
+}
+const handler = buildHandler();
+// Electron: built-in panel is the primary (index 0), external monitor right of it (index 1).
+const EDISPLAYS = [
+  { id: 1, label: "Built-in", size: { width: 1920, height: 1080 }, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 },
+  { id: 2, label: "External", size: { width: 2560, height: 1440 }, bounds: { x: 1920, y: 0, width: 2560, height: 1440 }, scaleFactor: 1 }
+];
+const scr = (name, x, w, h, primary, shared) => {
+  const o = { id: name, name, geometry: { x, y: 0, width: w, height: h }, scale: 1, is_primary: primary, is_active: true };
+  if (shared !== undefined) o.is_shared = shared;
+  return o;
+};
+// screens answers WITHOUT is_shared until session-start has finished (no daemon
+// yet), then with the given share flags - the bridge contract.
+function shareRig(sharedFlags, displays) {
+  let daemon = false, screensCalls = 0;
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start") { daemon = true; return "{}"; }
+    if (sub === "screens") {
+      screensCalls++;
+      return JSON.stringify([scr("eDP-1", 0, 1920, 1080, true, daemon ? sharedFlags[0] : undefined),
+                             scr("HDMI-1", 1920, 2560, 1440, false, daemon ? sharedFlags[1] : undefined)]);
+    }
+    if (sub === "zoom") return JSON.stringify({ base64: "QUJD", width: 10, height: 10 });
+    return "{}";
+  }, displays || EDISPLAYS);
+  globalThis.__cuPinnedDisplay = undefined; globalThis.__cuLastShot = null; globalThis.__cuActiveOrigin = undefined;
+  rig.screensCalls = () => screensCalls;
+  return rig;
+}
+const zoomArgs = (rig) => rig.argv.filter(a => a.startsWith("zoom "));
+
+console.log("\n[8] no display selected: the monitor shared in the portal dialog is the default (#293)");
+{
+  const rig = shareRig([false, true]);
+  // A zoom BEFORE the lock caches a list without is_shared (no daemon yet).
+  await rig.ex.zoom({ x: 10, y: 10, w: 10, h: 10 }, 1, null);
+  ok(rig.screensCalls() === 1, "a pre-session screens list is fetched and cached", String(rig.screensCalls()));
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const r = await handler("screenshot", {});
+  ok(r && r.content && r.content[0] && r.content[0].type === "image", "the screenshot returns an image", JSON.stringify(r).slice(0, 120));
+  ok(rig.screensCalls() === 2, "session-start refreshed the cached screens list", String(rig.screensCalls()));
+  const seq = calls(rig.log);
+  ok(seq.lastIndexOf("CALL screens") > seq.indexOf("DONE session-start"),
+     "screens is re-queried after the session daemon is up", seq.join(" "));
+  const z = zoomArgs(rig);
+  ok(/--display HDMI-1$/.test(z[z.length - 1] || ""), "the capture targets the shared monitor, not Electron's primary", z[z.length - 1]);
+  ok(globalThis.__cuLastShot && globalThis.__cuLastShot.originX === 1920,
+     "click coordinates map onto the shared monitor's origin", JSON.stringify(globalThis.__cuLastShot));
+  ok(rig.log.some(l => l.includes("default display: shared monitor HDMI-1") && l.includes("Electron display 1")),
+     "the choice is logged through __cdbDiag");
+  await handler("screenshot", { display_number: 0 });
+  const z0 = zoomArgs(rig);
+  ok(/--display eDP-1$/.test(z0[z0.length - 1] || "") && globalThis.__cuLastShot.originX === 0,
+     "an explicit display_number 0 beats the shared default", z0[z0.length - 1]);
+  rig.restore();
+}
+
+console.log("\n[9] display_number 0 is a real selection, not \"unset\"");
+{
+  // Electron's primary is display 1 here, so `display_number||...||primary`
+  // would have turned an explicit 0 into 1.
+  const primaryExternal = [...EDISPLAYS]; primaryExternal.primaryIdx = 1;
+  const rig = shareRig([undefined, undefined], primaryExternal);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", { display_number: 0 });
+  ok(globalThis.__cuLastShot.originX === 0, "display_number 0 captures display 0, not Electron's primary",
+     JSON.stringify(globalThis.__cuLastShot));
+  await handler("screenshot", {});
+  ok(globalThis.__cuLastShot.originX === 1920, "with no display_number the primary (display 1) is used");
+  rig.restore();
+}
+
+console.log("\n[10] no is_shared (bridge without the field) keeps Electron's primary");
+{
+  const rig = shareRig([undefined, undefined]);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", {});
+  const z = zoomArgs(rig);
+  ok(/--display eDP-1$/.test(z[z.length - 1] || "") && globalThis.__cuLastShot.originX === 0,
+     "falls back to Electron's primary", z[z.length - 1]);
+  ok(!rig.log.some(l => l.includes("default display:")), "and logs no default-display choice");
+  rig.restore();
+}
+
+console.log("\n[11] several shared: the Mutter primary among them wins");
+{
+  // Electron and Mutter disagree: Electron's primary is the external monitor.
+  const swapped = [EDISPLAYS[1], EDISPLAYS[0]];
+  const rig = shareRig([true, true], swapped);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", {});
+  ok(globalThis.__cuLastShot.originX === 0, "the shared Mutter primary (eDP-1) is used, not Electron's primary",
+     JSON.stringify(globalThis.__cuLastShot));
+  rig.restore();
+}
+
+console.log("\n[12] a shared monitor with no matching Electron display falls back, loudly");
+{
+  const rig = shareRig([false, true], [EDISPLAYS[0], { ...EDISPLAYS[1], bounds: { x: 3840, y: 0, width: 2560, height: 1440 } }]);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", {});
+  ok(globalThis.__cuLastShot.originX === 0, "Electron's primary is used");
+  ok(rig.log.some(l => l.includes("[claude-cu] default display: shared monitor HDMI-1 at 1920,0 matches no Electron display")),
+     "and the mismatch is logged through __cdbDiag");
+  rig.restore();
+}
+
+const screensJson = (flags) => JSON.stringify([scr("eDP-1", 0, 1920, 1080, true, flags[0]), scr("HDMI-1", 1920, 2560, 1440, false, flags[1])]);
+const ZOOM_OK = JSON.stringify({ base64: "QUJD", width: 10, height: 10 });
+const resetShot = () => { globalThis.__cuPinnedDisplay = undefined; globalThis.__cuLastShot = null; globalThis.__cuActiveOrigin = undefined; };
+const countCalls = (rig, sub) => rig.log.filter(l => l === "CALL " + sub).length;
+
+console.log("\n[13] a stale in-flight screens reply landing after a session start is not cached");
+{
+  // The first fetch starts before session-start and still carries the share flags
+  // of an earlier daemon; it resolves only after the new session invalidated the cache.
+  let share = [true, false];
+  const delays = { screens: 100 };
+  const reply = (sub) => sub === "zoom" ? ZOOM_OK : "{}";
+  reply.onCall = (sub) => {
+    if (sub === "session-start") { share = [false, true]; return "{}"; }
+    if (sub === "screens") return screensJson(share);
+    return undefined;
+  };
+  const rig = makeRig(20, reply, EDISPLAYS, delays);
+  resetShot();
+  const z = rig.ex.zoom({ x: 10, y: 10, w: 10, h: 10 }, 1, null);   // screens in flight (100 ms)
+  await sleep(10);
+  rig.ex.__setLockHeld(true);                                      // session-start at ~30 ms
+  await z; await sleep(50);
+  delays.screens = 0;
+  await handler("screenshot", {});
+  ok(countCalls(rig, "screens") === 2, "the screenshot re-queries screens instead of using the stale reply", String(countCalls(rig, "screens")));
+  ok(globalThis.__cuLastShot && globalThis.__cuLastShot.originX === 1920, "and targets the monitor shared in THIS session",
+     JSON.stringify(globalThis.__cuLastShot));
+  rig.restore();
+}
+
+console.log("\n[14] a list without is_shared during an active session is not cached");
+{
+  // The daemon missed the bridge's budget once: the first post-start list has no is_shared.
+  let daemon = false, misses = 1;
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start") { daemon = true; return "{}"; }
+    if (sub === "screens") {
+      if (daemon && misses > 0) { misses--; return screensJson([undefined, undefined]); }
+      return screensJson(daemon ? [false, true] : [undefined, undefined]);
+    }
+    if (sub === "zoom") return ZOOM_OK;
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  const realNow = Date.now;
+  try {
+    rig.ex.__setLockHeld(true);
+    await sleep(60);
+    await handler("screenshot", {});
+    ok(globalThis.__cuLastShot.originX === 0 && countCalls(rig, "screens") === 1,
+       "the provisional list falls back to Electron's primary, one screens call", String(countCalls(rig, "screens")));
+    ok(rig.log.some(l => l.includes("carries no is_shared during a portal session")), "and the miss is logged");
+    Date.now = () => realNow() + 2500;            // past SCREENS_SHARE_RETRY_MS
+    await handler("screenshot", {});
+    ok(countCalls(rig, "screens") === 2 && globalThis.__cuLastShot.originX === 1920,
+       "the next lookup re-queries and picks the shared monitor", String(countCalls(rig, "screens")));
+    await handler("screenshot", {});
+    ok(countCalls(rig, "screens") === 2, "the list with is_shared is cached", String(countCalls(rig, "screens")));
+  } finally { Date.now = realNow; rig.restore(); }
+}
+
+console.log("\n[15] a screens failure in an earlier session does not block the next session");
+{
+  let daemon = false, screensCalls = 0;
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start") { daemon = true; return "{}"; }
+    if (sub === "session-end") { daemon = false; return "{}"; }
+    if (sub === "screens") { screensCalls++; if (screensCalls === 1) throw new Error("Command failed: screens"); return screensJson(daemon ? [false, true] : [undefined, undefined]); }
+    if (sub === "zoom") return ZOOM_OK;
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", {});
+  ok(screensCalls === 1 && globalThis.__cuLastShot.originX === 0, "session 1: screens failed, primary used", String(screensCalls));
+  await rig.ex.__setLockHeld(false);
+  await sleep(60);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", {});
+  ok(screensCalls === 2 && globalThis.__cuLastShot.originX === 1920,
+     "session 2 re-enumerates at once (no 30 s wait) and picks the shared monitor", String(screensCalls));
+  rig.restore();
+}
+
+console.log("\n[16] a latched-down portal: the default-display lookup spawns no session-start");
+{
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start") throw new Error("portal refused");
+    if (sub === "screens") return screensJson([undefined, undefined]);
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  ok(countCalls(rig, "session-start") === 1, "the lock's session-start ran once and failed");
+  await handler("screenshot", {});
+  ok(countCalls(rig, "session-start") === 1, "the screenshot did not retry session-start", String(countCalls(rig, "session-start")));
+  rig.restore();
+}
+
+console.log("\n[17] COWORK_SCREENSHOT_CMD: a screenshot outside a lock does not open the portal");
+{
+  const rig = makeRig(20, (sub) => sub === "screens" ? screensJson([false, true]) : "{}", EDISPLAYS);
+  rig.cp.execSync = () => "";                     // the user's capture command succeeds
+  resetShot();
+  process.env.COWORK_SCREENSHOT_CMD = "true {FILE}";
+  try {
+    const r = await handler("screenshot", {});
+    ok(r && r.content && r.content[0] && r.content[0].type === "image", "the screenshot is served by the command");
+    ok(countCalls(rig, "session-start") === 0, "no session-start (no consent dialog)", rig.log.filter(l => l.startsWith("CALL")).join(" ") || "(none)");
+  } finally { delete process.env.COWORK_SCREENSHOT_CMD; rig.restore(); }
+}
+
+console.log("\n[18] a session-start that FAILED while the lock is held is still ended on release");
+{
+  // The bridge's ready timeout leaves its daemon waiting on the consent dialog
+  // by design; only a session-end removes it. Before: the release saw neither
+  // an active session nor a start in flight and returned without one.
+  const rig = makeRig(20, (sub) => { if (sub === "session-start") throw new Error("timed out waiting for the portal"); return "{}"; });
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await rig.ex.__setLockHeld(false);
+  await sleep(40);
+  ok(countCalls(rig, "session-end") === 1, "session-end is sent after the failed start", calls(rig.log).join(" "));
+  await rig.ex.__setLockHeld(false);
+  await sleep(40);
+  ok(countCalls(rig, "session-end") === 1, "and only once: a successful end clears the daemon flag", String(countCalls(rig, "session-end")));
+  rig.restore();
+}
+{
+  const rig = makeRig(20);
+  await rig.ex.__setLockHeld(false);
+  await sleep(30);
+  ok(countCalls(rig, "session-end") === 0, "a release with no start ever spawned still sends nothing");
+  rig.restore();
+}
+
+console.log("\n[19] KWin twin (js/executor_linux.js): same failed-start release");
+{
+  // Load the ES module with its three imports swapped for stubs.
+  const kw = [];
+  // execFile is used through util.promisify, which resolves with the callback's
+  // first value: hand it the {stdout, stderr} object the real one's custom
+  // promisify returns.
+  const cpStub = {
+    execFile(bin, args, opts, cb) {
+      if (typeof opts === "function") { cb = opts; }
+      const sub = (args || [])[0];
+      kw.push(sub);
+      setTimeout(() => sub === "session-start" ? cb(Object.assign(new Error("timed out waiting for the portal"), { stderr: "" }), "", "") : cb(null, { stdout: "{}", stderr: "" }), 5);
+    },
+    spawnSync() { return { status: 0 }; }
+  };
+  let src = readFileSync(path.join(ROOT, "js", "executor_linux.js"), "utf8")
+    .replace("import { execFile as execFileCb, spawnSync } from 'node:child_process'", "const { execFile: execFileCb, spawnSync } = __cp")
+    .replace("import { screen as electronScreen } from 'electron'", "const electronScreen = { getAllDisplays: () => [], getPrimaryDisplay: () => ({}) }")
+    .replace("import { promisify } from 'node:util'", "const { promisify } = __util")
+    .replace(/^export /gm, "");
+  if (/^import /m.test(src)) { ok(false, "executor_linux.js imports changed - update this splice"); }
+  else {
+    const util = await import("node:util");
+    const savedDebug = console.debug; console.debug = () => {};
+    globalThis.__cdbDiag = () => {};
+    globalThis.__cuKwinBridgeBin = "/res/kwin-portal-bridge";
+    try {
+      const mod = new Function("__cp", "__util", src + "\nreturn { createLinuxExecutor };")(cpStub, util);
+      const noop = new Proxy({}, { get: () => async () => null });
+      const ex = mod.createLinuxExecutor({ backend: noop });
+      try { await ex.__setLockHeld(true); } catch {}
+      await sleep(20);
+      await ex.__setLockHeld(false).catch(() => {});
+      await sleep(20);
+      ok(kw.filter(c => c === "session-end").length === 1, "session-end is sent after the failed start", kw.join(" "));
+      await ex.__setLockHeld(false).catch(() => {});
+      await sleep(20);
+      ok(kw.filter(c => c === "session-end").length === 1, "and only once", kw.join(" "));
+    } finally { console.debug = savedDebug; delete globalThis.__cuKwinBridgeBin; }
+  }
+}
+
+// ── A monitor the user did not share: the error tells the model to ask the user ──
+// The bridges stay generic (GNOME names its own `forget-session`); the executors
+// rewrite the remedy into `claude-desktop --reset-screen-sharing`.
+const RESET_HINT = "Ask the user to run `claude-desktop --reset-screen-sharing`, then share all monitors when the screen-sharing dialog appears.";
+const GNOME_NOT_SHARED = "monitor HDMI-1 (1920,0 2560x1440) is not shared in the portal session (shared: eDP-1 at 0,0 1920x1080); " +
+  "run `gnome-portal-bridge forget-session`, then start Computer Use again and select all monitors in the dialog";
+const shotText = async (input) => {
+  try { const r = await handler("screenshot", input); return (r && r.content && r.content[0] && r.content[0].text) || JSON.stringify(r); }
+  catch (e) { return "THREW " + e.message; }
+};
+
+console.log("\n[20] GNOME: a screenshot of an unshared monitor names the reset flag");
+{
+  const rig = makeRig(20, (sub) => {
+    if (sub === "screens") return screensJson([true, false]);
+    if (sub === "zoom") throw new Error("Command failed: /res/gnome-portal-bridge zoom --display HDMI-1\n" + GNOME_NOT_SHARED);
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const text = await shotText({ display_number: 1 });
+  ok(text.includes("Monitor HDMI-1 is not shared with Claude (shared: eDP-1 at 0,0 1920x1080). " + RESET_HINT),
+     "the model reads the monitor, the shared list and the user instruction", text);
+  ok(!text.includes("forget-session"), "the bridge-internal remedy is gone");
+  ok(!text.includes("every capture tier failed"), "the cause is not buried under a capture-tier fallback");
+  rig.restore();
+}
+
+console.log("\n[21] GNOME: not-shared text that does not parse keeps its wording, the instruction is appended");
+{
+  const odd = "monitor HDMI-1 is not shared in the portal session; run `gnome-portal-bridge forget-session`";
+  const rig = makeRig(20, (sub) => {
+    if (sub === "screens") return screensJson([true, false]);
+    if (sub === "zoom") throw new Error("Command failed: zoom\n" + odd);
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const text = await shotText({ display_number: 1 });
+  ok(text.includes(odd + ". " + RESET_HINT), "original text + the instruction", text);
+  rig.restore();
+}
+{
+  // An unrelated bridge failure is left alone.
+  const rig = makeRig(20, (sub) => {
+    if (sub === "screens") return screensJson([true, false]);
+    if (sub === "zoom") throw new Error("Command failed: zoom\nPipeWire stream stalled");
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const text = await shotText({ display_number: 1 });
+  ok(!text.includes("reset-screen-sharing"), "an unrelated failure gets no reset instruction", text);
+  rig.restore();
+}
+
+console.log("\n[22] GNOME: a session daemon ended by --reset-screen-sharing is replaced by ONE new session");
+{
+  const rig = shareRig([true, true]);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await handler("screenshot", {});
+  ok(countCalls(rig, "session-start") === 1, "one session-start for the lock");
+  await handler("screenshot", {});
+  ok(countCalls(rig, "session-start") === 1, "a live daemon (socket present) is reused", String(countCalls(rig, "session-start")));
+  rigSocket.present = false;                       // forget-session ended the daemon
+  try {
+    const r = await handler("screenshot", {});
+    ok(r && r.content && r.content[0] && r.content[0].type === "image", "the next screenshot still captures");
+    ok(countCalls(rig, "session-start") === 2, "after a fresh session-start", String(countCalls(rig, "session-start")));
+    ok(rig.log.some(l => l.includes("session daemon is gone")), "and the restart is logged");
+  } finally { rigSocket.present = true; rig.restore(); }
+}
+
+console.log("\n[22b] GNOME, sync input after a reset: no blocking session-start, one background start");
+{
+  // The grant is gone, so session-start means a consent dialog: the sync
+  // backstop (8 s, main process blocked) must not run it.
+  const rig = shareRig([true, true]);
+  const sync = [];
+  rig.cp.execFileSync = (bin, args) => {
+    const base = path.basename(String(bin));
+    if (base === "which" || base === "systemd-detect-virt" || base === "pgrep") throw new Error("not found");
+    sync.push((args || [])[0]);
+    return "{}";
+  };
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  await rig.ex.moveMouse(5, 5);
+  ok(sync.join(" ") === "pointer-move", "a live session: the move goes straight to the bridge", sync.join(" "));
+  rigSocket.present = false;                       // forget-session ended the daemon
+  try {
+    let err = null;
+    try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+    ok(err && /The screen-sharing session was reset .*Ask the user to approve the screen-sharing dialog, then retry the action\./.test(err.message),
+       "the model is told the user must approve the dialog", err && err.message);
+    ok(!sync.includes("session-start"), "no blocking session-start on the main process", sync.join(" "));
+    ok(sync.filter(c => c === "pointer-move").length === 1, "the move itself is not sent", sync.join(" "));
+    ok(countCalls(rig, "session-start") === 2, "one background session-start (full consent budget)", String(countCalls(rig, "session-start")));
+    rigSocket.present = true;
+    await sleep(60);
+    await rig.ex.moveMouse(5, 5);
+    ok(sync.filter(c => c === "pointer-move").length === 2 && countCalls(rig, "session-start") === 2,
+       "once approved, the retry runs on the new session", sync.join(" "));
+  } finally { rigSocket.present = true; rig.restore(); }
+}
+
+console.log("\n[22c] GNOME: a crashed daemon (socket left behind, pid dead) is noticed; a live pid is not");
+{
+  const rig = shareRig([true, true]);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  try {
+    rigSocket.pid = process.pid;                   // alive
+    await handler("screenshot", {});
+    ok(countCalls(rig, "session-start") === 1, "live pid: the session is reused", String(countCalls(rig, "session-start")));
+    rigSocket.pid = 0x3fffffff;                    // no such process (ESRCH)
+    await handler("screenshot", {});
+    ok(countCalls(rig, "session-start") === 2, "dead pid: a new session is started", String(countCalls(rig, "session-start")));
+  } finally { rigSocket.pid = null; rig.restore(); }
+}
+
+console.log("\n[22d] GNOME, contract exit codes: 4 recovers the session, 3 is rewritten without the old tail");
+{
+  const rig = shareRig([true, true]);
+  const sync = [];
+  rig.cp.execFileSync = (bin, args) => {
+    const base = path.basename(String(bin));
+    if (base === "which" || base === "systemd-detect-virt" || base === "pgrep") throw new Error("not found");
+    const sub = (args || [])[0];
+    sync.push(sub);
+    if (sub === "pointer-move" && sync.filter(c => c === "pointer-move").length === 1)
+      throw Object.assign(new Error("Command failed: pointer-move\nno live portal session"), { status: 4 });
+    if (sub === "pointer-move")
+      throw Object.assign(new Error("Command failed: pointer-move\nmonitor HDMI-1 (1920,0 2560x1440) is not shared in the portal session (shared: eDP-1 at 0,0 1920x1080)"), { status: 3 });
+    return "{}";
+  };
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  let err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && /The screen-sharing session was reset/.test(err.message), "exit 4: the reset message", err && err.message);
+  ok(countCalls(rig, "session-start") === 2 && !sync.includes("session-start"),
+     "exit 4: one background session-start, none blocking", String(countCalls(rig, "session-start")));
+  await sleep(60);
+  err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message.includes("Monitor HDMI-1 is not shared with Claude (shared: eDP-1 at 0,0 1920x1080). " + RESET_HINT),
+     "exit 3 with the contract text (no bridge remedy): rewritten", err && err.message);
+  rig.restore();
+}
+{
+  const rig = makeRig(20, (sub) => {
+    if (sub === "screens") return screensJson([true, false]);
+    if (sub === "zoom") throw Object.assign(new Error("Command failed: zoom\nthe display is not in this session"), { code: 3 });
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const text = await shotText({ display_number: 1 });
+  ok(text.includes("the display is not in this session. " + RESET_HINT), "exit 3 with text that does not parse: instruction appended", text);
+  rig.restore();
+}
+
+console.log("\n[22e] GNOME: session-start answering \"already active\" is that session, not a failure");
+{
+  let screensCalls = 0;
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start") throw new Error("Command failed: session-start\na portal session is already active");
+    if (sub === "screens") { screensCalls++; return screensJson([true, true]); }
+    if (sub === "zoom") return ZOOM_OK;
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const r = await handler("screenshot", {});
+  ok(r && r.content && r.content[0] && r.content[0].type === "image", "the screenshot captures on the existing session", JSON.stringify(r).slice(0, 120));
+  ok(countCalls(rig, "session-start") === 1, "no second start", String(countCalls(rig, "session-start")));
+  ok(!rig.log.some(l => l.includes("session-start failed")), "no failure logged, no portal-down latch");
+  rig.restore();
+}
+
+console.log("\n[22f] GNOME: an undeterminable runtime dir never concludes \"daemon gone\"; exit 4 still recovers");
+{
+  // Set-but-empty XDG_RUNTIME_DIR: contract bridges read /tmp, older ones a
+  // relative path; a relative value is unusable. Concluding "no socket" there
+  // would restart the session before every command against an older bridge.
+  const saved = process.env.XDG_RUNTIME_DIR;
+  for (const [label, value] of [["empty", ""], ["relative", "run/user"]]) {
+    let fail4 = false;
+    const rig = makeRig(20, (sub) => {
+      if (sub === "screens") return screensJson([true, true]);
+      if (sub === "zoom") {
+        if (fail4) { fail4 = false; throw Object.assign(new Error("Command failed: zoom\nno active portal session"), { code: 4 }); }
+        return ZOOM_OK;
+      }
+      return "{}";
+    }, EDISPLAYS);
+    resetShot();
+    rig.ex.__setLockHeld(true);
+    await sleep(60);
+    process.env.XDG_RUNTIME_DIR = value;
+    rigSocket.present = false;
+    try {
+      await handler("screenshot", {});
+      await handler("screenshot", {});
+      ok(countCalls(rig, "session-start") === 1, `${label} XDG_RUNTIME_DIR: no restart from a missing socket`, String(countCalls(rig, "session-start")));
+      fail4 = true;
+      const text = await shotText({});
+      ok(/The screen-sharing session was reset/.test(text) && countCalls(rig, "session-start") === 2,
+         `${label} XDG_RUNTIME_DIR: exit 4 still starts one new session`, text);
+    } finally {
+      rigSocket.present = true;
+      if (saved === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = saved;
+      rig.restore();
+    }
+  }
+}
+
+// ── The user stopped screen sharing (bridge exit 5) ──────────────────────────
+// The desktop's screen-sharing indicator has a "Stop sharing" button. The
+// bridge daemon then writes its stopped-by-user marker, exits, and every
+// input/capture command exits 5. Within the lock nothing may start a new
+// session (that would re-share the screen the user just stopped sharing); the
+// next lock starts clean.
+const STOPPED_MSG = "Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use resumes with the next Computer Use session - in a guided tour, after the tour ends or the user clicks Stop in Claude.";
+// Bridge stderr: the old wording, and the current one (text fallback for both).
+const STOPPED_STDERR = "screen sharing was stopped by the user (the portal session was closed)";
+const STOPPED_STDERR_NEW = "screen sharing was stopped (the portal session was closed)";
+// A rig whose portal commands exit 5 while stop.on is set (async + sync paths).
+function stoppedRig() {
+  const stop = { on: false, code: 5, text: STOPPED_STDERR };
+  const rig = makeRig(20, (sub) => {
+    if (sub === "screens") return screensJson([true, true]);
+    if (sub === "zoom") {
+      if (stop.on) throw Object.assign(new Error("Command failed: zoom\n" + stop.text), { code: stop.code });
+      return ZOOM_OK;
+    }
+    return "{}";
+  }, EDISPLAYS);
+  rig.sync = [];
+  rig.cp.execFileSync = (bin, args) => {
+    const base = path.basename(String(bin));
+    if (base === "which" || base === "systemd-detect-virt" || base === "pgrep") throw new Error("not found");
+    const sub = (args || [])[0];
+    rig.sync.push(sub);
+    if (stop.on && sub !== "session-start" && sub !== "session-end")
+      throw Object.assign(new Error("Command failed: " + sub + "\n" + stop.text), { status: stop.code });
+    return "{}";
+  };
+  rig.stop = stop;
+  resetShot();
+  return rig;
+}
+
+console.log("\n[24] GNOME: exit 5 -> the model is told to stop; no new session within the lock");
+{
+  const rig = stoppedRig();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  let r = await handler("screenshot", {});
+  ok(r && r.content && r.content[0] && r.content[0].type === "image", "a live session captures");
+  rig.stop.on = true;                              // the user clicked "Stop sharing"
+  const capBefore = rig.log.filter(l => l === "CAPTURER").length;
+  let text = await shotText({});
+  ok(text.includes(STOPPED_MSG), "screenshot exit 5: the model reads the stop message", text);
+  ok(rig.log.filter(l => l === "CAPTURER").length === capBefore && !text.includes("every capture tier failed"),
+     "and the capture does not fall through to desktopCapturer", text);
+  ok(rig.log.some(l => l.includes("screen sharing was stopped (bridge exit 5)")), "the stop is logged");
+  const zooms = countCalls(rig, "zoom");
+  text = await shotText({});
+  ok(text.includes(STOPPED_MSG), "the next screenshot gets the same message", text);
+  ok(countCalls(rig, "zoom") === zooms, "fail fast: no bridge spawned for it", String(countCalls(rig, "zoom")));
+  let err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message === STOPPED_MSG, "sync input: same message", err && err.message);
+  ok(rig.sync.length === 0, "sync input: no bridge spawned, no blocking session-start", rig.sync.join(" "));
+  rigSocket.present = false;                       // the daemon removed its socket on the way out
+  try {
+    text = await shotText({});
+    err = null;
+    try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+    ok(text.includes(STOPPED_MSG) && err && err.message === STOPPED_MSG, "a missing socket changes nothing after the stop", text);
+    ok(countCalls(rig, "session-start") === 1, "no session-start within the lock (no vanished-daemon / exit-4 recovery)",
+       String(countCalls(rig, "session-start")));
+    ok(!rig.log.some(l => l.includes("session daemon is gone")), "the stop is not mistaken for a vanished daemon");
+    await rig.ex.__setLockHeld(false);
+    await sleep(40);
+    ok(countCalls(rig, "session-end") === 1, "the release still sends session-end (it clears the marker)",
+       String(countCalls(rig, "session-end")));
+    ok(rig.log.some(l => l.includes("stopped-by-user latch cleared (lock released)")), "and the latch is cleared");
+    rig.stop.on = false;
+    rigSocket.present = true;
+    rig.ex.__setLockHeld(true);                    // the next task
+    await sleep(60);
+    ok(countCalls(rig, "session-start") === 2, "the next lock starts a session", String(countCalls(rig, "session-start")));
+    resetShot();
+    r = await handler("screenshot", {});
+    ok(r && r.content && r.content[0] && r.content[0].type === "image", "and captures on it");
+    await rig.ex.moveMouse(5, 5);
+    ok(rig.sync.join(" ") === "pointer-move", "sync input runs again", rig.sync.join(" "));
+  } finally { rigSocket.present = true; rig.restore(); }
+}
+for (const text of [STOPPED_STDERR, STOPPED_STDERR_NEW]) {
+  // A bridge below contract 1 says it in text only (old and new wording).
+  const rig = stoppedRig();
+  rig.stop.code = 1; rig.stop.text = text;
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  rig.stop.on = true;
+  let err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message === STOPPED_MSG, `exit 1 + "${text}": same message`, err && err.message);
+  err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message === STOPPED_MSG && rig.sync.filter(c => c === "pointer-move").length === 1,
+     "and the latch holds (one pointer-move spawned)", rig.sync.join(" "));
+  ok(countCalls(rig, "session-start") === 1, "no session-start", String(countCalls(rig, "session-start")));
+  rig.restore();
+}
+
+console.log("\n[25] GNOME: the stopped-by-user marker is a stop, not a vanished daemon");
+{
+  const rig = stoppedRig();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  rigSocket.present = false; rigSocket.stopped = true;   // daemon wrote the marker, removed its socket, exited
+  try {
+    const zooms = countCalls(rig, "zoom");
+    const text = await shotText({});
+    ok(text.includes(STOPPED_MSG), "screenshot: the stop message", text);
+    ok(countCalls(rig, "zoom") === zooms && countCalls(rig, "session-start") === 1,
+       "no zoom spawned, no session-start", `zoom ${countCalls(rig, "zoom")} start ${countCalls(rig, "session-start")}`);
+    ok(!rig.log.some(l => l.includes("session daemon is gone")), "never \"daemon gone\"");
+    ok(rig.log.filter(l => l === "CAPTURER").length === 0, "no desktopCapturer fallback");
+    let err = null;
+    try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+    ok(err && err.message === STOPPED_MSG && rig.sync.length === 0, "sync input: the stop message, nothing spawned", rig.sync.join(" "));
+    await sleep(60);
+    ok(countCalls(rig, "session-start") === 1, "still no background session-start", String(countCalls(rig, "session-start")));
+    await rig.ex.__setLockHeld(false);
+    await sleep(40);
+    ok(countCalls(rig, "session-end") === 1, "release: session-end", String(countCalls(rig, "session-end")));
+    rigSocket.present = true; rigSocket.stopped = false;  // session-end removed the marker
+    rig.ex.__setLockHeld(true);
+    await sleep(60);
+    ok(countCalls(rig, "session-start") === 2, "next lock: a session-start", String(countCalls(rig, "session-start")));
+  } finally { rigSocket.present = true; rigSocket.stopped = false; rig.restore(); }
+}
+{
+  // A marker left from an earlier lock (its session-end failed) does not block
+  // the next lock: the latch is per lock and session-start removes the marker.
+  rigSocket.stopped = true;
+  const rig = stoppedRig();
+  try {
+    rig.ex.__setLockHeld(true);
+    await sleep(10);
+    rigSocket.stopped = false;                     // session-start removed it
+    await sleep(60);
+    const r = await handler("screenshot", {});
+    ok(r && r.content && r.content[0] && r.content[0].type === "image" && countCalls(rig, "session-start") === 1,
+       "a stale marker before session-start: the lock still works", JSON.stringify(r).slice(0, 120));
+  } finally { rigSocket.stopped = false; rig.restore(); }
+}
+
+console.log("\n[25b] GNOME: session-start exit 5 (closed before ready) latches; no cooldown, no retry");
+{
+  // The bridge answers session-start with exit 5 when the new daemon's portal
+  // session is closed before it becomes ready.
+  let startStopped = true;
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start" && startStopped) throw Object.assign(new Error("Command failed: session-start\n" + STOPPED_STDERR_NEW), { code: 5 });
+    if (sub === "screens") return screensJson([true, true]);
+    if (sub === "zoom") return ZOOM_OK;
+    return "{}";
+  }, EDISPLAYS);
+  const sync = [];
+  rig.cp.execFileSync = (bin, args) => {
+    const base = path.basename(String(bin));
+    if (base === "which" || base === "systemd-detect-virt" || base === "pgrep") throw new Error("not found");
+    sync.push((args || [])[0]);
+    return "{}";
+  };
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const text = await shotText({});
+  ok(text.includes(STOPPED_MSG), "screenshot: the stop message", text);
+  ok(countCalls(rig, "session-start") === 1 && countCalls(rig, "zoom") === 0, "no second start, no zoom",
+     `start ${countCalls(rig, "session-start")} zoom ${countCalls(rig, "zoom")}`);
+  ok(!rig.log.some(l => l.includes("portal session unavailable")), "a stop, not the failure cooldown");
+  ok(rig.log.filter(l => l === "CAPTURER").length === 0, "no desktopCapturer fallback");
+  let err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message === STOPPED_MSG && sync.length === 0, "sync input: the stop message, no blocking session-start", sync.join(" "));
+  await rig.ex.__setLockHeld(false);
+  await sleep(40);
+  ok(countCalls(rig, "session-end") === 1, "release: session-end", String(countCalls(rig, "session-end")));
+  startStopped = false;
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  const r = await handler("screenshot", {});
+  ok(countCalls(rig, "session-start") === 2 && r && r.content && r.content[0] && r.content[0].type === "image",
+     "next lock: a new session, and it captures", String(countCalls(rig, "session-start")));
+  rig.restore();
+}
+{
+  // No lock hook: the sync backstop's session-start exits 5.
+  const rig = makeRig(20, () => "{}", EDISPLAYS);
+  const sync = [];
+  rig.cp.execFileSync = (bin, args) => {
+    const base = path.basename(String(bin));
+    if (base === "which" || base === "systemd-detect-virt" || base === "pgrep") throw new Error("not found");
+    const sub = (args || [])[0];
+    sync.push(sub);
+    if (sub === "session-start") throw Object.assign(new Error("Command failed: session-start\n" + STOPPED_STDERR_NEW), { status: 5 });
+    return "{}";
+  };
+  let err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message === STOPPED_MSG && sync.join(" ") === "session-start", "sync backstop exit 5: the stop message, the move is not sent", sync.join(" "));
+  err = null;
+  try { await rig.ex.moveMouse(5, 5); } catch (e) { err = e; }
+  ok(err && err.message === STOPPED_MSG && sync.join(" ") === "session-start", "and no second blocking session-start", sync.join(" "));
+  await rig.ex.__setLockHeld(false);
+  await sleep(40);
+  ok(countCalls(rig, "session-end") === 1, "a release sends session-end", String(countCalls(rig, "session-end")));
+  rig.restore();
+}
+
+console.log("\n[23] KWin (js/executor_linux.js): not-shared rewrite and a vanished daemon");
+{
+  const kw = [];
+  let failWith = null;                             // stderr for the next portal command
+  let failCode = 1;                                // its exit code
+  const cpStub = {
+    execFile(bin, args, opts, cb) {
+      if (typeof opts === "function") { cb = opts; }
+      const sub = (args || [])[0];
+      kw.push(sub);
+      setTimeout(() => {
+        if (failWith && sub !== "session-start" && sub !== "session-end") {
+          const stderr = failWith, code = failCode; failWith = null; failCode = 1;
+          cb(Object.assign(new Error("Command failed"), { stderr, code }), "", "");
+          return;
+        }
+        cb(null, { stdout: "{}", stderr: "" });
+      }, 2);
+    },
+    spawnSync() { return { status: 0 }; }
+  };
+  let src = readFileSync(path.join(ROOT, "js", "executor_linux.js"), "utf8")
+    .replace("import { execFile as execFileCb, spawnSync } from 'node:child_process'", "const { execFile: execFileCb, spawnSync } = __cp")
+    .replace("import { screen as electronScreen } from 'electron'", "const electronScreen = { getAllDisplays: () => [], getPrimaryDisplay: () => ({}) }")
+    .replace("import { promisify } from 'node:util'", "const { promisify } = __util")
+    .replace(/^export /gm, "");
+  if (/^import /m.test(src)) { ok(false, "executor_linux.js imports changed - update this splice"); }
+  else {
+    const util = await import("node:util");
+    const savedDebug = console.debug; console.debug = () => {};
+    const diag = [];
+    globalThis.__cdbDiag = (m) => diag.push(String(m));
+    globalThis.__cuKwinBridgeBin = "/res/kwin-portal-bridge";
+    try {
+      const mod = new Function("__cp", "__util", src +
+        "\nreturn { notSharedText, startBridgeSession, stopBridgeSession, createRustLinuxBackend };")(cpStub, util);
+      const rust = mod.createRustLinuxBackend();
+      await mod.startBridgeSession();
+      const fails = async (f) => { try { await f(); return "no error"; } catch (e) { return e.message; } };
+
+      failWith = "Error: no portal stream matched screen `DP-2`";
+      let msg = await fails(() => rust.mouseDown());
+      ok(msg === "[kwin-portal-bridge] left-mouse-down failed: Error: Monitor DP-2 is not shared with Claude. " + RESET_HINT,
+         "KDE wording -> monitor id + user instruction", msg);
+      ok(mod.notSharedText(GNOME_NOT_SHARED) === "Monitor HDMI-1 is not shared with Claude (shared: eDP-1 at 0,0 1920x1080). " + RESET_HINT,
+         "GNOME wording is understood too");
+      ok(mod.notSharedText("no portal stream matched the screen") === "no portal stream matched the screen. " + RESET_HINT,
+         "unparseable not-shared text: original + instruction");
+      ok(mod.notSharedText("KWin script timed out") === null, "unrelated text is left alone");
+
+      failCode = 3;
+      failWith = "monitor DP-2 (2560,0 1920x1080) is not shared in the portal session (shared: DP-1 at 0,0 2560x1440)";
+      msg = await fails(() => rust.mouseDown());
+      ok(msg === "[kwin-portal-bridge] left-mouse-down failed: Monitor DP-2 is not shared with Claude (shared: DP-1 at 0,0 2560x1440). " + RESET_HINT,
+         "exit 3, contract text -> rewritten with the shared list", msg);
+      failCode = 3; failWith = "screen is not part of the share";
+      msg = await fails(() => rust.mouseDown());
+      ok(msg.endsWith("screen is not part of the share. " + RESET_HINT), "exit 3, unparseable text -> instruction appended", msg);
+
+      const starts = () => kw.filter(c => c === "session-start").length;
+      ok(starts() === 1, "one session-start so far", kw.join(" "));
+      failWith = "no active portal session";       // forget-session ended the daemon (older bridge text)
+      msg = await fails(() => rust.mouseDown());
+      ok(/the screen-sharing session was ended; retry the action/.test(msg), "the model is told to retry", msg);
+      ok(starts() === 1, "the failed command is not retried behind the model's back", kw.join(" "));
+      msg = await fails(() => rust.mouseDown());
+      ok(msg === "no error" && starts() === 2, "the next command starts one fresh session", kw.join(" "));
+      failCode = 4; failWith = "session daemon not running";   // contract 1: exit code, any text
+      msg = await fails(() => rust.mouseDown());
+      ok(/the screen-sharing session was ended; retry the action/.test(msg), "exit 4 -> same recovery", msg);
+      msg = await fails(() => rust.mouseDown());
+      ok(msg === "no error" && starts() === 3, "and again one fresh session", kw.join(" "));
+      ok(diag.some(l => l.includes("session daemon is gone")), "and the restart is logged");
+      await mod.stopBridgeSession();
+    } finally { console.debug = savedDebug; delete globalThis.__cuKwinBridgeBin; }
+  }
+}
+
+console.log("\n[26] KWin (js/executor_linux.js): exit 5 latches for the lock; the next lock starts clean");
+{
+  const kw = [];
+  let stopped = false, stopCode = 5, stopText = STOPPED_STDERR, startStopped = false;
+  const cpStub = {
+    execFile(bin, args, opts, cb) {
+      if (typeof opts === "function") { cb = opts; }
+      const sub = (args || [])[0];
+      kw.push(sub);
+      setTimeout(() => {
+        if (sub === "session-start" && startStopped) {
+          cb(Object.assign(new Error("Command failed"), { stderr: STOPPED_STDERR_NEW, code: 5 }), "", "");
+          return;
+        }
+        if (stopped && sub !== "session-start" && sub !== "session-end") {
+          cb(Object.assign(new Error("Command failed"), { stderr: stopText, code: stopCode }), "", "");
+          return;
+        }
+        if (sub === "session-end") stopped = false;    // session-end removes the marker
+        cb(null, { stdout: "{}", stderr: "" });
+      }, 2);
+    },
+    spawnSync() { return { status: 0 }; }
+  };
+  let src = readFileSync(path.join(ROOT, "js", "executor_linux.js"), "utf8")
+    .replace("import { execFile as execFileCb, spawnSync } from 'node:child_process'", "const { execFile: execFileCb, spawnSync } = __cp")
+    .replace("import { screen as electronScreen } from 'electron'", "const electronScreen = { getAllDisplays: () => [], getPrimaryDisplay: () => ({}) }")
+    .replace("import { promisify } from 'node:util'", "const { promisify } = __util")
+    .replace(/^export /gm, "");
+  if (/^import /m.test(src)) { ok(false, "executor_linux.js imports changed - update this splice"); }
+  else {
+    const util = await import("node:util");
+    const savedDebug = console.debug; console.debug = () => {};
+    const diag = [];
+    globalThis.__cdbDiag = (m) => diag.push(String(m));
+    globalThis.__cuKwinBridgeBin = "/res/kwin-portal-bridge";
+    try {
+      const mod = new Function("__cp", "__util", src +
+        "\nreturn { STOPPED_BY_USER_MESSAGE, startBridgeSession, stopBridgeSession, createRustLinuxBackend };")(cpStub, util);
+      ok(mod.STOPPED_BY_USER_MESSAGE === STOPPED_MSG, "the KWin message is the GNOME twin's");
+      const rust = mod.createRustLinuxBackend();
+      const fails = async (f) => { try { await f(); return "no error"; } catch (e) { return e.message; } };
+      const count = (c) => kw.filter(x => x === c).length;
+      for (const [label, code, text] of [["exit 5", 5, STOPPED_STDERR], ["exit 1 + old text", 1, STOPPED_STDERR], ["exit 1 + new text", 1, STOPPED_STDERR_NEW]]) {
+        stopCode = code; stopText = text;
+        await mod.startBridgeSession();
+        const starts0 = count("session-start"), ends0 = count("session-end");
+        ok((await fails(() => rust.mouseDown())) === "no error", `${label}: a live session works`);
+        stopped = true;                              // the user clicked "Stop sharing"
+        let msg = await fails(() => rust.mouseDown());
+        ok(msg === STOPPED_MSG, `${label}: the model reads the stop message`, msg);
+        const downs = count("left-mouse-down");
+        msg = await fails(() => rust.mouseDown());
+        ok(msg === STOPPED_MSG && count("left-mouse-down") === downs, `${label}: fail fast, no bridge spawned`, kw.join(" "));
+        msg = await fails(() => rust.screenshot(0));
+        ok(msg === STOPPED_MSG && count("screenshot") === 0, `${label}: screenshot gets the message, no capture`, msg);
+        ok(count("session-start") === starts0, `${label}: no session-start within the lock (exit-4 recovery stays off)`, kw.join(" "));
+        await mod.stopBridgeSession();
+        ok(count("session-end") === ends0 + 1, `${label}: the release still sends session-end`, kw.join(" "));
+        await mod.startBridgeSession();
+        ok(count("session-start") === starts0 + 1, `${label}: the next lock starts a session`, kw.join(" "));
+        msg = await fails(() => rust.mouseDown());
+        ok(msg === "no error", `${label}: and input works again`, msg);
+        await mod.stopBridgeSession();
+      }
+      ok(diag.some(l => l.includes("screen sharing was stopped (left-mouse-down)")) && diag.some(l => l.includes("stopped-by-user latch cleared")),
+         "the stop and the clear are logged");
+      // session-start exit 5: the new daemon was closed before it became ready.
+      startStopped = true;
+      const s0 = count("session-start"), e0 = count("session-end"), d0 = count("left-mouse-down");
+      let msg = await fails(() => mod.startBridgeSession());
+      ok(msg === STOPPED_MSG, "session-start exit 5: the lock start reports the stop", msg);
+      startStopped = false;
+      msg = await fails(() => rust.mouseDown());
+      ok(msg === STOPPED_MSG && count("session-start") === s0 + 1 && count("left-mouse-down") === d0,
+         "session-start exit 5: later actions fail fast, no second start", kw.join(" "));
+      await mod.stopBridgeSession();
+      ok(count("session-end") === e0 + 1, "session-start exit 5: the release still sends session-end", kw.join(" "));
+      await mod.startBridgeSession();
+      msg = await fails(() => rust.mouseDown());
+      ok(msg === "no error" && count("session-start") === s0 + 2, "session-start exit 5: the next lock starts clean", kw.join(" "));
+      await mod.stopBridgeSession();
+    } finally { console.debug = savedDebug; delete globalThis.__cuKwinBridgeBin; }
   }
 }
 

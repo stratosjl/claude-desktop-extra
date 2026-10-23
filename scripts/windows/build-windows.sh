@@ -133,9 +133,20 @@ make -C "$SRC/patches" -j"$(nproc)" >/dev/null
 log "Applying the Windows patch set"
 python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 
+# resources/ion-dist (the third-party inference setup window) is not inside
+# app.asar: its `@patch-type: nim-dir` patches run on the folder itself, as in
+# build-patched-tarball.sh. The Linux-only ion fix (fix_ion_dist_linux) stays out.
+WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
+for p in "${WINDOWS_ION_PATCHES[@]}"; do
+    grep -q '^# @patch-type: nim-dir$' "$SRC/patches/$p.nim" || die "$p is not a nim-dir patch"
+    log "Applying $p to resources/ion-dist"
+    "$SRC/patches/$p" "$RES/ion-dist" || die "ion-dist patch failed: $p"
+done
+
 log "Validating JavaScript syntax"
 bad=0
-for js in "$WORK/app/app.asar.contents/.vite/build/"*.js; do
+for js in "$WORK/app/app.asar.contents/.vite/build/"*.js "$WORK/app/app.asar.contents/.vite/build/"*-worker/*.js; do
+    [ -f "$js" ] || continue
     node --check "$js" 2>/dev/null || { echo "  syntax error: $(basename "$js")" >&2; bad=1; }
 done
 [ "$bad" = 0 ] || die "patched JavaScript does not parse"
@@ -178,7 +189,21 @@ rm -f "$APP_TREE/squirrel.exe" "$APP_TREE/claude_ExecutionStub.exe"
 NAME="claude-desktop-extra-$VERSION-windows-$ARCH"
 STAGE="$WORK/$NAME"
 mkdir -p "$STAGE"
-mv "$APP_TREE" "$STAGE/app"
+
+# The app goes in as app.zip, which Install-ClaudeExtra.ps1 unpacks straight
+# into its install folder. Unpacked by Explorer instead, its deepest files
+# (ion-dist fonts) would sit under the user's download folder plus our folder
+# names and pass Windows' 260-character path limit ("Error 0x80010135: Path
+# too long"). The installer folder is short and known, so cap the app's own
+# paths here: %LOCALAPPDATA%\Programs\Claude Desktop Extra\app.new\ is about 70
+# characters for a typical user name.
+MAX_REL_PATH=150
+longest="$(cd "$APP_TREE" && find . -type f | sed 's|^\./||' \
+    | awk 'length($0) > n { n = length($0); p = $0 } END { print n "\t" p }')"
+[ "${longest%%$'\t'*}" -le "$MAX_REL_PATH" ] \
+    || die "app path longer than $MAX_REL_PATH characters, too close to Windows' path limit: ${longest#*$'\t'}"
+( cd "$APP_TREE" && zip -qr -X "$STAGE/app.zip" . )
+rm -rf "$APP_TREE"
 cp "$PKG_DIR/Install-ClaudeExtra.ps1" "$PKG_DIR/Install.cmd" "$STAGE/"
 sed 's/$/\r/' "$PKG_DIR/README-Windows.txt" > "$STAGE/README-Windows.txt"
 {
@@ -193,6 +218,7 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 ZIP="$OUT_DIR/$NAME.zip"
 rm -f "$ZIP"
-( cd "$WORK" && zip -qr -X "$ZIP" "$NAME" )
+# -n .zip: app.zip is already compressed; store it as is.
+( cd "$WORK" && zip -qr -X -n .zip "$ZIP" "$NAME" )
 ( cd "$OUT_DIR" && sha256sum "$NAME.zip" > "$NAME.zip.sha256" )
 log "Built $ZIP ($(du -h "$ZIP" | cut -f1))"

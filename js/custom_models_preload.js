@@ -73,7 +73,8 @@
 
   if (!SELFTEST) {
     if (typeof Bun === "undefined") return;
-    if (path.basename(process.execPath) !== "claude") return;
+    // claude on Linux, claude.exe on Windows (the app's binaryName for win32).
+    if (path.basename(process.execPath).replace(/\.exe$/i, "") !== "claude") return;
   }
   if (!rawJson && !routesPath) return;
 
