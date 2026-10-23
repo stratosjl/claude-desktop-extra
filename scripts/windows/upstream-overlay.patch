@@ -11,82 +11,6 @@ index c8ce7db..c8bbc7c 100644
      globalThis.__cdbAllowNonAnthropicModels = function () { return false; };
      return;
    }
-diff --git a/js/custom_models_main.js b/js/custom_models_main.js
-index daa08d8..5db6719 100644
---- a/js/custom_models_main.js
-+++ b/js/custom_models_main.js
-@@ -57,7 +57,8 @@
-  */
- ;/*__CDB_CUSTOM_MODELS__*/(function () {
-   "use strict";
--  if (typeof process === "undefined" || process.platform !== "linux") return;
-+  // Linux, and the Windows build (scripts/windows/build-windows.sh).
-+  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
-   if (globalThis.__cdbCustomModels) return;
- 
-   var _electron = require("electron");
-@@ -248,7 +249,9 @@
-   }
- 
-   function expandHome(p) {
--    return typeof p === "string" && p.indexOf("~/") === 0 ? _path.join(_os.homedir(), p.slice(2)) : p;
-+    // A leading ~\ too on Windows, where that is how a home-relative path is written.
-+    var home = typeof p === "string" && (p.indexOf("~/") === 0 || (process.platform === "win32" && p.indexOf("~\\") === 0));
-+    return home ? _path.join(_os.homedir(), p.slice(2)) : p;
-   }
-   function secretsPath() {
-     var d = pathFor(SUBDIR);
-@@ -1171,6 +1174,35 @@
-       return null;
-     }
-   }
-+  // Windows only: the preload path with its profile directory in 8.3 short
-+  // form (C:\Users\JOHNSM~1\...\Claude), so it carries no space. Only the
-+  // profile directory is shortened: the custom-models\preload.js tail stays
-+  // spelled out, which remoteSpawn() recognises. null when the volume does not
-+  // generate short names or the path holds a character cmd would expand.
-+  var shortPathCache = Object.create(null);
-+  function shortPreloadPath(p) {
-+    if (process.platform !== "win32") return null;
-+    var profileDir = _path.dirname(_path.dirname(p));
-+    var tail = p.slice(profileDir.length);
-+    if (/\s/.test(tail) || /["%^!&|<>]/.test(profileDir)) return null;
-+    if (!(profileDir in shortPathCache)) {
-+      var short = null;
-+      try {
-+        // windowsVerbatimArguments: Node's own quoting (\") means nothing to
-+        // cmd. The path is checked above for every character cmd treats
-+        // specially inside quotes.
-+        var out = require("child_process").execFileSync(process.env.ComSpec || "cmd.exe",
-+          ["/d", "/c", "for %I in (\"" + profileDir + "\") do @echo %~sI"],
-+          { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true, timeout: 5000 });
-+        var line = String(out).split(/\r?\n/)[0].trim();
-+        if (line && !/\s/.test(line) && _path.isAbsolute(line)) short = line;
-+      } catch (e) { log("short path lookup failed: " + (e && e.message ? e.message : String(e))); }
-+      shortPathCache[profileDir] = short;
-+      if (short) log("profile path has a space; the preload is loaded through its short form " + short);
-+    }
-+    return shortPathCache[profileDir] ? shortPathCache[profileDir] + tail : null;
-+  }
-+
-   // The routing payload the preload works from: providers with their keys,
-   // models with what the sanitiser needs, the app-wide web-search target.
-   function routesPayload(cfg) {
-@@ -1230,9 +1262,12 @@
-       var preload = ensurePreload();
-       if (!preload) return {};
-       // BUN_OPTIONS is split on whitespace: a preload path with a space in it
--      // would load nothing, or break the CLI's start. Leave the session alone.
-+      // would load nothing, or break the CLI's start. On Windows, where the
-+      // user folder often has one (C:\Users\John Smith), try its 8.3 short
-+      // form first; otherwise leave the session alone.
-+      if (/\s/.test(preload)) preload = shortPreloadPath(preload) || preload;
-       if (/\s/.test(preload)) {
--        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry - sessions are not routed");
-+        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry" + (process.platform === "win32" ? " (and the volume gave no space-free 8.3 short name)" : "") + " - sessions are not routed");
-         return {};
-       }
-       syncRoutes();
 diff --git a/js/diff_views_main.js b/js/diff_views_main.js
 index 9a8009c..e735c06 100644
 --- a/js/diff_views_main.js
@@ -151,21 +75,10 @@ index 9a8009c..e735c06 100644
      // pathological; spaces are deliberately ALLOWED, because "my notes.md" is an
      // ordinary tracked file and rejecting it would drop that one file back to the
 diff --git a/js/extra_settings_main.js b/js/extra_settings_main.js
-index 681f8e3..4565b6f 100644
+index 0fcf5d3..93218e2 100644
 --- a/js/extra_settings_main.js
 +++ b/js/extra_settings_main.js
-@@ -26,7 +26,9 @@
-  */
- ;/*__CDB_EXTRA_SETTINGS__*/(function () {
-   "use strict";
--  if (typeof process === "undefined" || process.platform !== "linux") return;
-+  // Linux, and the Windows build (scripts/windows/build-windows.sh), which
-+  // ships this page with the Models panel only (see NAV_ITEMS in the page).
-+  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
- 
-   var _electron = require("electron");
-   var _app = _electron.app;
-@@ -323,6 +325,8 @@
+@@ -325,6 +325,8 @@
    function __cdbEx_3pDir() {
      var ud = _app.getPath("userData");
      if (process.env.CLAUDE_USER_DATA_DIR) return ud;
@@ -175,24 +88,25 @@ index 681f8e3..4565b6f 100644
    }
  
 diff --git a/js/extra_settings_page.js b/js/extra_settings_page.js
-index 0036574..11dc77e 100644
+index 7c137f1..0437b4f 100644
 --- a/js/extra_settings_page.js
 +++ b/js/extra_settings_page.js
-@@ -563,6 +563,13 @@
+@@ -563,10 +563,10 @@
      { kind: "flags", label: "Anthropic", icon: ICON_FLAGS, tooltip: "Anthropic Features" },
      { kind: "deploy", label: "Deployment", icon: ICON_DEPLOY }
    ];
-+  // The Windows build (scripts/windows/build-windows.sh) leaves out the
-+  // Deployment panel: it reads and writes /etc/claude-desktop, while Windows
+-  // On Windows (a downstream Windows build of this patch set) only custom
+-  // models is carried: the other panels drive Linux-only patches or Linux
+-  // paths (/etc/claude-desktop) that do not exist there.
+-  var WINDOWS_NAV = { models: true };
++  // On Windows (a downstream Windows build of this patch set) the Deployment
++  // panel is left out: it reads and writes /etc/claude-desktop, while Windows
 +  // takes managed settings from the registry (SOFTWARE\Policies\Claude).
 +  var WINDOWS_NAV = { themes: true, features: true, models: true, flags: true };
-+  if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
-+    NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
-+  }
- 
-   function applyAttrs(node, map) {
-     Object.keys(map).forEach(function (k) { node.setAttribute(k, map[k]); });
-@@ -1385,7 +1392,8 @@
+   if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
+     NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
+   }
+@@ -1392,7 +1392,8 @@
          "list. For 3P/gateway users who route to non-Anthropic models through their own gateway; " +
          "with it off, those routes are silently removed and the session falls back to the default " +
          "model. The setting is per mode: set it while in 3P mode, where it is saved in " +
@@ -202,7 +116,7 @@ index 0036574..11dc77e 100644
        ariaLabel: "allow non-Anthropic models from a third-party gateway in the model list",
        read: "allowNonAnthropicModelsRead",
        write: "allowNonAnthropicModelsSet",
-@@ -1780,8 +1788,8 @@
+@@ -1787,8 +1788,8 @@
    function restartButton() {
      var restart = el("button", "cdbx-btn", "Restart now");
      restart.type = "button";
@@ -213,7 +127,7 @@ index 0036574..11dc77e 100644
      restart.addEventListener("click", function () {
        restart.disabled = true;
        restart.textContent = "Restarting...";
-@@ -2261,6 +2269,15 @@
+@@ -2268,6 +2269,15 @@
      renderThemePickerRow,
      renderDevToolsRow
    ];
@@ -229,7 +143,7 @@ index 0036574..11dc77e 100644
  
    function renderFeatures(panel) {
      clear(panel);
-@@ -2672,7 +2689,7 @@
+@@ -2679,7 +2689,7 @@
  
  
        var files = el("div", "cdbx-note cdbx-models-files",
@@ -238,7 +152,7 @@ index 0036574..11dc77e 100644
          "Routing changes (a key, a model, a provider) reach open sessions at once through " + (st.paths && st.paths.routes) +
          ". New models show in the picker after the Code tab reloads. Sub-agent types, the default sub-agent " +
          "model, the small/fast model and the system-prompt line are handed to each session as it opens. A " +
-@@ -2989,7 +3006,7 @@
+@@ -2996,7 +3006,7 @@
        var url = field(form, "Base URL", input("text", existing ? existing.baseUrl : "", "https://api.example.com/anthropic"),
          "The Anthropic-compatible endpoint; /v1/messages is appended.");
        var key = field(form, "API key", input("password", "", existing && existing.keyOk ? "stored - type to replace" : "API key"),
@@ -247,7 +161,7 @@ index 0036574..11dc77e 100644
        var modelsUrl = field(form, "Models list URL", input("text", existing ? existing.modelsUrl || "" : "", "optional - found automatically"),
          "Where the provider lists its models (GET, OpenAI or Anthropic shape), on the base URL's host - the key " +
          "goes nowhere else. Left empty, fetch models tries the preset's address, then <base URL>/v1/models, " +
-@@ -3208,9 +3225,8 @@
+@@ -3215,9 +3225,8 @@
      var notice = el("div", "cdbx-notice");
      notice.appendChild(el("div", "cdbx-notice-title", "Changes here require a restart of Claude Desktop"));
      notice.appendChild(el("div", "cdbx-notice-body",
@@ -657,95 +571,22 @@ index d2bf756..eff89ca 100755
      -h|--help)     usage ;;
      *)             echo "[ERROR] Unknown category: $1" >&2; usage ;;
  esac
-diff --git a/scripts/tests/community/test-custom-models-main.mjs b/scripts/tests/community/test-custom-models-main.mjs
-index 691ba23..78c947b 100644
---- a/scripts/tests/community/test-custom-models-main.mjs
-+++ b/scripts/tests/community/test-custom-models-main.mjs
-@@ -22,7 +22,8 @@ const PRELOAD_STUB = "/*preload*/";
- 
- // Runs the module; returns the IPC handlers, the global it exports, the
- // web-contents-created listener and the diag lines it logged.
--function load(profileDir, env) {
-+function load(profileDir, env, opts) {
-+  opts = opts || {};
-   const handlers = {};
-   const appListeners = {};
-   const diag = [];
-@@ -35,8 +36,9 @@ function load(profileDir, env) {
-   };
-   const src = readFileSync(join(ROOT, "js/custom_models_main.js"), "utf8")
-     .replace('"__CDB_CM_PRELOAD_SRC__"', JSON.stringify(PRELOAD_STUB));
--  const sandbox = { require: (m) => (m === "electron" ? electron : Module.createRequire(import.meta.url)(m)),
--    process: { platform: "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
-+  const sandbox = { require: (m) => (m === "electron" ? electron
-+      : (opts.modules && opts.modules[m]) || Module.createRequire(import.meta.url)(m)),
-+    process: { platform: opts.platform || "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
-     fetch: (url, init) => { sandbox.__fetchCalls.push({ url, init }); return sandbox.__fetchImpl(url, init); } };
-   sandbox.__fetchCalls = [];
-   sandbox.__fetchImpl = () => Promise.resolve(new Response(JSON.stringify({ id: "msg" }), { status: 200 }));
-@@ -1662,5 +1664,51 @@ async function settle() { await new Promise((r) => setTimeout(r, 10)); }
-   rmSync(dir, { recursive: true, force: true });
- }
- 
-+// --- Windows: a profile path with a space goes through its 8.3 short form ---
-+// The Windows build (scripts/windows/build-windows.sh) runs this module with
-+// userData under C:\Users\<name>, which often has a space BUN_OPTIONS cannot
-+// carry. The short-name lookup is cmd's job; it is stubbed here.
-+{
-+  const dir = mkdtempSync(join(tmpdir(), "cdb cm win-"));
-+  writeFileSync(join(dir, "claude-desktop-extra.jsonc"), PROVIDERS);
-+  switchOn(dir);
-+  const calls = [];
-+  let answer = "/short/CDBCMW~1\r\n";
-+  const cp = { execFileSync: (file, args, o) => { calls.push({ file, args, o }); return answer; } };
-+  const { api, diag } = load(dir, { ComSpec: "C:\\Windows\\system32\\cmd.exe" }, { platform: "win32", modules: { child_process: cp } });
-+  const env = api.cliEnv();
-+  ok(env.BUN_OPTIONS === "--preload=/short/CDBCMW~1/custom-models/preload.js",
-+     "win32: the preload is passed through the short profile path: " + env.BUN_OPTIONS);
-+  ok(calls.length === 1 && calls[0].file === "C:\\Windows\\system32\\cmd.exe" &&
-+     calls[0].args.join(" ") === '/d /c for %I in ("' + dir + '") do @echo %~sI' &&
-+     calls[0].o.windowsVerbatimArguments === true && calls[0].o.windowsHide === true,
-+     "win32: only the profile directory is shortened, by cmd, quoted verbatim and hidden");
-+  ok(env.CDB_CUSTOM_MODELS_ROUTES === join(dir, "custom-models", "routes.json"),
-+     "win32: the other paths travel in their own variables, spaces and all");
-+  api.cliEnv();
-+  ok(calls.length === 1, "win32: the short form is looked up once per profile");
-+  const spawnOpts = { env: Object.assign({ PATH: "x" }, env) };
-+  api.remoteSpawn(spawnOpts);
-+  ok(!("BUN_OPTIONS" in spawnOpts.env) && !("CDB_CUSTOM_MODELS_JSON" in spawnOpts.env),
-+     "win32: an SSH/WSL session still loses the short-form preload");
-+  // A volume without 8.3 names: cmd echoes the long path back.
-+  answer = dir + "\r\n";
-+  const r2 = load(dir, {}, { platform: "win32", modules: { child_process: cp } });
-+  ok(JSON.stringify(r2.api.cliEnv()) === "{}" && r2.diag.some((l) => /8\.3 short name/.test(l)),
-+     "win32 without short names: the session is left alone, and the log says why");
-+  // Characters cmd would expand are never handed to it.
-+  const calls0 = calls.length;
-+  const pct = mkdtempSync(join(tmpdir(), "cdb cm %x%-"));
-+  writeFileSync(join(pct, "claude-desktop-extra.jsonc"), PROVIDERS);
-+  switchOn(pct);
-+  const r3 = load(pct, {}, { platform: "win32", modules: { child_process: cp } });
-+  ok(JSON.stringify(r3.api.cliEnv()) === "{}" && calls.length === calls0, "win32: a path with % is not passed to cmd");
-+  // Linux keeps refusing a path with a space, without asking anyone.
-+  const r4 = load(dir, {}, { modules: { child_process: cp } });
-+  ok(JSON.stringify(r4.api.cliEnv()) === "{}" && calls.length === calls0, "linux: a path with a space is still refused, no lookup");
-+  rmSync(dir, { recursive: true, force: true });
-+  rmSync(pct, { recursive: true, force: true });
-+}
-+
- console.log(`\n${pass} passed, ${fail} failed`);
- process.exit(fail ? 1 : 0);
 diff --git a/scripts/tests/core/test-extra-settings-dom.mjs b/scripts/tests/core/test-extra-settings-dom.mjs
-index 6416ab0..abcec72 100644
+index 4880e26..d23c211 100644
 --- a/scripts/tests/core/test-extra-settings-dom.mjs
 +++ b/scripts/tests/core/test-extra-settings-dom.mjs
-@@ -1915,6 +1915,32 @@ async function run() {
-   const items = ourItems();
+@@ -1916,12 +1916,29 @@ async function run() {
    const box = navbox();
  
-+  // --- the Windows build: the page runs with navigator.platform "Win32" and
-+  //     offers the Models panel only (scripts/windows/build-windows.sh).
-+  if (kind === "windows") {
+   // --- the Windows build: the page runs with navigator.platform "Win32" and
+-  //     offers the Models panel only.
++  //     offers Themes, Community, Models and Anthropic, and only the shipped
++  //     Community rows.
+   if (kind === "windows") {
+-    ok(items.length === 1, "Windows: one row was added (" + items.length + ")");
+-    ok(items.length === 1 && items[0].textContent.trim() === "Models",
+-       "Windows: the row is Models (" + (items[0] ? items[0].textContent.trim() : "none") + ")");
+-    if (items.length === 1) await assertPanelMounts(items[0]);
 +    const names = items.map(function (it) { return it.textContent.trim(); });
 +    ok(names.join(",") === "Themes,Community,Models,Anthropic",
 +       "Windows: Themes, Community, Models and Anthropic, no Deployment (" + names.join(",") + ")");
@@ -766,29 +607,6 @@ index 6416ab0..abcec72 100644
 +        ok(has(label), "Windows: the shipped row is there: " + label);
 +      });
 +    }
-+    return;
-+  }
-+
-   ok(items.length === LABELS.length, LABELS.length + " rows were added (" + items.length + ")");
-   ok(!!document.querySelector(".cdbx-navgroup"), "the rainbow Extra label is in the DOM");
-   ok(document.querySelector(".cdbx-navgroup").textContent === "Extra", "it says Extra");
-@@ -2530,6 +2556,9 @@ window.cdbExtra = {
- };
- </script>
- <script>
-+${name === "windows" ? 'Object.defineProperty(navigator, "platform", { get: function () { return "Win32"; } });' : ""}
-+</script>
-+<script>
- // Exactly how the main process delivers it: the source as one evaluated string,
- // whose value is the status line executeJavaScript() logs.
- var __status = eval(${JSON.stringify(PAGE_JS)});
-@@ -2564,7 +2593,8 @@ const scenarios = [
-   ["es-testid", FIXTURE_ES(true)],
-   ["es-labels", FIXTURE_ES(false)],
-   ["no-headers", FIXTURE_NO_HEADERS],
--  ["bare", FIXTURE_BARE]
-+  ["bare", FIXTURE_BARE],
-+  ["windows", FIXTURE_REAL(true, false)]
- ];
+     return;
+   }
  
- let pass = 0;
