@@ -563,6 +563,13 @@
     { kind: "flags", label: "Anthropic", icon: ICON_FLAGS, tooltip: "Anthropic Features" },
     { kind: "deploy", label: "Deployment", icon: ICON_DEPLOY }
   ];
+  // The Windows build (scripts/windows/build-windows.sh) carries custom models
+  // only: the other panels drive patches it does not include, or Linux paths
+  // (/etc/claude-desktop) that do not exist there.
+  var WINDOWS_NAV = { models: true };
+  if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
+    NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
+  }
 
   function applyAttrs(node, map) {
     Object.keys(map).forEach(function (k) { node.setAttribute(k, map[k]); });

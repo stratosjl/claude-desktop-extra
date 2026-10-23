@@ -8,7 +8,7 @@ The official `.deb` (apt repo `https://downloads.claude.ai/claude-desktop/apt`) 
 
 **Layout invariant (2026-07-13):** every package ships the `.deb`'s `usr/lib/claude-desktop/` tree **verbatim** (binary renamed `claude-desktop` -> `claude`; patched `resources/app.asar` exe-adjacent; our CU bridges added to `resources/`). Electron auto-loads the adjacent asar - the official build's `OnlyLoadAppFromAsar` + `EnableEmbeddedAsarIntegrityValidation` fuses are on (integrity is not enforced on Linux, which is why a patched asar boots). The launcher passes NO asar on the command line, so `process.resourcesPath` and `app.isPackaged` behave exactly as on the stock Anthropic `.deb`. Never add a patch that redirects resource paths; put bundled files at their upstream `resources/` position instead. On NixOS the nixpkgs Electron dist is merged with our `resources/` into one directory to preserve the same adjacency.
 
-- **Target platform:** Linux only (X11, Wayland, XWayland). No macOS/Windows code.
+- **Target platform:** Linux (X11, Wayland, XWayland). One exception: the experimental Windows 11 build ([docs/windows.md](docs/windows.md)) - `scripts/windows/build-windows.sh` patches Anthropic's official Windows package with `scripts/apply_patches.py --windows` (the shared patches in its `WINDOWS_PATCH_SET` plus `patches/windows/`). Shared JS that runs there gates on `linux`/`win32` explicitly; everything else stays Linux-only. No macOS code.
 - **Architectures:** x86_64 (primary) and aarch64.
 - **glibc floor:** 2.34 (RHEL 9 / Ubuntu 22.04). Debian 11 is not supported. If upstream's `claude-native-binding.node` asks for a glibc above 2.34 through weak symbols only (v2.19675.1 did, for GLIBC_2.39; v2.26454.0 tops out at 2.34), `scripts/fix-native-glibc-floor.py` marks those version-needs weak at build time; a strong symbol above the floor fails the build, and CI asserts the result.
 - **Native binaries we ship** (the four Computer Use bridges) build for x86_64 AND aarch64, each with a stated glibc floor or as static musl; CI verifies with `objdump -T | grep GLIBC_`. A new native binary picks the floor of its minimum viable distro.
@@ -26,6 +26,7 @@ The full distro, session-type, input/screenshot backend and per-bridge glibc tab
 ./scripts/build-local.sh --deb /path/to/claude-desktop_amd64.deb
 ./scripts/build-ubuntu-local.sh               # Ubuntu/Debian
 ./scripts/build-fedora-local.sh               # Fedora/RHEL
+scripts/windows/build-windows.sh              # Windows 11 portable zip (docs/windows.md)
 # local builds skip the Electron smoke test; opt in with --smoke-test (or SKIP_SMOKE_TEST=0). CI always runs it.
 
 cd patches && make -j"$(nproc)" && cd ..      # compile all Nim patches
@@ -203,10 +204,11 @@ patches/           # Nim patch sources (.nim) + Makefile, compiled to native bin
 patches/linux/     #   Linux compatibility - always on, not user-configurable (37)
 patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (17)
 patches/core/      #   Always-on infrastructure: Extra settings pages, theme engine, GrowthBook overrides, multi-profile (7)
+patches/windows/   #   Windows build only, applied by `apply_patches.py --windows` after the shared set; pinned by EXPECTED_WINDOWS_PATCH_COUNT (1)
 js/                # Shared JS snippets embedded by Nim patches via staticRead ("../../js/..." from a patch)
 scripts/           # Build, validation, and launcher scripts
 scripts/tests/     # Feature test harnesses, grouped like patches/ (run: scripts/run-feature-tests.sh)
-packaging/         # Per-format packaging: apt, debian, rpm, appimage, nix, pacman, arch (PKGBUILD.template + .install)
+packaging/         # Per-format packaging: apt, debian, rpm, appimage, nix, pacman, arch (PKGBUILD.template + .install), windows (Install.cmd)
 docs/              # Per-feature deep-dives, the patch catalog (patches.md), troubleshooting.md, command-line.md
 baseline/          # Version-sensitive reference docs re-validated each release
 .claude/skills/    # Optional Claude Code skills for this repo (/update, /debug, /linux, ...)

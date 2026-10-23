@@ -26,7 +26,9 @@
  */
 ;/*__CDB_EXTRA_SETTINGS__*/(function () {
   "use strict";
-  if (typeof process === "undefined" || process.platform !== "linux") return;
+  // Linux, and the Windows build (scripts/windows/build-windows.sh), which
+  // ships this page with the Models panel only (see NAV_ITEMS in the page).
+  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
 
   var _electron = require("electron");
   var _app = _electron.app;

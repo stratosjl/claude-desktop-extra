@@ -2,6 +2,22 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-10-23
+
+### Windows 11 build (experimental)
+
+- **A portable Windows build with custom models and profiles.** `scripts/windows/build-windows.sh` takes
+  Anthropic's official Windows package (verified against its `RELEASES` manifest), applies the custom models
+  patch, the Settings → Extra page (Models panel only on Windows) and the profile window title, plus the new
+  `add_windows_profiles.nim` (windows), and zips it with an `Install.cmd` that installs per user and adds
+  Start Menu shortcuts per profile (`Install.cmd -Profile work`). `claude.exe --profile=NAME` uses
+  `%APPDATA%\Claude-NAME` and `%USERPROFILE%\.claude-NAME`, and sign-in callbacks go back to the profile
+  that started them. Windows enforces the asar integrity fuse, so the build rewrites the archive hash in
+  `claude.exe` (the exe's signature no longer verifies; no auto-update). New **Build Windows** workflow builds
+  x64 and arm64 and boots the x64 build on a Windows runner. On Windows, custom models load their CLI preload
+  through the profile folder's 8.3 short name when the user folder contains a space. Linux packages are
+  unchanged. See [docs/windows.md](docs/windows.md).
+
 ## 2026-10-22
 
 ### "Update available" follows this project's releases
