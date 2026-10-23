@@ -122,7 +122,8 @@ jobs:
           do {
             Start-Sleep -Seconds 5
             $text = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
-            $missing = $want | Where-Object { $text -notlike "*$_*" }
+            # Contains, not -like: -like reads [custom-models] as a wildcard set.
+            $missing = $want | Where-Object { -not $text.Contains($_) }
           } while ($missing -and -not $p.HasExited -and (Get-Date) -lt $deadline)
 
           Write-Host "--- claude-patches.log"; if (Test-Path $log) { Get-Content $log }
