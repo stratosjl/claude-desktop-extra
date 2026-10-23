@@ -111,13 +111,14 @@ This fork follows [patrickjaja/claude-desktop-extra](https://github.com/patrickj
   - the `win32` gates of the shipped features;
   - the Windows Settings → Extra nav and Community list (`js/extra_settings_page.js`);
   - Windows fixes:
-    - custom models: the 8.3 short path, and the router accepting `claude.exe` (the Windows name of the Claude Code binary) as well as `claude`;
     - git resolved from PATH only, with no console window, in diff views;
     - native path joins in files quick open;
     - the theme caption colors, BOM-tolerant config reads, and no app menu in the theme picker;
     - the Windows 3P folder;
-  - `apply_patches.py --windows` and the `patches/windows` Makefile rule;
-  - the Windows cases in two upstream tests.
+  - `apply_patches.py --windows`, the `windows` category of `scripts/run-feature-tests.sh` and the `patches/windows` Makefile rule;
+  - the Windows cases in the Extra settings DOM test.
+
+  Custom models need no overlay any more: upstream took the fork's Windows changes for them (the `win32` gate and the 8.3 short path in [patrickjaja/claude-desktop-extra#295](https://github.com/patrickjaja/claude-desktop-extra/pull/295), the router accepting `claude.exe` in [#296](https://github.com/patrickjaja/claude-desktop-extra/pull/296)).
 
   So syncing master with upstream never conflicts. If upstream rewrites one of those lines, `prepare-sources.sh` fails loudly instead.
 - **Daily automation:** the **Upstream Sync** workflow (`.github/workflows/upstream-sync.yml`) runs every morning:
