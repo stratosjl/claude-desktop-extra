@@ -1,11 +1,21 @@
 # Windows 11 (experimental)
 
-A portable Windows build of Anthropic's official Claude Desktop with two of this project's extras:
+A portable Windows build of Anthropic's official Claude Desktop with this project's extras:
 
-- **[Custom models](custom-models.md)**: models from other providers in the Code tab's picker, set up in Settings → Extra → Models.
 - **Profiles**: several separate Claude instances side by side, each with its own sign-in, settings and Claude Code configuration.
+- **Settings → Extra**, with these panels:
+  - **Themes**: the [theme engine](themes.md), its bundled palettes and the <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> picker.
+  - **Community**: the opt-in features. They are diff view modes, panel tabs and files quick open (<kbd>Ctrl</kbd>+<kbd>P</kbd>) in the [Code tab](code-tab.md); load large sessions in full; allow non-Anthropic models (3P gateways); calm Cowork glow; the theme picker; and developer tools.
+  - **Models**: [custom models](custom-models.md) from other providers in the Code tab's picker.
+  - **Anthropic**: [feature flag overrides](feature-flags.md).
 
-Everything else is Anthropic's Windows app as shipped. The Linux-only extras (Computer Use bridges, themes, Quick Entry socket, the other community features) are not part of this build.
+Everything else is Anthropic's Windows app as shipped. Left out because Windows has its own, or they are Linux plumbing:
+
+- the Linux fixes;
+- Computer Use bridges;
+- window controls, native titlebar and transparent window;
+- the Quick Entry socket and `--toggle`/`--reload-theme` (Windows has its own Quick Entry shortcut; theme files are re-read when they change);
+- the Deployment panel (Windows takes managed settings from the registry, `SOFTWARE\Policies\Claude`).
 
 ## Install
 
@@ -41,13 +51,23 @@ Known limits: **Start at login** starts the default profile; all profiles share 
 
 ## Custom models
 
-Identical to Linux ([custom-models.md](custom-models.md)), with the Windows paths above. The Settings → Extra area shows the **Models** panel only on Windows.
+Identical to Linux ([custom-models.md](custom-models.md)), with the Windows paths above.
 
 The model routing loads a preload into the Claude Code CLI through `BUN_OPTIONS`, which cannot carry a space. When the user folder has one (`C:\Users\John Smith`), the preload is passed through the profile folder's 8.3 short name (`C:\Users\JOHNSM~1\...`). On a drive with short names turned off, sessions are not routed and `claude-patches.log` says so; setting `CLAUDE_USER_DATA_DIR` to a folder without spaces is the workaround.
 
+## Settings files
+
+The extras keep their settings in the profile folder (`%APPDATA%\Claude`, or `%APPDATA%\Claude-<name>`):
+
+- `claude-desktop-extra.json` is written by Settings → Extra.
+- `claude-desktop-extra.jsonc` is yours to edit. Its keys are those of [docs/claude-desktop-extra.jsonc](claude-desktop-extra.jsonc).
+- Your own themes go in `themes.d\`.
+
+Save hand-edited files as **UTF-8 without a byte-order mark**: Notepad's default, or `Set-Content -Encoding utf8NoBOM` in PowerShell 7. Windows PowerShell 5.1's `>` and `Set-Content -Encoding UTF8` write encodings that some of these readers cannot parse.
+
 ## Logs
 
-`%APPDATA%\Claude\logs\` (or `%APPDATA%\Claude-<name>\logs\`): `claude-patches.log` holds our lines (`[win-profiles]`, `[custom-models]`, `[ExtraSettings]`), `custom-models.log` the routed requests, `main.log` the app's own log.
+`%APPDATA%\Claude\logs\` (or `%APPDATA%\Claude-<name>\logs\`): `claude-patches.log` holds our lines (`[win-profiles]`, `[ExtraSettings]`, `[CustomThemes]`, `[custom-models]`, `[DiffViews]`, ...), `custom-models.log` the routed requests, `main.log` the app's own log.
 
 ## How it is built
 
@@ -55,7 +75,9 @@ The model routing loads a preload into the Claude Code CLI through `BUN_OPTIONS`
 
 1. Reads `https://downloads.claude.ai/releases/win32/<arch>/RELEASES` (what the official installer reads), downloads the full Squirrel `.nupkg` and checks its size and SHA1 against it.
 2. Prepares the sources: `scripts/windows/prepare-sources.sh` copies the repo to a temp folder and applies `scripts/windows/upstream-overlay.patch` there (see [Staying in sync with upstream](#staying-in-sync-with-upstream)).
-3. Extracts `app.asar` and applies the Windows patch set from that copy: `apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (custom models, the Extra settings page and its bridge, the profile window title), then everything in `patches/windows/`. The strictness rules are the same as on Linux: a patch that does not match fails the build.
+3. Extracts `app.asar` and applies the Windows patch set from that copy:
+   - `apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (every core and community feature except the Linux window handling, the Quick Entry socket and the Linux profile URL routing), then everything in `patches/windows/`;
+   - the allow-non-Anthropic-models patch of `resources/ion-dist` (the 3P setup window) runs on that folder. The strictness rules are the same as on Linux: a patch that does not match fails the build.
 4. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
 5. Drops the Squirrel updater (the build is portable and does not auto-update) and zips `app\` with `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` and `VERSION.txt`.
 
@@ -74,10 +96,15 @@ The Windows version stream is not the Linux one (Windows usually ships first), s
 This fork follows [patrickjaja/claude-desktop-extra](https://github.com/patrickjaja/claude-desktop-extra), which ships the Linux packages.
 
 - **The fork only adds files.** Its few edits to upstream files are kept in `scripts/windows/upstream-overlay.patch` and applied to a copy at build time, never committed in place:
-  - the `win32` gates in `js/custom_models_main.js` and `js/extra_settings_main.js`;
-  - the Models-only Settings → Extra nav on Windows (`js/extra_settings_page.js`);
-  - the custom models 8.3 short-path fallback;
-  - `apply_patches.py --windows`, the `patches/windows` Makefile rule;
+  - the `win32` gates of the shipped features;
+  - the Windows Settings → Extra nav and Community list (`js/extra_settings_page.js`);
+  - Windows fixes:
+    - the custom models 8.3 short path;
+    - git resolved from PATH only, with no console window, in diff views;
+    - native path joins in files quick open;
+    - the theme caption colors, BOM-tolerant config reads, and no app menu in the theme picker;
+    - the Windows 3P folder;
+  - `apply_patches.py --windows` and the `patches/windows` Makefile rule;
   - the Windows cases in two upstream tests.
 
   So syncing master with upstream never conflicts. If upstream rewrites one of those lines, `prepare-sources.sh` fails loudly instead.

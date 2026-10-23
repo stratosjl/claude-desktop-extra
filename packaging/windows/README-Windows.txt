@@ -4,11 +4,18 @@ Claude Desktop Extra for Windows 11
 Anthropic's official Claude Desktop for Windows, patched by
 claude-desktop-extra to add:
 
-  * Custom models - models from other providers (DeepSeek, OpenRouter, a
-    LiteLLM gateway, Anthropic's API on your API credit...) in the Code tab's
-    model picker, next to the Claude models. Settings > Extra > Models.
   * Profiles - several separate Claude instances side by side, each with its
     own sign-in, settings and Claude Code configuration.
+  * Settings > Extra:
+      Themes     - bundled color themes, Ctrl+Shift+T picker
+      Community  - opt-in extras: Code tab diff view modes, panel tabs, files
+                   quick open (Ctrl+P), load large sessions in full, allow
+                   non-Anthropic models (3P gateways), calm Cowork glow,
+                   developer tools
+      Models     - custom models from other providers (DeepSeek, OpenRouter,
+                   a LiteLLM gateway, Anthropic's API on your API credit...)
+                   in the Code tab's model picker
+      Anthropic  - feature flag overrides
 
 This is an unofficial build. It is not made or supported by Anthropic.
 
@@ -56,7 +63,9 @@ URL, paste the API key, fetch or add models, turn the switch on and click
 https://github.com/patrickjaja/claude-desktop-extra/blob/master/docs/custom-models.md
 
 The settings live in claude-desktop-extra.json in the profile's folder
-(%APPDATA%\Claude for the default profile).
+(%APPDATA%\Claude for the default profile). To edit settings by hand, use
+claude-desktop-extra.jsonc in the same folder, saved as UTF-8 without a
+byte-order mark (Notepad's default).
 
 
 Good to know
