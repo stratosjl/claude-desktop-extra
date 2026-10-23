@@ -4,6 +4,17 @@ All notable changes to the claude-desktop-extra packages will be documented in t
 
 ## 2026-10-23
 
+### Custom models and the Extra settings page also run on win32 (thanks @stratosjl, #295)
+
+- **No change on Linux.** The custom models module and the Extra settings page now load on `win32` as
+  well as Linux, so a downstream Windows build of this patch set can carry them without editing them
+  ([stratosjl/claude-desktop-extra](https://github.com/stratosjl/claude-desktop-extra) builds one). On
+  Windows the Extra area shows only the Models panel; the other panels drive Linux-only patches or
+  `/etc/claude-desktop`. When the profile folder has a space (`C:\Users\John Smith`), which `BUN_OPTIONS`
+  cannot carry, the CLI preload goes through the folder's 8.3 short name; Linux keeps refusing such a
+  path as before. A leading `~\` in `apiKeyFile` is expanded on Windows. Covered by new win32 cases in
+  `test-custom-models-main.mjs` and a Windows scenario in `test-extra-settings-dom.mjs`.
+
 ### Claude Desktop v3.6556.2
 
 - **Rebased on the official v3.6556.2 `.deb` (bundled Electron 44.9.3).** Three patches were re-fitted to

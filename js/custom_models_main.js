@@ -57,7 +57,8 @@
  */
 ;/*__CDB_CUSTOM_MODELS__*/(function () {
   "use strict";
-  if (typeof process === "undefined" || process.platform !== "linux") return;
+  // Linux, and win32 for downstream Windows builds of this patch set.
+  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
   if (globalThis.__cdbCustomModels) return;
 
   var _electron = require("electron");
@@ -248,7 +249,9 @@
   }
 
   function expandHome(p) {
-    return typeof p === "string" && p.indexOf("~/") === 0 ? _path.join(_os.homedir(), p.slice(2)) : p;
+    // A leading ~\ too on Windows, where that is how a home-relative path is written.
+    var home = typeof p === "string" && (p.indexOf("~/") === 0 || (process.platform === "win32" && p.indexOf("~\\") === 0));
+    return home ? _path.join(_os.homedir(), p.slice(2)) : p;
   }
   function secretsPath() {
     var d = pathFor(SUBDIR);
@@ -1171,6 +1174,35 @@
       return null;
     }
   }
+  // Windows only: the preload path with its profile directory in 8.3 short
+  // form (C:\Users\JOHNSM~1\...\Claude), so it carries no space. Only the
+  // profile directory is shortened: the custom-models\preload.js tail stays
+  // spelled out, which remoteSpawn() recognises. null when the volume does not
+  // generate short names or the path holds a character cmd would expand.
+  var shortPathCache = Object.create(null);
+  function shortPreloadPath(p) {
+    if (process.platform !== "win32") return null;
+    var profileDir = _path.dirname(_path.dirname(p));
+    var tail = p.slice(profileDir.length);
+    if (/\s/.test(tail) || /["%^!&|<>]/.test(profileDir)) return null;
+    if (!(profileDir in shortPathCache)) {
+      var short = null;
+      try {
+        // windowsVerbatimArguments: Node's own quoting (\") means nothing to
+        // cmd. The path is checked above for every character cmd treats
+        // specially inside quotes.
+        var out = require("child_process").execFileSync(process.env.ComSpec || "cmd.exe",
+          ["/d", "/c", "for %I in (\"" + profileDir + "\") do @echo %~sI"],
+          { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true, timeout: 5000 });
+        var line = String(out).split(/\r?\n/)[0].trim();
+        if (line && !/\s/.test(line) && _path.isAbsolute(line)) short = line;
+      } catch (e) { log("short path lookup failed: " + (e && e.message ? e.message : String(e))); }
+      shortPathCache[profileDir] = short;
+      if (short) log("profile path has a space; the preload is loaded through its short form " + short);
+    }
+    return shortPathCache[profileDir] ? shortPathCache[profileDir] + tail : null;
+  }
+
   // The routing payload the preload works from: providers with their keys,
   // models with what the sanitiser needs, the app-wide web-search target.
   function routesPayload(cfg) {
@@ -1230,9 +1262,12 @@
       var preload = ensurePreload();
       if (!preload) return {};
       // BUN_OPTIONS is split on whitespace: a preload path with a space in it
-      // would load nothing, or break the CLI's start. Leave the session alone.
+      // would load nothing, or break the CLI's start. On Windows, where the
+      // user folder often has one (C:\Users\John Smith), try its 8.3 short
+      // form first; otherwise leave the session alone.
+      if (/\s/.test(preload)) preload = shortPreloadPath(preload) || preload;
       if (/\s/.test(preload)) {
-        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry - sessions are not routed");
+        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry" + (process.platform === "win32" ? " (and the volume gave no space-free 8.3 short name)" : "") + " - sessions are not routed");
         return {};
       }
       syncRoutes();
