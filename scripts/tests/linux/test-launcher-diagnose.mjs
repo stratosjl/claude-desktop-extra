@@ -399,6 +399,302 @@ safe("D6 ordering", () => {
     guard("_appimage_integrate quiet || true"), true);
 });
 
+// ---------------------------------------------------------------- D7
+// --reset-screen-sharing runs each bundled portal bridge's forget-session and
+// says what happened in words; only a bridge that failed fails the command.
+// The bridges print one JSON object: GNOME on one line, KDE pretty-printed.
+console.log("D7: --reset-screen-sharing");
+safe("D7", () => {
+  const root = join(scratch, "d7");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const reply = (json, code = 0) => `#!/bin/sh\n[ "$1" = --version ] && { echo 'b 0.1.0'; exit 0; }\n[ "$1" = forget-session ] || exit 9\ncat <<'EOF'\n${json}\nEOF\nexit ${code}\n`;
+  const GNOME_OK = reply('{"ok":true,"ended":true,"daemon":"sigterm","token_removed":true,"token_path":"/s/gnome-portal-bridge/restore-token.json"}');
+  const GNOME_NOTHING = reply('{"ok":true,"ended":true,"token_removed":false,"token_path":"/s/x"}');
+  const KDE_NOTHING = reply('{\n  "daemon": "none",\n  "ended": false,\n  "ok": true,\n  "token_path": "/s/y",\n  "token_removed": false\n}');
+  const KDE_FAIL = reply('{\n  "error": "failed to delete restore token /s/y: Is a directory (os error 21)",\n  "ok": false\n}', 1);
+  const OLD = "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'b 0.1.0'; exit 0; }\necho \"error: unrecognized subcommand '$1'\" >&2\nexit 2\n";
+  const run = (name, bridges, extraEnv = {}) => {
+    const electron = fakeTree(join(root, name), bridges);
+    const r = spawnSync(BASH, [launcherPath, "--reset-screen-sharing"], {
+      env: { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron, XDG_RUNTIME_DIR: join(root, "run"), ...extraEnv },
+      encoding: "utf8", timeout: 60000,
+    });
+    return { status: r.status, out: (r.stdout || "") + (r.stderr || "") };
+  };
+  let r = run("both", { "gnome-portal-bridge": GNOME_OK, "kwin-portal-bridge": KDE_NOTHING });
+  check("both bridges: exit 0", r.status, 0);
+  check("GNOME line names the removed choice and the ended session",
+    r.out.includes("GNOME screen sharing: remembered choice removed and the running screen-sharing session ended; the next Computer Use task will ask again."), true);
+  check("KDE pretty-printed answer with nothing stored", r.out.includes("KDE screen sharing: nothing to reset."), true);
+  check("GNOME without a daemon field ended nothing (ended:true is not trusted)",
+    run("gnone", { "gnome-portal-bridge": GNOME_NOTHING }).out.includes("GNOME screen sharing: nothing to reset."), true);
+  r = run("one", { "gnome-portal-bridge": GNOME_OK });
+  check("one bridge missing: exit 0", r.status, 0);
+  check("one bridge missing: only the present one reports", r.out.includes("GNOME screen sharing:") && !r.out.includes("KDE"), true);
+  r = run("fail", { "gnome-portal-bridge": GNOME_OK, "kwin-portal-bridge": KDE_FAIL });
+  check("ok:false: exit non-zero", r.status, 1);
+  check("ok:false: the bridge's error is shown",
+    r.out.includes("KDE screen sharing: reset FAILED - failed to delete restore token /s/y: Is a directory (os error 21)"), true);
+  check("ok:false: the other bridge still ran", r.out.includes("GNOME screen sharing: remembered choice removed"), true);
+  r = run("old", { "gnome-portal-bridge": OLD });
+  check("older bridge without forget-session: exit 0", r.status, 0);
+  check("older bridge without forget-session: said plainly",
+    /GNOME screen sharing: this bridge cannot reset its remembered choice .*; update claude-desktop-extra\./.test(r.out), true);
+  const oldOverride = join(root, "old-override");
+  writeExe(oldOverride, OLD);
+  r = run("old-ov", {}, { GNOME_PORTAL_BRIDGE_BIN: oldOverride });
+  check("older bridge from an override: the variable is named, not the package",
+    r.out.includes(`GNOME screen sharing: GNOME_PORTAL_BRIDGE_BIN points to a bridge without forget-session (${oldOverride}); update that bridge.`), true);
+  r = run("none", {});
+  check("no bridges: nothing to reset", /No Computer Use bridge with a screen-sharing session found in .*; nothing to reset\./.test(r.out) && r.status === 0, true);
+  // The app's *_BRIDGE_BIN override wins over resources/, as in js/cu_mode_preamble.js.
+  const override = join(root, "override-kwin");
+  writeExe(override, KDE_FAIL);
+  r = run("override", { "kwin-portal-bridge": KDE_NOTHING }, { KWIN_PORTAL_BRIDGE_BIN: override });
+  check("KWIN_PORTAL_BRIDGE_BIN override is used", r.status === 1 && r.out.includes("reset FAILED"), true);
+});
+
+// ---------------------------------------------------------------- D8
+console.log("D8: --diagnose with contract-0 portal bridges (the pre-contract checks)");
+safe("D8", () => {
+  const root = join(scratch, "d8");
+  const home = join(root, "home");
+  const state = join(root, "state");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(join(state, "kwin-portal-bridge"), { recursive: true });
+  writeFileSync(join(state, "kwin-portal-bridge", "restore-token.json"), "{}");
+  // forget-session would delete the grant: --diagnose must never call it, and
+  // session-start would open the portal: it must never be called either.
+  const gnome = `#!/bin/sh
+case "$1" in
+  --version) echo 'gnome-portal-bridge 0.1.0' ;;
+  doctor) echo '{"restore_token_present":true,"daemon_running":true}' ;;
+  screens) echo '[{"id":"eDP-1","geometry":{"x":0,"y":0,"width":1,"height":1},"is_primary":true,"is_shared":true},{"id":"HDMI-1","geometry":{"x":1,"y":0,"width":1,"height":1},"is_primary":false,"is_shared":false}]' ;;
+  forget-session) [ "$2" = --help ] && exit 0; echo "unexpected $*" >> "${root}/forbidden"; exit 1 ;;
+  *) echo "unexpected $1" >> "${root}/forbidden"; exit 1 ;;
+esac
+`;
+  const kwin = `#!/bin/sh
+case "$1" in
+  --version) echo 'kwin-portal-bridge 0.1.0' ;;
+  doctor) echo "error: unrecognized subcommand 'doctor'" >&2; exit 2 ;;
+  windows) echo '[]' ;;
+  forget-session) [ "$2" = --help ] && exit 0; echo "unexpected $*" >> "${root}/forbidden"; exit 1 ;;
+  *) echo "unexpected $1" >> "${root}/forbidden"; exit 1 ;;
+esac
+`;
+  const electron = fakeTree(join(root, "tree"), { "gnome-portal-bridge": gnome, "kwin-portal-bridge": kwin });
+  const r = spawnSync(BASH, [launcherPath, "--diagnose"], {
+    env: { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron, XDG_STATE_HOME: state,
+           XDG_RUNTIME_DIR: join(root, "run"), XDG_SESSION_TYPE: "wayland",
+           WAYLAND_DISPLAY: "wayland-9", XDG_CURRENT_DESKTOP: "GNOME" },
+    encoding: "utf8", timeout: 90000,
+  });
+  const out = r.stdout || "";
+  check("exit status", r.status, 0);
+  const sec = out.slice(out.indexOf("--- Computer Use bridges (CLI contract) ---"), out.indexOf("--- Cowork VM"));
+  check("section present", sec.length > 0, true);
+  const g = sec.slice(sec.indexOf("[gnome-portal-bridge]"), sec.indexOf("[kwin-portal-bridge]"));
+  const k = sec.slice(sec.indexOf("[kwin-portal-bridge]"));
+  check("contract 0 is named", g.includes("doctor: contract 0") && k.includes("doctor: contract 0"), true);
+  check("GNOME grant from its (pre-contract) doctor", g.includes("remembered choice = yes"), true);
+  check("GNOME daemon from its doctor", g.includes("session daemon = running"), true);
+  check("GNOME screens on a GNOME Wayland session", g.includes("gnome-portal-bridge screens = ok"), true);
+  check("shared monitor", g.includes("monitor eDP-1 = shared"), true);
+  check("unshared monitor", g.includes("monitor HDMI-1 = NOT SHARED"), true);
+  check("KDE grant from its token file", k.includes("remembered choice = yes"), true);
+  check("KDE daemon from its socket", k.includes("session daemon = not running"), true);
+  check("the reset flag is named", sec.includes("claude-desktop --reset-screen-sharing"), true);
+  check("no state-changing bridge call", existsSync(join(root, "forbidden")) ? readFileSync(join(root, "forbidden"), "utf8") : "", "");
+});
+
+// ---------------------------------------------------------------- D9
+// Bridges on the CLI contract (docs/computer-use-bridge-contract.md): the
+// launcher knows them only through doctor - including a bridge it has never
+// heard of - and reads pretty-printed JSON without jq or python3.
+console.log("D9: contract-1 bridges, discovered generically");
+const doctorJson = (name, o) => JSON.stringify({
+  contract: 1, bridge: name, version: "2.0.0", backend: o.backend,
+  session_match: !!o.match, backend_reachable: o.reachable !== false,
+  backend_error: o.reachable === false ? "cannot open display" : null,
+  session_supported: !!o.supported, restore_token_present: !!o.token,
+  restore_token_path: o.supported ? `/s/${name}/restore-token.json` : null,
+  daemon_running: !!o.daemon, session_socket: o.supported ? `/r/${name}/session.sock` : null,
+  ...(o.stopped === undefined ? {} : { stopped_by_user: o.stopped }),
+  extra_key: { nested: true },
+}, null, 2);
+// A stub bridge: logs "<name> <subcommand>" to calls, answers from o.
+function contractStub(name, o, calls) {
+  const reply = (sub, text) => `  ${sub}) cat <<'JSON'\n${text}\nJSON\n  ;;\n`;
+  return `#!/bin/sh\necho "${name} $1" >> '${calls}'\ncase "$1" in\n` +
+    `  --version) echo '${name} 2.0.0' ;;\n` +
+    (o.contract0 ? `  doctor) echo "error: unrecognized subcommand 'doctor'" >&2; exit 2 ;;\n` : reply("doctor", doctorJson(name, o))) +
+    reply("screens", o.screens || "[]") +
+    reply("forget-session", o.forget || '{"ok":true,"ended":false,"daemon":"none","token_removed":false,"token_path":null}') +
+    `  *) exit 2 ;;\nesac\n`;
+}
+safe("D9", () => {
+  const root = join(scratch, "d9");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const calls = join(root, "calls");
+  const PRETTY_SCREENS = JSON.stringify([
+    { id: "eDP-1", name: "eDP-1", geometry: { x: 0, y: 0, width: 1920, height: 1080 }, is_primary: true, is_shared: true },
+    { id: "DP-2", name: "DP-2", geometry: { x: 1920, y: 0, width: 2560, height: 1440 }, is_primary: false, is_shared: false },
+  ], null, 2);
+  const electron = fakeTree(join(root, "tree"), {
+    "x11-bridge": contractStub("x11-bridge", { backend: "x11", match: true, reachable: false,
+      screens: '[{"id":"X","name":"X","geometry":{"x":0,"y":0,"width":1,"height":1}}]' }, calls),
+    "wlroots-bridge": contractStub("wlroots-bridge", { backend: "wlroots" }, calls),
+    "gnome-portal-bridge": contractStub("gnome-portal-bridge", { backend: "gnome-portal", match: true, supported: true,
+      token: true, daemon: true, stopped: true, screens: PRETTY_SCREENS,
+      forget: '{\n  "ok": true,\n  "ended": true,\n  "daemon": "shutdown-requested",\n  "token_removed": true,\n  "token_path": "/s/g"\n}' }, calls),
+    "kwin-portal-bridge": contractStub("kwin-portal-bridge", { backend: "kwin-portal", supported: true, stopped: false,
+      forget: '{\n  "ok": true,\n  "ended": false,\n  "daemon": "none",\n  "token_removed": false,\n  "token_path": "/s/k"\n}' }, calls),
+    "foo-bridge": contractStub("foo-bridge", { backend: "foo", supported: true, token: true,
+      forget: '{"ok":true,"ended":false,"daemon":"none","token_removed":true,"token_path":"/s/f"}' }, calls),
+  });
+  const env = { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron, XDG_RUNTIME_DIR: join(root, "run"),
+                XDG_SESSION_TYPE: "wayland", WAYLAND_DISPLAY: "wayland-9", XDG_CURRENT_DESKTOP: "GNOME" };
+  const called = () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
+
+  let r = spawnSync(BASH, [launcherPath, "--reset-screen-sharing"], { env, encoding: "utf8", timeout: 60000 });
+  const out = (r.stdout || "") + (r.stderr || "");
+  check("reset: exit 0", r.status, 0);
+  check("reset: GNOME (daemon shutdown-requested counts as ended)",
+    out.includes("GNOME screen sharing: remembered choice removed and the running screen-sharing session ended; the next Computer Use task will ask again."), true);
+  check("reset: KDE", out.includes("KDE screen sharing: nothing to reset."), true);
+  check("reset: an unknown bridge with a session is reset too",
+    out.includes("foo-bridge screen sharing: remembered choice removed; the next Computer Use task will ask again."), true);
+  const forgets = called().filter((l) => l.endsWith(" forget-session")).map((l) => l.split(" ")[0]).sort().join(",");
+  check("reset: forget-session only where doctor says session_supported", forgets, "foo-bridge,gnome-portal-bridge,kwin-portal-bridge");
+
+  rmSync(calls, { force: true });
+  r = spawnSync(BASH, [launcherPath, "--diagnose"], { env, encoding: "utf8", timeout: 90000 });
+  const d = r.stdout || "";
+  check("diagnose: exit 0", r.status, 0);
+  check("diagnose: the unknown bridge is run and listed", d.includes("foo-bridge runs = ok foo-bridge 2.0.0") && d.includes("[foo-bridge]"), true);
+  check("diagnose: doctor's required keys, read from pretty-printed JSON",
+    d.includes("  doctor: contract=1 backend=gnome-portal session_match=true backend_reachable=true backend_error=null " +
+      "session_supported=true restore_token_present=true restore_token_path=/s/gnome-portal-bridge/restore-token.json " +
+      "daemon_running=true session_socket=/r/gnome-portal-bridge/session.sock"), true);
+  // Optional doctor key stopped_by_user: one line where it is true, none where
+  // it is false (kwin) or absent (the others).
+  const STOPPED_LINE = "  stopped_by_user: screen sharing was stopped by the user; the next Computer Use task starts it again";
+  const section = (n) => { const i = d.indexOf(`[${n}] `); const j = d.indexOf("\n[", i + 1); return i < 0 ? "" : d.slice(i, j < 0 ? d.length : j); };
+  check("diagnose: stopped_by_user true -> the stop is named", section("gnome-portal-bridge").includes(STOPPED_LINE), true);
+  check("diagnose: stopped_by_user false or absent -> no line", d.split(STOPPED_LINE).length - 1, 1);
+  const screensBy = called().filter((l) => l.endsWith(" screens")).map((l) => l.split(" ")[0]).sort().join(",");
+  check("diagnose: screens only where session_match and the backend is reachable", screensBy, "gnome-portal-bridge");
+  check("diagnose: an unreachable backend prints its reason instead",
+    d.includes("  screens skipped: backend unreachable (cannot open display)"), true);
+  check("diagnose: per-monitor sharing from pretty-printed screens",
+    d.includes("    monitor eDP-1 = shared") && d.includes("    monitor DP-2 = NOT SHARED"), true);
+  check("diagnose: no is_shared, no monitor lines", /\[x11-bridge\][\s\S]*?monitor X =/.test(d.slice(0, d.indexOf("[foo-bridge]") > 0 ? d.length : 0)), false);
+  check("diagnose: never forget-session or session-start",
+    called().some((l) => / (forget-session|session-start|session-end)$/.test(l)), false);
+  check("diagnose: the reset is advertised (bridges with a session exist)", d.includes("claude-desktop --reset-screen-sharing forgets"), true);
+  const problems = d.slice(d.indexOf("--- Problems found ---"));
+  check("diagnose: an unreachable backend on this session is a problem",
+    /^- x11-bridge serves this session but its backend is unreachable: cannot open display$/m.test(problems), true);
+
+  // One bridge below the contract next to contract-1 ones.
+  const root2 = join(root, "mixed");
+  const calls2 = join(root2, "calls");
+  mkdirSync(root2, { recursive: true });
+  const electron2 = fakeTree(join(root2, "tree"), {
+    "gnome-portal-bridge": contractStub("gnome-portal-bridge", { backend: "gnome-portal", supported: true }, calls2),
+    "kwin-portal-bridge": contractStub("kwin-portal-bridge", { contract0: true,
+      forget: '{\n  "daemon": "none",\n  "ended": false,\n  "ok": true,\n  "token_path": "/y",\n  "token_removed": true\n}' }, calls2),
+    "wlroots-bridge": contractStub("wlroots-bridge", { contract0: true }, calls2),
+  });
+  r = spawnSync(BASH, [launcherPath, "--reset-screen-sharing"], { env: { ...env, CLAUDE_ELECTRON: electron2 }, encoding: "utf8", timeout: 60000 });
+  check("contract 0: kwin-portal-bridge still reset by name",
+    (r.stdout || "").includes("KDE screen sharing: remembered choice removed; the next Computer Use task will ask again."), true);
+  const f2 = readFileSync(calls2, "utf8").split("\n").filter((l) => l.endsWith(" forget-session")).map((l) => l.split(" ")[0]).sort().join(",");
+  check("contract 0: other pre-contract bridges are left alone", f2, "gnome-portal-bridge,kwin-portal-bridge");
+});
+
+// ---------------------------------------------------------------- D10
+// scripts/check-bridge-contract.sh (CI) against stub bridges: a compliant
+// pair passes, a bridge that deletes more than its token fails loudly.
+console.log("D10: check-bridge-contract.sh");
+safe("D10", () => {
+  const PY = (spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout || "").trim();
+  if (!PY) { console.log("  SKIP python3 not found"); return; }
+  const checker = join(repo, "scripts", "check-bridge-contract.sh");
+  const stub = (name, supported, forgetRm = "rm -f \"$f\"") => `#!/bin/sh
+NAME=${name}
+case "$1" in
+  --version) echo "$NAME 1.0.0" ;;
+  doctor)
+    if [ ${supported} = true ]; then tp="\\"$XDG_STATE_HOME/$NAME/restore-token.json\\""; sk="\\"$XDG_RUNTIME_DIR/$NAME/session.sock\\""; else tp=null; sk=null; fi
+    printf '{\\n  "contract": 1,\\n  "bridge": "%s",\\n  "version": "1.0.0",\\n  "backend": "x",\\n  "session_match": false,\\n  "backend_reachable": false,\\n  "backend_error": "no display",\\n  "session_supported": ${supported},\\n  "restore_token_present": false,\\n  "restore_token_path": %s,\\n  "daemon_running": false,\\n  "session_socket": %s\\n}\\n' "$NAME" "$tp" "$sk" ;;
+  session-end) echo '{"ok":true,"ended":false,"daemon":"none"}' ;;
+  forget-session)
+    if [ ${supported} != true ]; then echo '{"ok":true,"ended":false,"daemon":"none","token_removed":false,"token_path":null}'; exit 0; fi
+    f="$XDG_STATE_HOME/$NAME/restore-token.json"; r=false; [ -f "$f" ] && ${forgetRm} && r=true
+    echo "{\\"ok\\":true,\\"ended\\":false,\\"daemon\\":\\"none\\",\\"token_removed\\":$r,\\"token_path\\":\\"$f\\"}" ;;
+  screens|windows|session-start|pointer-move) for a in "$@"; do [ "$a" = --help ] && exit 0; done; exit 1 ;;
+  *) echo "error: unrecognized subcommand '$1'" >&2; exit 2 ;;
+esac
+`;
+  const good = join(scratch, "d10", "good");
+  writeExe(join(good, "gnome-portal-bridge"), stub("gnome-portal-bridge", "true"));
+  writeExe(join(good, "x11-bridge"), stub("x11-bridge", "false"));
+  writeExe(join(good, "README"), "not a bridge\n");
+  let r = spawnSync(BASH, [checker, good], { encoding: "utf8", timeout: 120000 });
+  check("compliant bridges: exit 0", r.status, 0);
+  check("compliant bridges: 2 checked, no FAIL",
+    (r.stdout || "").includes("2 bridge(s): 20 passed, 0 failed") && !/^FAIL/m.test(r.stdout || ""), true);
+  const bad = join(scratch, "d10", "bad");
+  writeExe(join(bad, "kwin-portal-bridge"), stub("kwin-portal-bridge", "true", 'rm -rf "$(dirname "$f")"'));
+  r = spawnSync(BASH, [checker, bad], { encoding: "utf8", timeout: 120000 });
+  check("a bridge deleting the token's siblings: exit 1", r.status, 1);
+  check("...named in a FAIL line", /^FAIL kwin-portal-bridge: forget-session with a stored grant - deleted a sibling file/m.test(r.stdout || ""), true);
+  r = spawnSync(BASH, [checker, join(scratch, "d10")], { encoding: "utf8", timeout: 60000 });
+  check("a dir without bridges fails", r.status === 1 && (r.stdout || "").includes("FAIL no executable *-bridge"), true);
+});
+
+// ---------------------------------------------------------------- D11
+// Portal bridges that cannot execute here (glibc older than 2.39 on RHEL 9 /
+// Ubuntu 22.04, no libpipewire, a foreign ELF loader on NixOS) never stored a
+// grant: the reset says so and succeeds, even on X11.
+console.log("D11: --reset-screen-sharing with bridges that cannot run");
+safe("D11", () => {
+  const root = join(scratch, "d11");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const cannotLoad = "#!/bin/sh\necho \"./b: error while loading shared libraries: libpipewire-0.3.so.0: cannot open shared object file\" >&2\nexit 127\n";
+  const x11 = contractStub("x11-bridge", { backend: "x11", match: true }, join(root, "calls"));
+  const electron = fakeTree(join(root, "tree"), { "gnome-portal-bridge": cannotLoad, "kwin-portal-bridge": cannotLoad, "x11-bridge": x11 });
+  const env = { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron, XDG_RUNTIME_DIR: join(root, "run"),
+                DISPLAY: ":0", XDG_SESSION_TYPE: "x11" };
+  let r = spawnSync(BASH, [launcherPath, "--reset-screen-sharing"], { env, encoding: "utf8", timeout: 60000 });
+  const out = (r.stdout || "") + (r.stderr || "");
+  check("cannot run: exit 0", r.status, 0);
+  check("cannot run: GNOME and KDE say nothing is stored",
+    out.includes("GNOME screen sharing: bridge cannot run on this system, nothing stored.")
+      && out.includes("KDE screen sharing: bridge cannot run on this system, nothing stored."), true);
+  check("cannot run: no FAILED line", out.includes("FAILED"), false);
+  check("cannot run: x11-bridge (no session) is not touched", existsSync(join(root, "calls")) && readFileSync(join(root, "calls"), "utf8").includes("forget-session"), false);
+  // --version runs, but forget-session itself cannot execute (126/127).
+  const half = "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'gnome-portal-bridge 0.1.0'; exit 0; }\nexit 126\n";
+  const electron2 = fakeTree(join(root, "tree2"), { "gnome-portal-bridge": half });
+  r = spawnSync(BASH, [launcherPath, "--reset-screen-sharing"], { env: { ...env, CLAUDE_ELECTRON: electron2 }, encoding: "utf8", timeout: 60000 });
+  check("forget-session exit 126: reported as cannot run, exit 0",
+    r.status === 0 && (r.stdout || "").includes("GNOME screen sharing: bridge cannot run on this system, nothing stored."), true);
+
+  // --diagnose does not advertise a reset nothing can do.
+  const old = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'gnome-portal-bridge 0.0.1' ;;\n  *) echo \"error: unrecognized subcommand '$1'\" >&2; exit 2 ;;\nesac\n";
+  const electron3 = fakeTree(join(root, "tree3"), {
+    "x11-bridge": x11, "wlroots-bridge": contractStub("wlroots-bridge", { backend: "wlroots" }, join(root, "calls3")),
+    "gnome-portal-bridge": old, "kwin-portal-bridge": cannotLoad });
+  r = spawnSync(BASH, [launcherPath, "--diagnose"], { env: { ...env, CLAUDE_ELECTRON: electron3 }, encoding: "utf8", timeout: 90000 });
+  check("diagnose without a resettable bridge: no reset footer", (r.stdout || "").includes("--reset-screen-sharing forgets"), false);
+});
+
 rmSync(scratch, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${failures.length} failed`);
 if (failures.length) {

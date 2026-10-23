@@ -450,7 +450,8 @@ if [[ -z "$ELECTRON_BIN" || ! -x "$ELECTRON_BIN" ]]; then
     # .desktop files left behind after the package was uninstalled.
     case "${1:-}" in
         --help|-h|--version|-V|--list-profiles|--diagnose|--unintegrate|\
-        --uninstall-gnome-hotkey|--install-gnome-hotkey|--delete-profile|--delete-profile=*)
+        --uninstall-gnome-hotkey|--install-gnome-hotkey|--delete-profile|--delete-profile=*|\
+        --reset-screen-sharing)
             echo >&2 'claude-desktop: Electron binary not found; continuing (this subcommand does not need it).'
             ;;
         *)
@@ -473,7 +474,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # CLI subcommands: --install-gnome-hotkey / --uninstall-gnome-hotkey / --toggle /
-#                  --reload-theme / --diagnose
+#                  --reload-theme / --diagnose / --reset-screen-sharing
 # ---------------------------------------------------------------------------
 # Early-exit subcommands intercepted BEFORE Electron is launched. These do
 # not bring up the app - they configure the environment or report diagnostics.
@@ -1621,6 +1622,306 @@ _diag_bridge_runs() {
     echo "FAIL $cause${hint:+ - $hint}"
 }
 
+# ---------------------------------------------------------------------------
+# Computer Use bridges (--reset-screen-sharing, --diagnose)
+# ---------------------------------------------------------------------------
+# Every bridge speaks the same CLI contract (docs/computer-use-bridge-contract.md):
+# `doctor` says what the bridge is and whether it keeps a screen-sharing grant
+# (the monitors picked in the portal dialog, stored per user, not per profile),
+# `forget-session` drops that grant, `screens` lists monitors. Nothing here is
+# per bridge except the fallback for bridges below contract 1 (contract 0).
+# Bridge JSON may be pretty-printed; it is matched with bash regexes, so no jq
+# or python3 is needed at runtime.
+
+# Print the value of "$2" in the JSON text "$1": strings unquoted (\" and \\
+# unescaped), true/false/null/numbers as written. Returns 1 when absent.
+_bridge_json_field() {
+    local re="\"$2\"[[:space:]]*:[[:space:]]*(\"(([^\"\\\\]|\\\\.)*)\"|true|false|null|-?[0-9][0-9.eE+-]*)" v
+    [[ "$1" =~ $re ]] || return 1
+    if [[ "${BASH_REMATCH[1]}" == '"'* ]]; then
+        v="${BASH_REMATCH[2]}"; v="${v//\\\"/\"}"; v="${v//\\\\/\\}"
+        printf '%s\n' "$v"
+    else
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    fi
+}
+
+# The override variable of a bridge: its name upper-cased, '-' -> '_', plus
+# _BIN (X11_BRIDGE_BIN, GNOME_PORTAL_BRIDGE_BIN, ...), as js/cu_mode_preamble.js
+# reads them.
+_cu_bridge_env() {
+    local v="${1^^}"
+    printf '%s_BIN\n' "${v//-/_}"
+}
+
+# Path of a bridge, resolved the way the app resolves it: the override when
+# executable, else the exe-adjacent resources/ dir (= process.resourcesPath; on
+# NixOS and the AppImage CLAUDE_ELECTRON names that tree). Prints nothing when
+# neither is known (no Electron binary found).
+_cu_bridge_path() {
+    local name="$1" env_var bin
+    env_var="${2:-$(_cu_bridge_env "$name")}"
+    bin="${!env_var:-}"
+    if [[ -n "$bin" && -x "$bin" ]]; then
+        printf '%s\n' "$bin"
+    elif [[ -n "${ELECTRON_BIN:-}" ]]; then
+        printf '%s\n' "$(dirname "$ELECTRON_BIN")/resources/$name"
+    fi
+}
+
+# Every bridge the app could run, one "name<TAB>path" line each, sorted: each
+# executable resources/*-bridge, plus each *_BRIDGE_BIN override naming an
+# executable (an override also replaces the bundled file of that name).
+_cu_bridges() {
+    local f name var bin
+    local -A seen=()
+    if [[ -n "${ELECTRON_BIN:-}" ]]; then
+        for f in "$(dirname "$ELECTRON_BIN")"/resources/*-bridge; do
+            [[ -f "$f" && -x "$f" ]] && seen["${f##*/}"]=1
+        done
+    fi
+    while IFS= read -r var; do
+        [[ "$var" == *_BRIDGE_BIN && -n "${!var:-}" && -x "${!var}" ]] || continue
+        name="${var%_BIN}"; name="${name,,}"
+        seen["${name//_/-}"]=1
+    done < <(compgen -v)
+    for name in "${!seen[@]}"; do
+        bin="$(_cu_bridge_path "$name")"
+        [[ -n "$bin" && -x "$bin" ]] && printf '%s\t%s\n' "$name" "$bin"
+    done | sort
+}
+
+# A bridge's `doctor` JSON (empty when it fails), and its contract version:
+# 0 when doctor exits non-zero (2 = no such subcommand) or has no "contract".
+_cu_bridge_doctor() {
+    timeout -s KILL 5 "$1" doctor 2>/dev/null </dev/null || true
+}
+_cu_bridge_contract() {
+    local c
+    c="$(_bridge_json_field "$1" contract)" || c=0
+    [[ "$c" =~ ^[0-9]+$ ]] || c=0
+    printf '%s\n' "$c"
+}
+
+# How a bridge is named to the user: its desktop for the portal bridges, else
+# its file name. The backend comes from doctor, or from the file name below
+# contract 1.
+_cu_bridge_label() {
+    local name="$1" backend
+    backend="$(_bridge_json_field "${2:-}" backend)" || backend="${name%-bridge}"
+    case "$backend" in
+        gnome-portal) echo GNOME ;;
+        kwin-portal)  echo KDE ;;
+        *)            echo "$name" ;;
+    esac
+}
+
+# Run one bridge's `forget-session` and print one line for it.
+#   {"ok":true,"ended":<bool>,"daemon":"exited|sigterm|sigkill|shutdown-requested|none","token_removed":<bool>,...}
+#   {"ok":false,"error":"..."}  (or an error on stderr and exit 1)
+# `ended` is not used: older GNOME bridges report true even when no daemon ran;
+# `daemon` (absent or "none" when there was none) says whether one was ended.
+# Returns 1 on a failure, 0 otherwise. A bridge without the subcommand (exit 2)
+# or one that cannot execute here (126/127) is reported, not failed: there is
+# nothing this launcher can do about it, and nothing was stored by it.
+_reset_screen_sharing_one() {
+    local label="$1" bin="$2" name="${3:-${2##*/}}" out rc=0 removed='' ended='' err env_var
+    out="$(timeout -s KILL 30 "$bin" forget-session 2>&1 </dev/null)" || rc=$?
+    if [[ "$out" =~ \"ok\"[[:space:]]*:[[:space:]]*true ]]; then
+        [[ "$out" =~ \"token_removed\"[[:space:]]*:[[:space:]]*true ]] && removed=1
+        if [[ "$out" =~ \"daemon\"[[:space:]]*:[[:space:]]*\"([a-z_-]+)\" ]] \
+            && [[ "${BASH_REMATCH[1]}" != none ]]; then
+            ended=1
+        fi
+        if [[ -n "$removed" && -n "$ended" ]]; then
+            echo "$label screen sharing: remembered choice removed and the running screen-sharing session ended; the next Computer Use task will ask again."
+        elif [[ -n "$removed" ]]; then
+            echo "$label screen sharing: remembered choice removed; the next Computer Use task will ask again."
+        elif [[ -n "$ended" ]]; then
+            echo "$label screen sharing: no remembered choice; the running screen-sharing session ended, the next Computer Use task will ask again."
+        else
+            echo "$label screen sharing: nothing to reset."
+        fi
+        return 0
+    fi
+    if [[ "$rc" == 126 || "$rc" == 127 ]]; then
+        echo "$label screen sharing: bridge cannot run on this system, nothing stored."
+        return 0
+    fi
+    if [[ "$rc" == 2 || "$out" == *'unrecognized subcommand'* ]]; then
+        env_var="$(_cu_bridge_env "$name")"
+        if [[ -n "${!env_var:-}" && "${!env_var}" == "$bin" ]]; then
+            echo "$label screen sharing: $env_var points to a bridge without forget-session ($bin); update that bridge."
+        else
+            echo "$label screen sharing: this bridge cannot reset its remembered choice (no forget-session in $bin); update claude-desktop-extra."
+        fi
+        return 0
+    fi
+    if [[ "$out" =~ \"error\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+        err="${BASH_REMATCH[1]}"
+    elif [[ "$rc" == 137 ]]; then
+        err='no answer within 30 s'
+    else
+        err="$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | head -1)"
+        err="exit ${rc}${err:+: $err}"
+    fi
+    echo >&2 "$label screen sharing: reset FAILED - $err"
+    return 1
+}
+
+# --reset-screen-sharing: run `forget-session` on every bridge whose doctor
+# reports session_supported (contract 0: the two portal bridges that predate
+# the contract). Ends only the bridges' session daemons, never the app: its
+# executor starts a fresh session (and the dialog) on the next Computer Use
+# action. A bridge that cannot run here (glibc or libpipewire too old, a
+# foreign ELF loader) never stored anything and does not fail the command.
+_reset_screen_sharing() {
+    local rc=0 found='' name bin doc contract
+    while IFS=$'\t' read -r name bin; do
+        [[ -n "$name" ]] || continue
+        if [[ "$(_diag_bridge_runs "$bin" "$(_cu_bridge_env "$name")")" != ok* ]]; then
+            found=1
+            echo "$(_cu_bridge_label "$name") screen sharing: bridge cannot run on this system, nothing stored."
+            continue
+        fi
+        doc="$(_cu_bridge_doctor "$bin")"
+        contract="$(_cu_bridge_contract "$doc")"
+        if (( contract >= 1 )); then
+            [[ "$(_bridge_json_field "$doc" session_supported || true)" == true ]] || continue
+        else
+            case "$name" in gnome-portal-bridge|kwin-portal-bridge) ;; *) continue ;; esac
+        fi
+        found=1
+        _reset_screen_sharing_one "$(_cu_bridge_label "$name" "$doc")" "$bin" "$name" || rc=1
+    done < <(_cu_bridges)
+    if [[ -z "$found" ]]; then
+        echo "No Computer Use bridge with a screen-sharing session found${ELECTRON_BIN:+ in $(dirname "$ELECTRON_BIN")/resources}; nothing to reset."
+    fi
+    return "$rc"
+}
+
+# --diagnose: one bridge's `screens`, timed, with the monitors' sharing state
+# when the bridge knows it. Never opens a portal session on contract-1 bridges.
+_diag_bridge_screens() {
+    local name="$1" bin="$2" out rc=0 t0 ms flat rest chunk id
+    t0=$(date +%s%3N)
+    out="$(timeout 10 "$bin" screens 2>&1 </dev/null)" || rc=$?
+    ms=$(( $(date +%s%3N) - t0 ))
+    if [[ "$rc" != 0 ]]; then
+        echo "  $name screens = FAILED (exit $rc after ${ms}ms)"
+        printf '%s\n' "$out" | head -5 | sed 's/^/    /'
+        echo '    (exit 124 = timed out. Computer Use capture cannot work until this succeeds.)'
+        _diag_problems+=("$name screens failed (exit $rc): Computer Use capture cannot work")
+        return 0
+    fi
+    echo "  $name screens = ok (${#out} bytes, ${ms}ms)"
+    printf '%s\n' "$out" | head -5 | sed 's/^/    /'
+    flat="$(printf '%s' "$out" | tr -d '\n' | sed -E 's/"[[:space:]]*:[[:space:]]*/":/g; s/\{[[:space:]]*"/{"/g')"
+    [[ "$flat" == *'"is_shared":'* ]] || return 0
+    rest="$flat"
+    while [[ "$rest" == *'{"id":"'* ]]; do
+        rest="${rest#*\{\"id\":\"}"
+        id="${rest%%\"*}"
+        chunk="${rest%%\{\"id\":\"*}"
+        case "$chunk" in
+            *'"is_shared":true'*)  echo "    monitor $id = shared" ;;
+            *'"is_shared":false'*) echo "    monitor $id = NOT SHARED (Computer Use cannot capture or click there)" ;;
+            *)                     echo "    monitor $id = unknown" ;;
+        esac
+    done
+}
+
+# --diagnose: the contract view of every bridge - doctor's required keys, then
+# `screens` when the bridge says it serves this session. Bridges below
+# contract 1 get the checks this launcher made before the contract.
+_diag_bridges() {
+    local name bin doc contract k v line session_match reachable err supported any_session=''
+    local state_base="${XDG_STATE_HOME:-$HOME/.local/state}" run_base="${XDG_RUNTIME_DIR:-/tmp}"
+    local desk wl=''
+    desk="$(printf %s "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
+    [[ "${XDG_SESSION_TYPE:-}" == 'wayland' || -n "${WAYLAND_DISPLAY:-}" ]] && wl=1
+    while IFS=$'\t' read -r name bin; do
+        [[ -n "$name" ]] || continue
+        echo "[$name] $bin"
+        if [[ "$(_diag_bridge_runs "$bin" "$(_cu_bridge_env "$name")")" != ok* ]]; then
+            echo '  skipped: the bridge cannot run (see "runs" above)'
+            continue
+        fi
+        doc="$(_cu_bridge_doctor "$bin")"
+        contract="$(_cu_bridge_contract "$doc")"
+        if (( contract >= 1 )); then
+            line=''
+            for k in contract backend session_match backend_reachable backend_error \
+                     session_supported restore_token_present restore_token_path \
+                     daemon_running session_socket; do
+                v="$(_bridge_json_field "$doc" "$k")" || v='(missing)'
+                line+=" $k=$v"
+            done
+            echo "  doctor:$line"
+            # Optional key: the user clicked "Stop sharing" in the desktop's
+            # screen-sharing indicator; the bridge refuses input and capture
+            # until the next session-start.
+            if [[ "$(_bridge_json_field "$doc" stopped_by_user || true)" == true ]]; then
+                echo '  stopped_by_user: screen sharing was stopped by the user; the next Computer Use task starts it again'
+            fi
+            session_match="$(_bridge_json_field "$doc" session_match || true)"
+            reachable="$(_bridge_json_field "$doc" backend_reachable || true)"
+            supported="$(_bridge_json_field "$doc" session_supported || true)"
+            [[ "$supported" == true ]] && any_session=1
+            if [[ "$session_match" == true && "$reachable" != true ]]; then
+                # `screens` against an unreachable backend proves nothing and,
+                # on a portal bridge, is the one path that could fall back to a
+                # portal session: report the bridge's reason instead.
+                err="$(_bridge_json_field "$doc" backend_error || true)"
+                echo "  screens skipped: backend unreachable (${err:-no reason given})"
+                _diag_problems+=("$name serves this session but its backend is unreachable: ${err:-no reason given}")
+            elif [[ "$session_match" == true ]]; then
+                _diag_bridge_screens "$name" "$bin"
+            fi
+            continue
+        fi
+        echo '  doctor: contract 0 (older bridge without the CLI contract)'
+        # Advertise the reset only where it can work: --help answers 0 only
+        # when the bridge has the subcommand (and runs nothing).
+        local can_forget=''
+        timeout -s KILL 3 "$bin" forget-session --help >/dev/null 2>&1 </dev/null && can_forget=1
+        case "$name" in
+            gnome-portal-bridge)
+                [[ -n "$can_forget" ]] && any_session=1
+                if [[ "$doc" =~ \"restore_token_present\"[[:space:]]*:[[:space:]]*true ]] \
+                    || [[ -z "$doc" && -f "$state_base/$name/restore-token.json" ]]; then
+                    echo '  remembered choice = yes'
+                else
+                    echo '  remembered choice = no'
+                fi
+                if [[ "$doc" =~ \"daemon_running\"[[:space:]]*:[[:space:]]*true ]]; then
+                    echo '  session daemon = running'
+                else
+                    echo '  session daemon = not running'
+                fi
+                # Pre-contract behaviour: `screens` on GNOME Wayland (issue #232).
+                [[ -n "$wl" && "$desk" == *gnome* ]] && _diag_bridge_screens "$name" "$bin"
+                ;;
+            kwin-portal-bridge)
+                [[ -n "$can_forget" ]] && any_session=1
+                if [[ -f "$state_base/$name/restore-token.json" ]]; then
+                    echo '  remembered choice = yes'
+                else
+                    echo '  remembered choice = no'
+                fi
+                if [[ -S "$run_base/$name/session.sock" ]]; then
+                    echo '  session daemon = socket present'
+                else
+                    echo '  session daemon = not running'
+                fi
+                ;;
+        esac
+    done < <(_cu_bridges)
+    if [[ -n "$any_session" ]]; then
+        echo '(claude-desktop --reset-screen-sharing forgets the remembered screen-sharing choice; the next Computer Use task asks again)'
+    fi
+}
+
 _diagnose() {
     local -a _diag_problems=()
     echo '=== claude-desktop --diagnose ==='
@@ -1875,7 +2176,14 @@ _diagnose() {
         || echo '(no system package: AppImage/Nix/manual)')"
     echo "package = $_cu_pkg"
     _cu_res="$(dirname "$ELECTRON_BIN")/resources"
-    for _cu_b in x11-bridge wlroots-bridge gnome-portal-bridge kwin-portal-bridge; do
+    # The four the app selects between, plus any other bridge found (resources/
+    # *-bridge or a *_BRIDGE_BIN override): reported, never expected.
+    local -a _cu_all=(x11-bridge wlroots-bridge gnome-portal-bridge kwin-portal-bridge)
+    local _cu_extra
+    while IFS=$'\t' read -r _cu_extra _; do
+        [[ -n "$_cu_extra" && " ${_cu_all[*]} " != *" $_cu_extra "* ]] && _cu_all+=("$_cu_extra")
+    done < <(_cu_bridges)
+    for _cu_b in "${_cu_all[@]}"; do
         if [[ -x "$_cu_res/$_cu_b" ]]; then _cu_sum+=" $_cu_b"; else _cu_sum+=" $_cu_b(MISSING)"; fi
     done
     echo "bundled bridges =$_cu_sum"
@@ -1886,7 +2194,8 @@ _diagnose() {
     local _cu_desk _cu_wl='' _cu_bin _cu_env _cu_use _cu_run
     _cu_desk="$(printf %s "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
     [[ "${XDG_SESSION_TYPE:-}" == 'wayland' || -n "${WAYLAND_DISPLAY:-}" ]] && _cu_wl=1
-    for _cu_b in x11-bridge wlroots-bridge gnome-portal-bridge kwin-portal-bridge; do
+    for _cu_b in "${_cu_all[@]}"; do
+        _cu_env="$(_cu_bridge_env "$_cu_b")"; _cu_use=''
         case "$_cu_b" in
             x11-bridge)          _cu_env=X11_BRIDGE_BIN
                                  _cu_use=''; [[ -n "$_cu_wl" || -n "${DISPLAY:-}" || "${XDG_SESSION_TYPE:-}" == x11 ]] && _cu_use=1 ;;
@@ -1897,8 +2206,8 @@ _diagnose() {
             kwin-portal-bridge)  _cu_env=KWIN_PORTAL_BRIDGE_BIN
                                  _cu_use=''; [[ -n "$_cu_wl" && "$_cu_desk" == *kde* ]] && _cu_use=1 ;;
         esac
-        _cu_bin="${!_cu_env:-}"
-        [[ -n "$_cu_bin" && -x "$_cu_bin" ]] || _cu_bin="$_cu_res/$_cu_b"
+        _cu_bin="$(_cu_bridge_path "$_cu_b" "$_cu_env")"
+        [[ -n "$_cu_bin" ]] || _cu_bin="$_cu_res/$_cu_b"
         if [[ ! -x "$_cu_bin" ]]; then
             echo "$_cu_b runs = MISSING ($_cu_bin)"
             [[ -n "$_cu_use" ]] && _diag_problems+=("$_cu_b missing at $_cu_bin: Computer Use cannot use it on this session - reinstall the package")
@@ -1943,25 +2252,14 @@ _diagnose() {
         && [[ "${XDG_SESSION_TYPE:-}" == 'wayland' || -n "${WAYLAND_DISPLAY:-}" ]]; then
         echo "GNOME Shell = $(timeout 2 gnome-shell --version 2>/dev/null || echo '(probe failed)')"
         echo "PipeWire = $(timeout 2 pipewire --version 2>/dev/null | head -1 || echo '(probe failed)')"
-        # Portal-free monitor enumeration: the same `screens` call the screenshot
-        # path makes before every capture, and the first thing to hang when the
-        # bridge cannot talk to Mutter (issue #232). Never pops a consent dialog.
-        # session-start is deliberately NOT probed here - it would.
-        if [[ -x "$_cu_res/gnome-portal-bridge" ]]; then
-            local _gs_out _gs_rc=0 _gs_t0 _gs_ms
-            _gs_t0=$(date +%s%3N)
-            _gs_out="$(timeout 10 "$_cu_res/gnome-portal-bridge" screens 2>&1)" || _gs_rc=$?
-            _gs_ms=$(( $(date +%s%3N) - _gs_t0 ))
-            if [[ "$_gs_rc" == 0 ]]; then
-                echo "gnome-portal-bridge screens = ok (${#_gs_out} bytes, ${_gs_ms}ms)"
-                printf '%s\n' "$_gs_out" | head -5 | sed 's/^/  /'
-            else
-                echo "gnome-portal-bridge screens = FAILED (exit $_gs_rc after ${_gs_ms}ms)"
-                printf '%s\n' "$_gs_out" | head -5 | sed 's/^/  /'
-                echo '  (exit 124 = timed out. Computer Use capture cannot work until this succeeds.)'
-            fi
-        fi
+        # `screens` (the call the screenshot path makes before every capture,
+        # and the first thing to hang when the bridge cannot talk to Mutter,
+        # issue #232) runs in the bridge section below.
     fi
+    echo
+    echo '--- Computer Use bridges (CLI contract) ---'
+    # doctor + screens per bridge; neither opens a portal session (contract).
+    _diag_bridges
     echo
     echo '--- Cowork VM capability (replicates the app probe) ---'
     # Mirrors the native Cowork backend's capability probe. If any of qemuPath /
@@ -2157,6 +2455,11 @@ Options:
   --diagnose                Print session type, Electron version, portal status,
                             GNOME hotkey slot, and recent launcher log. Paste
                             output into issue reports.
+  --reset-screen-sharing    Forget which monitors you shared with Computer Use
+                            (GNOME and KDE Wayland); the next Computer Use task
+                            shows the screen-sharing dialog again. Use it when
+                            Claude reports a monitor as not shared. The choice
+                            is stored per user, so this resets every profile.
   --profile=NAME            Launch (or target subcommand at) a named profile.
                             Each profile has its own login, logs, and Claude
                             Code config. Can also be selected by invoking via
@@ -2351,6 +2654,12 @@ sys.stdout.write(buf.decode("utf-8","replace"))' "$_SOCK" 2>/dev/null)" || _repl
             exit 1
         fi
         echo "[launcher] Quick Entry socket unavailable - delivering --reload-theme via Electron second-instance" >&2
+        ;;
+    --reset-screen-sharing)
+        # Ends only the bridges' session daemons, never a running app: its
+        # executor starts a fresh session on the next Computer Use action.
+        _reset_screen_sharing
+        exit $?
         ;;
     --diagnose)
         shift

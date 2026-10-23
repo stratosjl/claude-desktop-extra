@@ -103,9 +103,65 @@ async function _x11BridgeScreens(){
 // (subcommand + --kebab flags, one JSON value on stdout, exit 1 + stderr on
 // error). gnome-portal-bridge proxies through a portal session and can be
 // slower, so we use a more generous timeout there.
+// Bridge CLI contract exit codes (docs/computer-use-bridge-contract.md):
+// 3 = the target monitor is not shared in the live portal session, 4 = no live
+// session (the session daemon is gone), 5 = the user stopped screen sharing
+// (the portal session was closed from the desktop's screen-sharing indicator).
+// Consumers switch on these; the text matching below is only the fallback for
+// bridges below contract 1.
+var _BRIDGE_EXIT_NOT_SHARED=3,_BRIDGE_EXIT_NO_SESSION=4,_BRIDGE_EXIT_STOPPED_BY_USER=5;
+// What the model reads after the user stopped screen sharing. Twin:
+// STOPPED_BY_USER_MESSAGE in js/executor_linux.js.
+// It cannot promise more than "the next session": upstream keeps the CU lock
+// across turns while a guided tour (teach mode) runs, so the latch holds until
+// the tour ends or the user clicks Stop in Claude.
+var _CU_STOPPED_BY_USER_MSG="Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use resumes with the next Computer Use session - in a guided tour, after the tour ends or the user clicks Stop in Claude.";
+// Exit status of a failed execFileSync (.status) or execFile (.code; a string
+// such as "ENOENT" when the spawn itself failed).
+function _bridgeExitCode(e){if(!e)return null;if(typeof e.status==="number")return e.status;if(typeof e.code==="number")return e.code;return null}
+// Contract file layout of a bridge with a session: its runtime dir holds
+// session.sock, session.pid and, after the user stopped screen sharing,
+// stopped-by-user. The one place that spells it out. An empty
+// XDG_RUNTIME_DIR counts as unset (/tmp), as in the bridges; a relative one is
+// unusable (XDG spec) and gives null.
+function _bridgeRuntimeDir(){var d=process.env.XDG_RUNTIME_DIR;if(!d)return"/tmp";return _path.isAbsolute(d)?d:null}
+function _bridgeRuntimeFile(bridge,file){var d=_bridgeRuntimeDir();return d===null?null:_path.join(d,bridge,file)}
+// A bridge error about a monitor the user did not share in the portal consent
+// dialog. The bridge text stays generic (older GNOME bridges append a remedy
+// naming their own `forget-session`), but users only have `claude-desktop`, and
+// this text is what the model reads: rewrite it into an instruction for the
+// user. Keeps the monitor id and the shared list; text that does not parse
+// keeps its wording and gets the instruction appended - always on exit 3, and
+// on older bridges when it names the condition. Twin: notSharedText in
+// js/executor_linux.js.
+var _CU_RESET_HINT="Ask the user to run `claude-desktop --reset-screen-sharing`, then share all monitors when the screen-sharing dialog appears.";
+function _cuNotSharedText(msg,isNotShared){
+  var s=String(msg==null?"":msg);
+  var m=s.match(/monitor (\S+) \([^)]*\) is not shared in the portal session \(shared: ([^)]*)\)(?:;[^\n]*?forget-session[^\n]*)?/);
+  if(m)return s.slice(0,m.index)+"Monitor "+m[1]+" is not shared with Claude (shared: "+(m[2].trim()||"none")+"). "+_CU_RESET_HINT+s.slice(m.index+m[0].length);
+  if(isNotShared||/is not shared in the portal session|forget-session/.test(s)){var t=s.replace(/\s+$/,"");return t+(/[.!?]$/.test(t)?" ":". ")+_CU_RESET_HINT}
+  return null;
+}
+// Classify a failed bridge call in place (keeps code/killed/stderr): a monitor
+// that is not shared gets the rewritten text and __cdbNotShared (the capture
+// path surfaces it instead of trying other tiers); exit 4 gets __cdbNoSession
+// (the portal-command paths recover from it); exit 5 gets __cdbStoppedByUser
+// (the portal-command paths latch it and never recover).
+function _cuNotSharedError(e){
+  if(!e||typeof e!=="object")return e;
+  var code=_bridgeExitCode(e);
+  var t=_cuNotSharedText(e.message,code===_BRIDGE_EXIT_NOT_SHARED);
+  try{
+    if(t!==null){e.message=t;e.__cdbNotShared=!0}
+    if(code===_BRIDGE_EXIT_NO_SESSION)e.__cdbNoSession=!0;
+    if(code===_BRIDGE_EXIT_STOPPED_BY_USER||/screen sharing was stopped|stopped by the user/.test(String(e.message)))e.__cdbStoppedByUser=!0;
+  }catch(me){}
+  return e;
+}
 function _bridge(bin,args,timeoutMs){
   if(!bin)throw new Error("bridge binary not available");
-  var res=_cp.execFileSync(bin,args,{encoding:"utf-8",timeout:timeoutMs||15000,maxBuffer:16*1024*1024});
+  var res;
+  try{res=_cp.execFileSync(bin,args,{encoding:"utf-8",timeout:timeoutMs||15000,maxBuffer:16*1024*1024})}catch(e){throw _cuNotSharedError(e)}
   var out=res.trim();
   return out?_parseBridgeJson(bin,out):null;
 }
@@ -115,7 +171,7 @@ function _bridge(bin,args,timeoutMs){
 function _execFileAsync(label,bin,args,timeoutMs){
   return new Promise(function(resolve,reject){
     _cp.execFile(bin,args,{encoding:"utf-8",timeout:timeoutMs||15000,maxBuffer:16*1024*1024},function(err,stdout){
-      if(err){reject(err);return}
+      if(err){reject(_cuNotSharedError(err));return}
       var out=(stdout||"").trim();
       try{resolve(out?_parseBridgeJson(label,out):null)}catch(pe){reject(pe)}
     });
@@ -142,10 +198,11 @@ function _bridgeAsync(bin,args,timeoutMs){
 //                           keeps the full GNOME_SESSION_START_MS budget; the
 //                           backstop only exists for a portal command that beat
 //                           the lock hook, so it must not sit on a user's click.
-//   GNOME_SESSION_START_MS  async session-start, may wait out a consent dialog.
+//   GNOME_SESSION_START_MS  async session-start, may wait out a consent dialog;
+//                           above the bridge's own 120 s ready wait.
 var SCREENS_TIMEOUT_MS=5000;
 var GNOME_SYNC_START_MS=8000;
-var GNOME_SESSION_START_MS=30000;
+var GNOME_SESSION_START_MS=125000;
 // PORTAL FAILURE LATCH. Before this, a failed session-start left no memo: every
 // subsequent portal command re-ran the full blocking session-start and then the
 // command itself, so one click could block the main process for two minutes and
@@ -177,6 +234,102 @@ function _wlBridge(){
 // touch the portal: issue #184 — upstream warms a resumed Code session via
 // listRunningApps → `windows`, and a blanket session ensure here popped the
 // GNOME "Desktop remoto" consent dialog and froze the main process.
+// The session daemon can vanish under a held lock: `claude-desktop
+// --reset-screen-sharing` (the bridge's forget-session) ends it, or it crashed.
+// Older bridges then answer a portal command by opening a one-shot portal
+// session per command (a consent dialog each, now that the grant is gone);
+// contract-1 bridges exit 4. Either way the stale "active" flag has to go and
+// ONE fresh session has to start.
+// Gone = no socket, or a pidfile naming a dead process (a SIGKILLed, OOM-killed
+// or panicked daemon leaves its socket behind). A socket without a pidfile is
+// left alone: bridges before the pidfile never write one. So is a runtime dir
+// that cannot be pinned down: XDG_RUNTIME_DIR relative, or set but empty (the
+// bridges since the CLI contract read that as /tmp, older ones as a relative
+// path) - "no socket" there would restart the session before every command.
+// Contract-1 bridges still report a lost session through exit 4.
+// A daemon that exited because the USER stopped screen sharing is not "gone":
+// it leaves the stopped-by-user marker, and replacing it would re-share the
+// screen the user just stopped sharing (see _gnomeStoppedCheck).
+function _gnomeDaemonGone(){
+  try{
+    var d=process.env.XDG_RUNTIME_DIR;
+    if(d!==undefined&&(d===""||!_path.isAbsolute(d)))return !1;
+    if(_gnomeStoppedMarker())return !1;
+    var sock=_bridgeRuntimeFile("gnome-portal-bridge","session.sock");
+    if(sock===null)return !1;
+    if(!_fs.existsSync(sock))return !0;
+    var pidFile=_bridgeRuntimeFile("gnome-portal-bridge","session.pid");
+    if(!_fs.existsSync(pidFile))return !1;
+    var pid=parseInt(String(_fs.readFileSync(pidFile,"utf8")).trim(),10);
+    if(!(pid>1))return !1;
+    try{process.kill(pid,0)}catch(ke){return ke&&ke.code==="ESRCH"}
+    return !1;
+  }catch(e){return !1}
+}
+// USER STOPPED SCREEN SHARING (bridge exit 5). The user clicked "Stop sharing"
+// in the desktop's screen-sharing indicator; the daemon wrote the
+// stopped-by-user marker and exited. That is a decision, not a fault: for the
+// rest of the current Computer Use lock no session is started (no
+// _gnomeSessionLost / _gnomeRestartAfterReset recovery, no sync backstop, no
+// lazy start), and every portal command fails fast with _CU_STOPPED_BY_USER_MSG
+// without spawning the bridge. The latch is cleared when the lock is released
+// (after its session-end, which also removes the marker) or a new lock starts.
+var _gnomeStoppedByUser=!1;
+// Same runtime-dir rules as _gnomeDaemonGone: an undeterminable dir answers no.
+function _gnomeStoppedMarker(){
+  try{
+    var d=process.env.XDG_RUNTIME_DIR;
+    if(d!==undefined&&(d===""||!_path.isAbsolute(d)))return !1;
+    var f=_bridgeRuntimeFile("gnome-portal-bridge","stopped-by-user");
+    return f!==null&&_fs.existsSync(f);
+  }catch(e){return !1}
+}
+function _gnomeStoppedError(){var err=new Error(_CU_STOPPED_BY_USER_MSG);err.__cdbSurface=!0;err.__cdbStoppedByUser=!0;return err}
+// Set the latch. _gnomeDaemonMayExist stays set so the lock release still
+// sends session-end (which removes the marker).
+function _gnomeLatchStopped(why){
+  if(_gnomeStoppedByUser)return;
+  _gnomeStoppedByUser=!0;_gnomeSessionActive=!1;_gnomeDaemonMayExist=!0;_wlScreensInvalidate();
+  globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: screen sharing was stopped ("+why+"); no new session until this Computer Use lock ends");
+}
+// A portal COMMAND answered exit 5: latch and return the error for the model.
+// Not while a start or an end is in flight: those own the flags (a marker left
+// from before this lock's session-start is that start's to remove), so the
+// error is returned unlatched. A session-start that itself answers exit 5 (the
+// new daemon was closed before it became ready) latches in its own catch.
+function _gnomeMarkStopped(why){
+  if(!_gnomeSessionStarting&&!_gnomeSessionEnding)_gnomeLatchStopped(why);
+  return _gnomeStoppedError();
+}
+function _gnomeStoppedClear(why){
+  if(!_gnomeStoppedByUser)return;
+  _gnomeStoppedByUser=!1;
+  globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: stopped-by-user latch cleared ("+why+")");
+}
+// Before a portal command: latched already, or the marker of the session we
+// hold (the daemon is gone, so the bridge would only answer exit 5 anyway).
+function _gnomeStoppedCheck(){
+  if(_gnomeStoppedByUser)return !0;
+  if(_gnomeSessionActive&&!_gnomeSessionStarting&&!_gnomeSessionEnding&&_gnomeStoppedMarker()){_gnomeMarkStopped("stopped-by-user marker");return !0}
+  return !1;
+}
+// Clear the flags of a session whose daemon is gone. Not while a start or an
+// end is in flight: those own the flags. Returns whether it cleared anything.
+function _gnomeSessionLost(why){
+  if(!_gnomeSessionActive||_gnomeSessionStarting||_gnomeSessionEnding)return !1;
+  _gnomeSessionActive=!1;_gnomeDaemonMayExist=!1;_wlScreensInvalidate();
+  globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session daemon is gone ("+why+"; screen sharing reset?); starting a new session");
+  return !0;
+}
+// The sync input path cannot wait out a consent dialog (the grant is gone, so
+// one is certain): start the session in the background with its full budget,
+// and tell the model to have the user approve it and retry.
+function _gnomeRestartAfterReset(){
+  try{var p=_gnomeEnsureSession();if(p&&typeof p.catch==="function")p.catch(function(){})}catch(e){}
+  var err=new Error("The screen-sharing session was reset (claude-desktop --reset-screen-sharing). Ask the user to approve the screen-sharing dialog, then retry the action.");
+  err.__cdbSurface=!0;
+  return err;
+}
 var _gnomePortalCmds={"zoom":1,"screenshot":1,"pointer-move":1,"pointer-click":1,"pointer-scroll":1,"pointer-drag":1,"left-mouse-down":1,"left-mouse-up":1,"key-sequence":1,"type":1,"hold-key":1};
 function _wlBridgeCall(args){
   var b=_wlBridge();if(!b)throw new Error("no covered Wayland bridge available");
@@ -184,8 +337,11 @@ function _wlBridgeCall(args){
   // A portal command with no portal session behind it can only fail. Running it
   // anyway costs another full blocking timeout, so refuse while latched down.
   if(portalCmd){
+    if(_gnomeStoppedCheck())throw _gnomeStoppedError();
+    if(_gnomeSessionActive&&_gnomeDaemonGone()&&_gnomeSessionLost("no session daemon"))throw _gnomeRestartAfterReset();
     if(!_gnomeSessionActive&&_gnomePortalDown())throw _gnomePortalDownError();
     _gnomeEnsureSessionSync();
+    if(_gnomeStoppedByUser)throw _gnomeStoppedError();
     // The backstop may have just discovered the portal is down. Re-check the
     // LATCH (not merely "session not active" - an async start may still be in
     // flight, and that case keeps the old behaviour of letting the bridge
@@ -197,7 +353,12 @@ function _wlBridgeCall(args){
   // enumeration gets the standard bridge timeout so a stuck D-Bus call can
   // never block the main process for the full portal budget.
   var t=b.name==="gnome-portal-bridge"&&!portalCmd?15000:b.timeout;
-  return _bridge(b.bin,args,t);
+  try{return _bridge(b.bin,args,t)}
+  catch(e){
+    if(portalCmd&&e&&e.__cdbStoppedByUser)throw _gnomeMarkStopped("bridge exit 5");
+    if(portalCmd&&e&&e.__cdbNoSession&&_gnomeSessionLost("bridge exit 4"))throw _gnomeRestartAfterReset();
+    throw e;
+  }
 }
 // ASYNC twin of _wlBridgeCall, used by the screenshot path (issue #232). Same
 // portal rules, but it AWAITS the async session ensure instead of running the
@@ -206,12 +367,23 @@ async function _wlBridgeCallAsync(args,timeoutOverrideMs){
   var b=_wlBridge();if(!b)throw new Error("no covered Wayland bridge available");
   var portalCmd=b.name==="gnome-portal-bridge"&&_gnomePortalCmds[args[0]]===1;
   if(portalCmd){
+    // This path can await the consent dialog, so a vanished daemon is simply
+    // replaced here (one dialog, full budget) instead of failing the call -
+    // unless the user stopped sharing, which is never undone behind their back.
+    if(_gnomeStoppedCheck())throw _gnomeStoppedError();
+    if(_gnomeSessionActive&&_gnomeDaemonGone())_gnomeSessionLost("no session daemon");
     if(!_gnomeSessionActive&&_gnomePortalDown())throw _gnomePortalDownError();
     await _gnomeEnsureSession();
+    if(_gnomeStoppedByUser)throw _gnomeStoppedError();
     if(!_gnomeSessionActive)throw _gnomePortalDownError();
   }
   var t=timeoutOverrideMs||(b.name==="gnome-portal-bridge"&&!portalCmd?15000:b.timeout);
-  return _execFileAsync(b.name,b.bin,args,t);
+  try{return await _execFileAsync(b.name,b.bin,args,t)}
+  catch(e){
+    if(portalCmd&&e&&e.__cdbStoppedByUser)throw _gnomeMarkStopped("bridge exit 5");
+    if(portalCmd&&e&&e.__cdbNoSession&&_gnomeSessionLost("bridge exit 4"))throw _gnomeRestartAfterReset();
+    throw e;
+  }
 }
 // Synchronous session-start backstop for the per-call input/capture path: these
 // callers run the bridge synchronously and need the portal session up FIRST.
@@ -226,12 +398,18 @@ function _gnomeEnsureSessionSync(){
   // so it reports "not up" and the caller fails soft, which is what it already
   // does whenever the portal is not ready.
   if(_gnomeSessionEnding){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge sync backstop declined: a session-end is in flight");return !1}
+  if(_gnomeStoppedByUser)return !1;
   if(_gnomeSessionActive||_gnomeSessionStarting)return _gnomeSessionActive;
   if(_gnomePortalDown())return !1;
   var bin=_gnomeBridgeBin();if(!bin)return !1;
-  if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
-  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
-  catch(e){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start failed (sync backstop): "+(e.message||e));_gnomePortalMarkDown("sync backstop session-start failed");return !1}
+  if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive||_gnomeDaemonMayExist){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
+  _gnomeDaemonMayExist=!0;
+  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
+  catch(e){
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
+    // Closed before it became ready: a stop, not a fault - latch, no cooldown, no retry.
+    if(e&&e.__cdbStoppedByUser){_gnomeLatchStopped("sync backstop session-start exit 5");return !1}
+    globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start failed (sync backstop): "+(e.message||e));_gnomePortalMarkDown("sync backstop session-start failed");return !1}
 }
 // Bridge-side monitor list (snake_case screens) for the active Wayland bridge.
 // Mirrors _x11BridgeScreens; used to map a global-logical region to a monitor
@@ -241,13 +419,50 @@ function _gnomeEnsureSessionSync(){
 // that was still coming up) does not pin every later capture to global
 // coordinates for the rest of the session (issue #293).
 var SCREENS_RETRY_MS=30000;
-var _wlScreensCache=null,_wlScreensRetryAt=0;
+// Re-query delay for a GNOME list that came back without is_shared while a
+// portal session is up (see _wlScreensAwaitingShare).
+var SCREENS_SHARE_RETRY_MS=2000;
+var _wlScreensCache=null,_wlScreensRetryAt=0,_wlScreensGen=0;
+var _wlScreensSoft=null,_wlScreensSoftUntil=0,_wlScreensSoftLogged=!1;
+// Drop the cached list so the next caller re-enumerates. Called once per GNOME
+// portal session start: while a session daemon runs, `screens` marks the
+// streamed monitors with is_shared, and a list fetched before the session (or
+// in a previous one, with a different share choice) does not carry that. The
+// generation counter keeps a fetch that was already in flight - success or
+// failure - from landing its stale answer over the invalidation, and the
+// failure retry window is reset: a failure from before this session must not
+// hold the fresh session's enumeration back for SCREENS_RETRY_MS.
+function _wlScreensInvalidate(){_wlScreensCache=null;_wlScreensGen++;_wlScreensRetryAt=0;_wlScreensSoft=null;_wlScreensSoftUntil=0;_wlScreensSoftLogged=!1}
+// The bridge asks the session daemon for is_shared within a short budget and
+// omits the field when the daemon does not answer in time (a busy start). A
+// list with no is_shared on any entry while the GNOME portal session is up is
+// therefore provisional: caching it would pin Electron's primary as the
+// default display for the whole session (the #293 wrong-monitor case).
+function _wlScreensAwaitingShare(list){
+  if(!_isGnomeCovered()||!_gnomeSessionActive||!list.length)return !1;
+  for(var i=0;i<list.length;i++){if(list[i]&&Object.prototype.hasOwnProperty.call(list[i],"is_shared"))return !1}
+  return !0;
+}
 async function _wlBridgeScreens(){
   if(_wlScreensCache!==null)return _wlScreensCache;
+  if(_wlScreensSoft!==null&&Date.now()<_wlScreensSoftUntil)return _wlScreensSoft;
   if(Date.now()<_wlScreensRetryAt)return [];
-  var list;
-  try{var s=await _wlBridgeCallAsync(["screens"],SCREENS_TIMEOUT_MS);list=Array.isArray(s)?s:[];_wlScreensCache=list}
-  catch(e){globalThis.__cdbDiag("[claude-cu] "+(_wlBridge()?_wlBridge().name:"bridge")+" screens failed: "+(e.message||e)+" - retrying in "+Math.round(SCREENS_RETRY_MS/1000)+"s");_wlScreensRetryAt=Date.now()+SCREENS_RETRY_MS;list=[]}
+  var list,gen=_wlScreensGen;
+  try{
+    var s=await _wlBridgeCallAsync(["screens"],SCREENS_TIMEOUT_MS);list=Array.isArray(s)?s:[];
+    if(gen===_wlScreensGen){
+      if(_wlScreensAwaitingShare(list)){
+        // Serve it (geometry is valid for zoom mapping) but re-query shortly.
+        _wlScreensSoft=list;_wlScreensSoftUntil=Date.now()+SCREENS_SHARE_RETRY_MS;
+        if(!_wlScreensSoftLogged){_wlScreensSoftLogged=!0;globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge screens carries no is_shared during a portal session - not cached, re-querying in "+Math.round(SCREENS_SHARE_RETRY_MS/1000)+"s")}
+      }else{_wlScreensCache=list;_wlScreensSoft=null}
+    }
+  }
+  catch(e){
+    globalThis.__cdbDiag("[claude-cu] "+(_wlBridge()?_wlBridge().name:"bridge")+" screens failed: "+(e.message||e)+(gen===_wlScreensGen?" - retrying in "+Math.round(SCREENS_RETRY_MS/1000)+"s":" (stale request from before a session start - ignored)"));
+    if(gen===_wlScreensGen)_wlScreensRetryAt=Date.now()+SCREENS_RETRY_MS;
+    list=[];
+  }
   // An empty monitor list means the region below is sent in GLOBAL logical
   // coordinates with no --display, which is wrong on any multi-monitor layout.
   // Say so once instead of silently returning a mis-cropped image (issue #232).
@@ -266,6 +481,59 @@ async function _wlMonForRegion(x,y){
   var pg=pick.geometry||{x:0,y:0};
   return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y};
 }
+// Default display for a GNOME capture that names no display (issue #293).
+// The portal ScreenCast session streams only the monitor(s) the user shared in
+// the consent dialog (a restore token replays that choice without a dialog).
+// Electron's primary need not be one of them, and Mutter and Electron do not
+// always agree on which monitor is primary, so defaulting to Electron's primary
+// captured and clicked against a monitor the session does not stream. While a
+// session daemon runs, `screens` marks the streamed monitors with is_shared:
+//   one shared            -> that monitor
+//   several shared        -> the Mutter primary among them, else the first
+//   none / field absent   -> null (caller keeps Electron's primary; this covers
+//                            no daemon yet, a bridge without is_shared, and a
+//                            failed enumeration)
+// Returns the _getMonitors() displayId (Electron display index) whose
+// bounds.x/y equal the shared monitor's geometry.x/y (both global logical), or
+// null. GNOME only: wlroots-bridge has no portal share, X11 has no bridge
+// session, and KWin runs js/executor_linux.js.
+var _lastDefaultDiag=null;
+async function _gnomeSharedDefaultDisplayId(){
+  if(!_isGnomeCovered()||!_gnomeBridgeBin())return null;
+  // COWORK_SCREENSHOT_CMD is the first capture tier in _captureRegion; with it
+  // set a screenshot outside a held lock never touched the portal, and this
+  // lookup must not start a session (and raise the consent dialog) for it.
+  if(process.env.COWORK_SCREENSHOT_CMD)return null;
+  // Query AFTER the daemon is up, so is_shared reflects the live session. The
+  // capture that follows is a portal command and would bring the session up
+  // anyway; normally the CU lock hook already did. A latched-down portal
+  // answers null at once and the capture reports the real failure. So does a
+  // session the user stopped sharing.
+  if(_gnomeStoppedByUser)return null;
+  if(!_gnomeSessionActive){
+    if(_gnomePortalDown())return null;
+    try{await _gnomeEnsureSession()}catch(e){}
+    if(!_gnomeSessionActive)return null;
+  }
+  var screens=await _wlBridgeScreens();
+  var shared=[];
+  for(var i=0;i<screens.length;i++){if(screens[i]&&screens[i].is_shared===true)shared.push(screens[i])}
+  if(!shared.length)return null;
+  var pick=null;
+  if(shared.length>1){for(var j=0;j<shared.length;j++){if(shared[j].is_primary){pick=shared[j];break}}}
+  if(!pick)pick=shared[0];
+  var g=pick.geometry||{},mons=_getMonitors(),label=pick.name||pick.id;
+  for(var k=0;k<mons.length;k++){
+    if(mons[k].originX===g.x&&mons[k].originY===g.y){
+      var msg="[claude-cu] default display: shared monitor "+label+" ("+shared.length+" shared) -> Electron display "+mons[k].displayId+" ("+mons[k].label+")";
+      if(msg!==_lastDefaultDiag){_lastDefaultDiag=msg;globalThis.__cdbDiag(msg)}
+      return mons[k].displayId;
+    }
+  }
+  var miss="[claude-cu] default display: shared monitor "+label+" at "+g.x+","+g.y+" matches no Electron display ["+mons.map(function(m){return m.label+"@"+m.originX+","+m.originY}).join(", ")+"] - using the primary display";
+  if(miss!==_lastDefaultDiag){_lastDefaultDiag=miss;globalThis.__cdbDiag(miss)}
+  return null;
+}
 // ── GNOME portal-session daemon lifecycle ──
 // gnome-portal-bridge holds ONE portal RemoteDesktop+ScreenCast session per
 // tool-use lock (one consent dialog; restore-token dialog-free on GNOME 46+).
@@ -275,10 +543,27 @@ async function _wlMonForRegion(x,y){
 // first PORTAL command (input/capture — see _gnomePortalCmds; never for
 // enumeration) and stop on process exit as a backstop.
 var _gnomeSessionActive=!1,_gnomeExitHooked=!1,_gnomeSessionStarting=null,_gnomeSessionEnding=null,_gnomeSessionWanted=!1;
+// True from the moment a session-start is spawned until a session-end succeeds.
+// A start that failed or timed out can still leave the bridge daemon parked on
+// the consent dialog, which only a session-end removes (mirrors
+// bridgeDaemonMayExist in js/executor_linux.js).
+var _gnomeDaemonMayExist=!1;
+// session-start refuses while a daemon is up ("a portal session is already
+// active"): e.g. a start that outlived its sync budget while the user was still
+// answering the dialog. That daemon IS the session we asked for (the KWin twin
+// passes allowAlreadyActive for the same reason).
+function _gnomeAlreadyActive(e){return /already active/i.test(String(e&&(e.message||e)))}
 async function _gnomeSessionStart(){
   var bin=_gnomeBridgeBin();if(!bin)return;
-  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
-  catch(e){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start failed: "+(e.message||e));_gnomePortalMarkDown("session-start failed")}
+  _gnomeDaemonMayExist=!0;
+  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
+  catch(e){
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
+    // The new daemon was closed before it became ready (the user stopped
+    // sharing, or the desktop ended the session): latch for this lock instead
+    // of the cooldown, so nothing starts it again until the lock ends.
+    if(e&&e.__cdbStoppedByUser){_gnomeLatchStopped("session-start exit 5");return}
+    globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start failed: "+(e.message||e));_gnomePortalMarkDown("session-start failed")}
 }
 // Stop the portal session. Mirrors stopBridgeSession() in js/executor_linux.js,
 // BOTH halves of it: clear the flag synchronously on entry so the last caller
@@ -317,7 +602,10 @@ async function _gnomeSessionEnd(){
   // Nothing was ever brought up: no session to end. Spawning session-end anyway
   // would hold the teardown latch for the length of a pointless subprocess and
   // widen the window in which the sync backstop refuses.
-  if(!wasActive&&!starting)return;
+  // A start that FAILED left neither flag set but may have left a daemon behind.
+  // A session the user stopped is still ended: session-end removes the bridge's
+  // stopped-by-user marker, so the next lock starts clean.
+  if(!wasActive&&!starting&&!_gnomeDaemonMayExist&&!_gnomeStoppedByUser)return;
   _gnomeSessionEnding=(async function(){
     // Log the interesting transition: a release that arrived while the consent
     // dialog was still up. Without this the whole interleaving is invisible in
@@ -327,8 +615,10 @@ async function _gnomeSessionEnd(){
     // again before session-end so the end-state reflects this call, not that
     // start.
     _gnomeSessionActive=!1;
-    try{await _bridgeAsync(bin,["session-end"],15000)}catch(e){}
+    try{await _bridgeAsync(bin,["session-end"],15000);_gnomeDaemonMayExist=!1}catch(e){}
     _gnomeSessionActive=!1;
+    // The lock that saw the user stop sharing is over.
+    _gnomeStoppedClear("lock released");
     globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session ended");
   })().then(function(){_gnomeSessionEnding=null},function(){_gnomeSessionEnding=null});
   return _gnomeSessionEnding;
@@ -355,10 +645,13 @@ function _gnomeEnsureSession(){
   }
   if(_gnomeSessionActive)return Promise.resolve();
   if(_gnomeSessionStarting)return _gnomeSessionStarting;
+  // The user stopped sharing during this lock: nothing starts a session again
+  // before the lock ends (a new lock clears the latch in __setLockHeld first).
+  if(_gnomeStoppedByUser){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start skipped: the user stopped screen sharing during this lock");return Promise.resolve()}
   // A fresh lock is a fresh user gesture: give the portal a real retry (consent
   // dialog and all) rather than inheriting the previous session's cooldown.
   _gnomePortalClearDown();
-  if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
+  if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive||_gnomeDaemonMayExist){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
   // Identity-check on settle: clear the slot only if it is still OURS. Without
   // it, an older start settling after the slot was reassigned frees it and lets
   // a third caller launch yet another concurrent session-start.
@@ -384,8 +677,11 @@ async function _x11MonForRegion(x,y){
     var g=screens[i].geometry||{};
     if(x>=g.x&&x<g.x+g.width&&y>=g.y&&y<g.y+g.height){pick=screens[i];break}
   }
-  if(!pick){for(var j=0;j<screens.length;j++){if(screens[j].is_primary){pick=screens[j];break}}}
-  if(!pick)pick=screens[0];
+  if(!pick){
+    for(var j=0;j<screens.length;j++){if(screens[j].is_primary){pick=screens[j];break}}
+    if(!pick)pick=screens[0];
+    _x11DiagOnce("region:"+x+","+y,"x11 capture origin "+x+","+y+" (root px) is on no RandR monitor - using "+(pick.name||pick.id));
+  }
   var pg=pick.geometry||{x:0,y:0};
   return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y};
 }
@@ -397,9 +693,13 @@ async function _x11MonForRegion(x,y){
 // total <= 1_150_000 px) and produces JPEG, so it overrides imgW/imgH with the
 // bridge's returned width/height and mimeType with "image/jpeg". The handler
 // uses imgW/imgH to map model image-pixel coordinates back to root pixels.
-async function _captureRegion(x,y,w,h,sf){
+async function _captureRegion(x,y,w,h,sf,displayIdx){
   if(!sf){var _m=_findMonByPoint(x,y);sf=_m?_m.scaleFactor:1}
-  if(sf&&sf!==1){x=Math.round(x*sf);y=Math.round(y*sf);w=Math.round(w*sf);h=Math.round(h*sf)}
+  // X11: per-display DIP -> root-pixel transform shared with the pointer paths
+  // (_x11PxRect); Wayland keeps the plain scale, which its bridge undoes below.
+  var _xr=_x11PxRect(x,y,w,h,displayIdx);
+  if(_xr){x=_xr.x;y=_xr.y;w=_xr.w;h=_xr.h}
+  else if(sf&&sf!==1){x=Math.round(x*sf);y=Math.round(y*sf);w=Math.round(w*sf);h=Math.round(h*sf)}
   var tmp=_path.join(_os.tmpdir(),"claude-cu-"+Date.now()+"-"+Math.random().toString(36).slice(2)+".png");
   var _de=_desktopId();
   // Native (non-downscaling) tiers crop to exactly w x h at native resolution
@@ -433,7 +733,14 @@ async function _captureRegion(x,y,w,h,sf){
       if(_wmr&&_wmr.name){_wzargs.push("--display",_wmr.name)}
       var _wzr=await _wlBridgeCallAsync(_wzargs);
       if(_wzr&&_wzr.base64){globalThis.__cdbDiag("[claude-cu] screenshot: captured via "+_wlb.name);return{base64:_wzr.base64,imgW:_wzr.width||w,imgH:_wzr.height||h,mimeType:"image/jpeg"}}
-    }catch(e){globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" zoom failed: "+(e.message||e))}
+    }catch(e){
+      globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" zoom failed: "+(e.message||e));
+      // A monitor the user did not share, or a session that was reset: no
+      // other tier can fix that (the desktopCapturer fallback would raise a
+      // portal dialog of its own), and the model needs the instruction, not
+      // "every tier failed".
+      if(e&&(e.__cdbNotShared||e.__cdbSurface))throw e;
+    }
     // Covered session with a resolved bridge: do NOT fall through to deleted
     // third-party tools. Last resort is the Electron desktopCapturer tier below.
     globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" screenshot failed on a covered Wayland session — no third-party fallback (set COWORK_SCREENSHOT_CMD to override)");
@@ -542,6 +849,99 @@ function _findMon(displayId){
   for(var i=0;i<mons.length;i++){if(mons[i].isPrimary)return mons[i]}
   return mons[0];
 }
+// X11 HiDPI: Electron reports displays in DIP, but x11-bridge (XTest motion,
+// GetImage crop) works in X root PIXELS. Chromium does not lay DIP origins out
+// as px/scale: ConvertDisplayBoundsToDips (ui/base/x/x11_display_util.cc)
+// scales only the PRIMARY's origin and places every other display next to its
+// neighbour, so neither "pass DIP through" (lands short whenever the scale is
+// not 1) nor a plain `*sf` (wrong for any monitor off the primary, or a primary
+// not at 0,0) reaches the right pixel. Each display carries its own pixel
+// origin, Electron's `nativeOrigin` (Chromium sets it from the RandR CRTC
+// origin), so map per display exactly as Electron's own screen.dipToScreenPoint
+// does on X11 (shell/browser/api/electron_api_screen.cc):
+//   px = nativeOrigin + floor((dip - bounds.origin) * scaleFactor)
+// on the display nearest the DIP point. Integer DIP at scale 1 with matching
+// origins comes out unchanged.
+// Bounds come from gfx::ToEnclosingRect, so when pixel size / scale is not an
+// integer, neighbouring DIP bounds OVERLAP by one column (2560 px at 1.5 ->
+// 0..1707, the next display starts at 1706). "First display containing the
+// point" is then ambiguous: a capture names its display explicitly, and a
+// point in the shared column prefers the display last screenshotted.
+// Applies only where Electron itself runs on X11 AND x11-bridge does the work:
+// an X11 session, or a Wayland session the launcher started on XWayland
+// (CLAUDE_USE_XWAYLAND=1 -> --ozone-platform=x11) with no covered bridge and no
+// ydotool. Everywhere else coordinates pass through as before.
+var _x11DiagSeen={},_x11DiagCount={point:0,layout:0};
+// Per-point keys (miss:, region:) and layout keys (map:, noorigin:) are capped
+// separately so a run of misses cannot starve the mapping line.
+function _x11DiagOnce(key,msg){var k=/^(miss|region):/.test(key)?"point":"layout";if(_x11DiagSeen[key]||_x11DiagCount[k]>=16)return;_x11DiagSeen[key]=1;_x11DiagCount[k]++;globalThis.__cdbDiag("[claude-cu] "+msg)}
+var _x11OzonePlatform;
+function _x11Coords(){
+  if(!_wayland)return !0;
+  if(_useWlBridge()||_checkYdotool())return !1;
+  if(_x11OzonePlatform===void 0){_x11OzonePlatform="";try{_x11OzonePlatform=String(_electron.app.commandLine.getSwitchValue("ozone-platform")||"")}catch(e){}}
+  return _x11OzonePlatform==="x11";
+}
+// Display index (in getAllDisplays / _getMonitors order) of the last full
+// screenshot; the tie-break for points in a shared DIP column.
+var _x11LastShotIdx=null;
+function _x11PxDisplays(){
+  if(!_x11Coords())return null;
+  var ds;try{ds=_electron.screen.getAllDisplays()}catch(e){return null}
+  if(!ds||!ds.length)return null;
+  var rr=Array.isArray(_x11ScreensCache)?_x11ScreensCache:[];
+  return ds.map(function(d,idx){
+    var b=d.bounds||{x:0,y:0,width:0,height:0},sf=d.scaleFactor||1,no=d.nativeOrigin,ox,oy;
+    if(no&&typeof no.x==="number"&&typeof no.y==="number"){ox=no.x;oy=no.y}
+    else{
+      // No nativeOrigin (older Electron): the cached x11-bridge RandR monitor
+      // nearest bounds.origin*scale with a matching pixel size, else origin*scale.
+      ox=Math.round(b.x*sf);oy=Math.round(b.y*sf);var best=null,bd=Infinity;
+      for(var i=0;i<rr.length;i++){var g=rr[i].geometry||{},dist=Math.abs(g.x-ox)+Math.abs(g.y-oy);if(Math.abs(g.width-b.width*sf)<=sf+1&&Math.abs(g.height-b.height*sf)<=sf+1&&dist<bd){bd=dist;best=g}}
+      if(best){ox=best.x;oy=best.y}
+      _x11DiagOnce("noorigin:"+idx,"x11 display "+idx+" has no nativeOrigin - pixel origin "+ox+","+oy+(best?" from the RandR monitor list":" = origin * scale"));
+    }
+    if(sf!==1)_x11DiagOnce("map:"+idx+":"+b.x+","+b.y+","+b.width+"x"+b.height+"@"+sf+">"+ox+","+oy,"x11 HiDPI: display "+idx+" DIP "+b.x+","+b.y+" "+b.width+"x"+b.height+" scale "+sf+" -> root px origin "+ox+","+oy);
+    return{b:b,sf:sf,ox:ox,oy:oy};
+  });
+}
+function _x11Contains(m,x,y){var b=m.b;return x>=b.x&&x<b.x+b.width&&y>=b.y&&y<b.y+b.height}
+// Display a DIP point maps through: the last-screenshotted display when it
+// contains the point, else the first one containing it, else the nearest
+// (Chromium's GetDisplayNearestPoint semantics).
+function _x11PxDisplayFor(list,x,y){
+  var best=null,bd=Infinity,pref=_x11LastShotIdx!=null?list[_x11LastShotIdx]:null;
+  if(pref&&_x11Contains(pref,x,y))return pref;
+  for(var i=0;i<list.length;i++){
+    var b=list[i].b;
+    if(x>=b.x&&x<b.x+b.width&&y>=b.y&&y<b.y+b.height)return list[i];
+    var dx=x<b.x?b.x-x:(x>=b.x+b.width?x-(b.x+b.width-1):0),dy=y<b.y?b.y-y:(y>=b.y+b.height?y-(b.y+b.height-1):0),dist=dx*dx+dy*dy;
+    if(dist<bd){bd=dist;best=list[i]}
+  }
+  _x11DiagOnce("miss:"+x+","+y,"x11 pointer target "+x+","+y+" (DIP) is on no display - mapped through the nearest one");
+  return best;
+}
+function _x11MapVia(m,x,y){return[m.ox+Math.floor((x-m.b.x)*m.sf),m.oy+Math.floor((y-m.b.y)*m.sf)]}
+// DIP point -> integer x11-bridge coordinate (root pixels on X11, unchanged elsewhere).
+function _x11Px(x,y){
+  var rx=Math.round(x),ry=Math.round(y),list=_x11PxDisplays();
+  if(!list)return[rx,ry];
+  return _x11MapVia(_x11PxDisplayFor(list,rx,ry),rx,ry);
+}
+// DIP rect -> root-pixel rect through ONE display's transform, so the
+// screenshot crop and the clicks agree. The display: displayIdx when the caller
+// names one, else the display whose origin IS the rect's top-left (a
+// whole-display capture in an overlapping layout), else as for a point. Null
+// when there is nothing to map (see _x11Coords, or no Electron displays).
+function _x11PxRect(x,y,w,h,displayIdx){
+  var list=_x11PxDisplays();
+  if(!list)return null;
+  var rx=Math.round(x),ry=Math.round(y),m=typeof displayIdx==="number"?list[displayIdx]:null;
+  for(var i=0;!m&&i<list.length;i++){if(list[i].b.x===rx&&list[i].b.y===ry)m=list[i]}
+  if(!m)m=_x11PxDisplayFor(list,rx,ry);
+  var tl=_x11MapVia(m,rx,ry),br=_x11MapVia(m,rx+Math.round(w),ry+Math.round(h));
+  return{x:tl[0],y:tl[1],w:br[0]-tl[0],h:br[1]-tl[1]};
+}
 var _inputLogDone={mouse:false,click:false,key:false,type:false,scroll:false,drag:false,window:false,app:false};
 function _logFirstUse(op,backend){if(!_inputLogDone[op]){_inputLogDone[op]=true;globalThis.__cdbDiag("[claude-cu] "+op+": using "+backend)}}
 // True when a covered Wayland session (wlroots/GNOME) has a resolved bridge —
@@ -557,7 +957,8 @@ function _moveMouse(x,y){
     if(_wayland&&!_checkYdotool())globalThis.__cdbDiag("[claude-cu] ydotool not available on Wayland, falling back to x11-bridge via XWayland");
   }
   _logFirstUse("mouse","x11-bridge");
-  _x11Bridge(["pointer-move","--x",String(Math.round(x)),"--y",String(Math.round(y))]);
+  var _mp=_x11Px(x,y);
+  _x11Bridge(["pointer-move","--x",String(_mp[0]),"--y",String(_mp[1])]);
 }
 function _mapKeyWayland(k){
   var _kmap={"ctrl":29,"control":29,"leftctrl":29,"rightctrl":97,
@@ -585,7 +986,8 @@ function _mapKeyWayland(k){
 // are the monitor's native logical size. The handler needs both to map model
 // image-pixel coordinates back to root pixels.
 async function _screenshotMon(mon){
-  var cap=await _captureRegion(mon.originX,mon.originY,mon.width,mon.height,mon.scaleFactor||1);
+  var cap=await _captureRegion(mon.originX,mon.originY,mon.width,mon.height,mon.scaleFactor||1,mon.displayId);
+  _x11LastShotIdx=mon.displayId;
   return{base64:cap.base64,imgW:cap.imgW,imgH:cap.imgH,mimeType:cap.mimeType,displayWidth:mon.width,displayHeight:mon.height,originX:mon.originX||0,originY:mon.originY||0};
 }
 // Wayland window enumeration goes through the covered session's bridge
@@ -620,9 +1022,15 @@ globalThis.__linuxExecutor={
   // CU session; dialog-free on GNOME 46+ via restore token) to the lock.
   async __setLockHeld(held){
     if(!_isGnomeCovered()||!_gnomeBridgeBin())return;
-    if(held)await _gnomeEnsureSession();else await _gnomeSessionEnd();
+    // A new lock is a new task: a stop the user made during the previous one
+    // no longer applies (its session-start removes the bridge's marker).
+    if(held){_gnomeStoppedClear("new lock");await _gnomeEnsureSession()}else await _gnomeSessionEnd();
   },
   async listDisplays(){return _getMonitors()},
+  // Display index a capture with no display selected should use, or null for
+  // "Electron's primary". Non-null only on GNOME with a portal share recorded
+  // (see _gnomeSharedDefaultDisplayId); read by js/cu_handler_injection.js.
+  async __defaultDisplayId(){return _gnomeSharedDefaultDisplayId()},
   async getDisplaySize(displayId){
     var m=_findMon(displayId);
     return{width:m.width,height:m.height,scaleFactor:m.scaleFactor,originX:m.originX||0,originY:m.originY||0};
@@ -635,6 +1043,7 @@ globalThis.__linuxExecutor={
   },
   async resolvePrepareCapture(opts){
     var did=opts&&opts.preferredDisplayId;
+    if(did==null){var sdid=await _gnomeSharedDefaultDisplayId();if(sdid!=null)did=sdid}
     var mon=_findMon(did);
     var shot=await _screenshotMon(mon);
     return{base64:shot.base64,mimeType:shot.mimeType,width:shot.imgW,height:shot.imgH,displayWidth:mon.width,displayHeight:mon.height,displayId:mon.displayId,originX:mon.originX,originY:mon.originY,hidden:[]};
@@ -643,7 +1052,7 @@ globalThis.__linuxExecutor={
     var mon=displayId!=null?_findMon(displayId):_findMonByPoint(rect.x,rect.y);
     var sf=mon?mon.scaleFactor:1;
     globalThis.__cdbDiag("[claude-cu] zoom: rect="+JSON.stringify(rect)+" scale="+scale+" displayId="+displayId+" mon="+((mon&&mon.label)||"?")+" sf="+sf);
-    var cap=await _captureRegion(rect.x,rect.y,rect.w,rect.h,sf);
+    var cap=await _captureRegion(rect.x,rect.y,rect.w,rect.h,sf,displayId!=null&&mon?mon.displayId:void 0);
     // {base64, imgW, imgH, mimeType}
     return cap;
   },
@@ -756,7 +1165,8 @@ globalThis.__linuxExecutor={
     if(_wayland&&_checkYdotool())return null;
     if(_wayland&&!_x11BridgeBin())return null;
     try{
-      return _appRefFromCommand(_x11Bridge(["app-under-point","--x",String(Math.round(x)),"--y",String(Math.round(y))]));
+      var _ap=_x11Px(x,y);
+      return _appRefFromCommand(_x11Bridge(["app-under-point","--x",String(_ap[0]),"--y",String(_ap[1])]));
     }catch(e){return null}
   },
   async getAppIcon(appPath){return null},
@@ -944,7 +1354,8 @@ globalThis.__linuxExecutor={
     }else{
       _logFirstUse("click","x11-bridge");
       var btnName={left:"left",right:"right",middle:"middle"}[button]||"left";
-      var _cargs=["pointer-click","--x",String(Math.round(x)),"--y",String(Math.round(y)),"--button",btnName,"--count",String(rep)];
+      var _xp=_x11Px(x,y);
+      var _cargs=["pointer-click","--x",String(_xp[0]),"--y",String(_xp[1]),"--button",btnName,"--count",String(rep)];
       if(holdKeys&&holdKeys.length>0){for(var i=0;i<holdKeys.length;i++){_cargs.push("--modifier",holdKeys[i])}}
       _x11Bridge(_cargs);
     }
@@ -978,9 +1389,9 @@ globalThis.__linuxExecutor={
       _ydotool(["click","0x80"]);
     }else{
       _logFirstUse("drag","x11-bridge");
-      var fromX=start?Math.round(start.x):Math.round(_electron.screen.getCursorScreenPoint().x);
-      var fromY=start?Math.round(start.y):Math.round(_electron.screen.getCursorScreenPoint().y);
-      _x11Bridge(["pointer-drag","--from-x",String(fromX),"--from-y",String(fromY),"--to-x",String(Math.round(end.x)),"--to-y",String(Math.round(end.y))]);
+      // Both endpoints are DIP (the cursor too: getCursorScreenPoint is DIP on X11).
+      var _cur=start||_electron.screen.getCursorScreenPoint(),_from=_x11Px(_cur.x,_cur.y),_to=_x11Px(end.x,end.y);
+      _x11Bridge(["pointer-drag","--from-x",String(_from[0]),"--from-y",String(_from[1]),"--to-x",String(_to[0]),"--to-y",String(_to[1])]);
     }
   },
   async scroll(x,y,horizontal,vertical){
@@ -998,7 +1409,7 @@ globalThis.__linuxExecutor={
       _logFirstUse("scroll","x11-bridge");
       var dx=horizontal?Math.round(horizontal):0;
       var dy=vertical?Math.round(vertical):0;
-      if(dx!==0||dy!==0){_x11Bridge(["pointer-scroll","--x",String(Math.round(x)),"--y",String(Math.round(y)),"--dx",String(dx),"--dy",String(dy)])}
+      if(dx!==0||dy!==0){var _sp=_x11Px(x,y);_x11Bridge(["pointer-scroll","--x",String(_sp[0]),"--y",String(_sp[1]),"--dx",String(dx),"--dy",String(dy)])}
     }
   },
   async key(combo,count){

@@ -852,6 +852,27 @@ jobs:
             echo "::warning::aarch64-linux-gnu-objdump unavailable — could not enforce glibc floor on the arm64 bridge"
           fi
 
+      # The launcher (--diagnose, --reset-screen-sharing) and the executors talk
+      # to every bridge through one CLI contract (docs/computer-use-bridge-contract.md);
+      # a bridge that breaks it fails here, before it is bundled.
+      - name: Checkout the bridge contract check
+        uses: actions/checkout@v7
+        with:
+          path: cdb
+          sparse-checkout: scripts/check-bridge-contract.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Check x86_64 bridges against the CLI contract
+        run: |
+          # gnome-portal-bridge and kwin-portal-bridge link libpipewire.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpipewire-0.3-0t64 || sudo apt-get install -y -qq libpipewire-0.3-0
+          mkdir -p /tmp/bridge-contract
+          cp /tmp/bridge-output/kwin-portal-bridge /tmp/x11-bridge-output/x11-bridge \
+             /tmp/wlroots-bridge-output/wlroots-bridge /tmp/gnome-bridge-output/gnome-portal-bridge \
+             /tmp/bridge-contract/
+          bash cdb/scripts/check-bridge-contract.sh /tmp/bridge-contract
+
       - name: Upload x86_64 bridge binaries
         uses: actions/upload-artifact@v7
         with:
@@ -1019,6 +1040,17 @@ jobs:
           echo "  Arch:     ${ARCH:-amd64}"
           echo "  Electron: ${ELECTRON_VERSION:-unknown} (bundled, traceability only)"
           echo "  SHA256:   ${SHA256}"
+
+      - name: Check bundled bridges against the CLI contract
+        run: |
+          # What users get: the bridges as bundled in resources/ of the tarball.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpipewire-0.3-0t64 || sudo apt-get install -y -qq libpipewire-0.3-0
+          BRIDGE_DIR=$(mktemp -d)
+          tar -xzf /tmp/build-output/claude-desktop-*-linux.tar.gz -C "$BRIDGE_DIR" --wildcards '*/resources/*-bridge'
+          RES=$(dirname "$(find "$BRIDGE_DIR" -path '*/resources/*-bridge' -type f | head -1)")
+          [[ -d "$RES" && "$RES" != . ]] || { echo "::error::no bundled *-bridge in the tarball"; exit 1; }
+          bash scripts/check-bridge-contract.sh "$RES"
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v7

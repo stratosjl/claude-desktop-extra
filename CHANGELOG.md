@@ -15,6 +15,14 @@ All notable changes to the claude-desktop-extra packages will be documented in t
   path as before. A leading `~\` in `apiKeyFile` is expanded on Windows. Covered by new win32 cases in
   `test-custom-models-main.mjs` and a Windows scenario in `test-extra-settings-dom.mjs`.
 
+### Custom models: the CLI preload also hooks `claude.exe` (thanks @stratosjl)
+
+- **No change on Linux.** `js/custom_models_preload.js` hooks `fetch` only inside the Claude Code binary,
+  recognised by `process.execPath`'s name. The Windows app starts Claude Code as `claude.exe`, so on
+  win32 the preload returned before hooking: every custom-model request went to Anthropic, which answered
+  "Model 'claude-<id>' not found". A trailing `.exe` is now ignored in that check. Covered by new cases in
+  `test-custom-models-preload.mjs` (`claude` and `claude.exe` hook, other Bun programs do not).
+
 ### Claude Desktop v3.6556.2
 
 - **Rebased on the official v3.6556.2 `.deb` (bundled Electron 44.9.3).** Three patches were re-fitted to
@@ -45,6 +53,31 @@ Three defects in `gnome-portal-bridge` (github.com/patrickjaja/gnome-bridge), pr
 On top: `zoom` without `--display` (the executor's fallback when it has no monitor list) now takes global coordinates and clamps the region to the display instead of refusing it on a monitor not at the origin, and the executor no longer caches a failed `screens` enumeration for the whole process (it retries after 30 s), so one slow reply cannot pin every later capture to global coordinates. The GNOME lifecycle harness covers the retry. Operator notes: in the consent dialog keep "Remember This Selection" on and turn on "Allow Remote Interaction"; `gnome-portal-bridge doctor` reports `restore_token_present`.
 
 `kwin-portal-bridge` (KDE Plasma) had the same restore-token defect: the consent prompt came back for every Computer Use session because the token was never stored. Fixed the same way in our fork and verified on Plasma 6.7.2; the next build picks it up. Keep "Allow restoring on future sessions" on in the KDE prompt.
+
+- **"Stop sharing" in the desktop's screen-sharing indicator ends Computer Use for the task.** Bridges on the updated contract exit 5 for every input and capture command once the user stops sharing, and for a `session-start` whose session is closed before it is ready (`docs/computer-use-bridge-contract.md`). The GNOME and KDE executors then tell the model that the user stopped sharing and to ask before continuing. Until the task's lock ends (for a guided tour: when the tour ends) they start no new session (no consent dialog, no vanished-daemon recovery) and try no other screenshot method; the release still sends `session-end`, and the next task starts sharing again. `claude-desktop --diagnose` prints `stopped_by_user` while it applies. Covered by new cases in `test-cu-gnome-session-lifecycle.mjs` and `test-launcher-diagnose.mjs`.
+
+### Computer Use on GNOME Wayland: clicks missing on scaled or multi-monitor setups, frozen screenshots (#293)
+
+- **Clicks on fractionally scaled monitors landed short by the scale factor.** The bridge sent logical units where the portal expects stream pixels; points are now converted to stream pixels.
+- **The outer band of a scaled monitor was unreachable.** xdg-desktop-portal refused those positions; they are now reached with a clamped absolute motion plus a relative motion for the remainder.
+- **Screenshots could be up to about a minute old.** The bridge returned the oldest queued frame; it now returns the latest.
+- **A monitor not shared in the consent dialog is an error, not a silent switch to another monitor.** The error names the shared monitors.
+- **`claude-desktop --reset-screen-sharing` forgets the remembered monitor selection** (GNOME and KDE), so the next Computer Use task shows the dialog again. A "not shared" error now tells Claude to ask you to run it, `--diagnose` shows whether a selection is remembered and which monitors a GNOME session shares, and a reset during a running task starts one new session.
+- **Computer Use bridges share a CLI contract** ([docs/computer-use-bridge-contract.md](docs/computer-use-bridge-contract.md)): `--diagnose` and `--reset-screen-sharing` work with whatever bridges are bundled, the executors read the bridges' exit codes (3 = monitor not shared, 4 = session gone), and `scripts/check-bridge-contract.sh` checks every built and bundled bridge in CI.
+- **The executor defaults screenshots to the shared monitor** and honours an explicit display 0 instead of reading it as unset.
+- **Session start waits up to about two minutes** for the consent dialog.
+- **A screenshot right after a click now includes the app's repaint.** Mutter skips a frame requested too early and its follow-up redraw does not reach a second monitor, so the shot could show the screen from before the click; after pointer input the bridge now flushes the pending frame with a 1 px pointer nudge.
+- **An input request whose caller already timed out is refused instead of executed late**, so a click can no longer land after Claude gave up on it.
+- **Ending a session is bounded to about 4 s**, even when the session daemon is stuck.
+
+Operator note: with several monitors, select all of them in the consent dialog.
+
+### Computer Use on X11 HiDPI, sway/Hyprland/river multi-monitor and rotated outputs, KDE session robustness
+
+- **X11 with a scale factor** (`Xft.dpi` via XSETTINGS, `GDK_SCALE`, `--force-device-scale-factor`): clicks were sent in Electron DIP while XTest works in root pixels, so at 1.5 a click at the screen centre landed at two thirds of the way. Clicks and the screenshot crop now share one DIP-to-pixel mapping (the same as Electron's `dipToScreenPoint`), including mixed scales, a primary monitor not at 0,0, displays whose DIP bounds overlap by one column, and XWayland via `CLAUDE_USE_XWAYLAND=1`.
+- **wlroots-bridge (sway, Hyprland, river):** absolute pointer motion is now relative to the layout's bounding box, so monitors left of or above the origin are reachable and clicks land exactly. Rotated and flipped outputs (all 8 transforms) give upright screenshots and correct click mapping.
+- **KDE Wayland (`kwin-portal-bridge`):** every bridge call has a timeout. Session start waits up to about two minutes for the consent dialog and tells a declined dialog from a slow one. A stuck session daemon is ended (SIGTERM, then SIGKILL) on session end and at quit. Input whose caller already timed out is refused instead of executed late, and screenshots settle after an action.
+- **GNOME and KDE:** a session daemon left over from a failed session start is now ended as well.
 
 ## 2026-10-22
 
