@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 **When to run this:** normally you don't. CI auto-releases new upstream versions (version-check.yml dispatches build-and-release.yml; green run = released + `.upstream-version` bumped + tracking issue closed). Run this skill when the **auto-release failed** (a comment on the "new version detected" issue links the failed run) or when you want a deep audit of a bump. On a patch failure, decide FIRST: did the re-minify just move the anchor (fix the regex), or did upstream natively implement what we patch (**remove the patch** - the expected direction, since Anthropic maintains 1p Linux support)?
 
+**Upstream changelog:** https://claude.com/docs/cowork/changelog ("Release notes for Claude Desktop", one entry per version incl. the bundled Claude Code version). Read the entry for the new version before Step 3; it is a hint list, not the authority (past major-number jumps went unexplained there - the code decides).
+
 Run from the repo root. The official Linux `.deb` is remotely managed and re-minifies every release; patches use `[\w$]+` wildcards on stable string anchors. Step 1 runs `/fresh-upstream` for a clean extract; Step 9 ends with `/deploy` to release. `$ARGUMENTS` may name a target version.
 
 Use sequential thinking and delegate independent analysis (diff, flag audit, ion-dist, platform gates) to parallel sub-agents where useful; you coordinate and edit.
@@ -20,7 +22,8 @@ Use sequential thinking and delegate independent analysis (diff, flag audit, ion
   ```
 - Use `grep -a` on extracted bundles. `rg -a --no-ignore` silently fails on them (raw NUL bytes); a zero-hit `rg` is not evidence.
 - Match JS identifiers with `[\w$]+`, never bare `\w+` - minified names contain `$` (`F$e`, `$S`) and `\w+` silently misses them.
-- Since v1.12603.0 the bundle embeds **two** copies of `@anthropic-ai/claude-agent-sdk` (`grep -ao 'CLAUDE_AGENT_SDK_VERSION="[0-9.]*"' ./tmp/new-bundle.js | sort | uniq -c`). A pattern on SDK-internal code matches twice: decide explicitly whether to patch both copies and assert the count.
+- Check how many copies of `@anthropic-ai/claude-agent-sdk` the bundle embeds: `grep -ao 'CLAUDE_AGENT_SDK_VERSION="[0-9.]*"' ./tmp/new-bundle.js | sort | uniq -c`. It was 2 from v1.12603.0 and 1 by v2.42304.2 (0.3.299; 0.3.304 in v3.1623.0). If >1, a pattern on SDK-internal code matches once per copy: decide explicitly whether to patch both and assert the count.
+- The shell's `grep` may be a ugrep shim that rejects long context patterns (`.{0,200}` fails with "exceeds complexity limits"; `.{0,60}` works). For wide context windows use python: `python3 -I -c 'import re,sys;d=open(sys.argv[1],"rb").read().decode("latin1");[print(m) for m in sorted(set(re.findall(r".{0,200}ANCHOR.{0,200}",d)))]' "$NEW"`.
 
 ## Step 0 - clean slate
 ```bash
@@ -56,7 +59,7 @@ If patches fail (upstream renamed identifiers / refactored / removed a feature):
    patches/<group>/<patch_name> ./tmp/test-index.js; echo "exit=$?"
    ```
    The staged concatenation never passes `node --check` as a whole; the per-chunk `node --check` in the build is authoritative. A syntax error there means the patch replaced only part of a construct.
-4. Re-run the build until all patches pass. **Every sub-patch must succeed or `quit(1)`** - never `[WARN]`+continue. If a feature was upstreamed, **remove the patch** (`git rm`, bump `EXPECTED_PATCH_COUNT` in `scripts/apply_patches.py`). The absorption probe (`scripts/check-upstream-absorbed.py`, run by the build) flags ABSORBED/PARTIAL patches: audit that upstream ships the same behavior on Linux, then remove. FAILED means re-fit, not remove. See AGENTS.md Rules 4/6.
+4. Re-run the build until all patches pass. **Every sub-patch must succeed or `quit(1)`** - never `[WARN]`+continue. If a feature was upstreamed, **remove the patch** (`git rm`, bump `EXPECTED_PATCH_COUNT` in `scripts/apply_patches.py`). The absorption probe (`scripts/check-upstream-absorbed.py`, run by the build) flags ABSORBED/PARTIAL patches: audit that upstream ships the same behavior on Linux, then remove. FAILED means re-fit, not remove. A PARTIAL verdict can also be a false "already patched" in our own idempotency check (a prefix regex matching new, unrelated upstream code): read the matched site before removing anything. See AGENTS.md Rules 4/6.
 
 ## Step 2 - Linux-compat analysis (new gates?)
 Diff old vs new for newly darwin/win32-gated features that need Linux support (`OLD`/`NEW` = the two concatenations from the search rules):
@@ -73,7 +76,9 @@ diff <(cd ./tmp/app.asar.contents-OLD && find . -type f | sed 's/-[A-Za-z0-9_-]\
      <(cd ./tmp/app.asar.contents && find . -type f | sed 's/-[A-Za-z0-9_-]\{8\}\.js$/.js/' | sort)   # new/removed files
 diff <(grep -aoE 'handle\("[^"]+"' "$OLD"|sort -u) <(grep -aoE 'handle\("[^"]+"' "$NEW"|sort -u)      # IPC handlers
 ```
-Also skim Claude Code / Cowork subsystem changes. Classify each finding: rename-only (no action) / new feature (may need a Linux patch) / changed behavior (existing patches may break) / removed (clean up patches/docs).
+Read the new version's entry in the upstream changelog (https://claude.com/docs/cowork/changelog) and cross-check every item that touches something we patch or ship (Quick Entry, window chrome, settings pages, popouts, managed-settings keys, Computer Use) against the patches; the code stays the authority. Also skim Claude Code / Cowork subsystem changes. Classify each finding: rename-only (no action) / new feature (may need a Linux patch) / changed behavior (existing patches may break) / removed (clean up patches/docs).
+
+If earlier versions were auto-released without an audit, diff catalogs and baselines (Steps 4-6) against the LAST AUDITED version (the version stamped in the baseline docs), not just the previous release.
 
 ## Step 4 - feature-flag audit
 Read `baseline/CLAUDE_FEATURE_FLAGS.md`. Find the new static-registry function name (changes every release; anchor on a known flag like `ccdPlugins`). Diff flag sets:
@@ -82,7 +87,7 @@ diff <(grep -aoE '[\w$]+\("[0-9]{6,}"\)' "$OLD"|sort -u) <(grep -aoE '[\w$]+\("[
 ```
 Check `enable_local_agent_mode.nim`'s override list still covers the cowork/code flags and its Zod schema includes them. Update the doc + version-history table.
 
-Also refresh the flag catalog in `js/growthbook_overrides.js` (TEMPLATE): it lists every store-consulted flag of the audited version, commented out. Extract IDs with `rg -o '[\w$]+(?:\.[\w$]+)*\("([0-9]{6,10})"[,)]' -r '$1' <new-bundle-concat> | sort -u`, drop the IDs force-rewritten by patches (`rg -oI '"[0-9]{6,10}"' patches/*/*.nim`, minus IDs only mentioned in comments), and update descriptions + the version stamp in the header. Then regenerate the browsable copy and rebuild the binary:
+Also refresh the flag catalog in `js/growthbook_overrides.js` (TEMPLATE): it lists every store-consulted flag of the audited version, commented out. Extract IDs from EVERY quoted 6-10 digit literal, not only call-shaped ones (many IDs are hoisted into a variable first, e.g. `var Ou="1169442571";...t.u1(Ou,!0)`, or sit in arrays; a call-shaped grep found 516 of 619 at v3.1623.0): `grep -aoE '["`][0-9]{6,10}["`]' <new-bundle-concat> | tr -d '"`' | sort -u`, then drop non-flag constants (git modes like `100644`/`160000`, registry dwords, `0123456789`, size/limit literals) and dead gates, each after reading its site. Drop the IDs force-rewritten by patches (`grep -oI '"[0-9]{6,10}"' patches/*/*.nim`, minus IDs only mentioned in comments), and update descriptions + the version stamp in the header. Then regenerate the browsable copy and rebuild the binary:
 ```bash
 bash scripts/check-jsonc-template-sync.sh --write   # updates docs/claude-desktop-extra.jsonc
 touch patches/core/add_growthbook_overrides.nim && (cd patches && make)
@@ -106,6 +111,7 @@ Read `baseline/PLATFORM_GATE_BASELINE.md` first; only gates that don't map to an
 for p in darwin win32 linux; do echo "$p: $(grep -ao "platform===\"$p\"" "$NEW" | wc -l)"; done   # vs baseline counts
 grep -aoE '.{0,60}process\.platform==="(darwin|win32)".{0,80}' "$NEW" | sort -u
 grep -aoE '.{0,80}!=="darwin".{0,40}!=="win32".{0,80}' "$NEW" | sort -u
+grep -aoE '.{0,60}processPlatform\(\).{0,60}' "$NEW" | sort -u   # injected gates, e.g. this.deps.processPlatform()!=="win32" - the process.platform greps miss these
 ```
 Classify each: PATCHED (maps to a patch) / NATIVE (real Apple/Win API) / STUB (disabled on all platforms) / **PORTABLE** (mac/win-only, no native dep, not patched - the only actionable class). **Verify before reporting:** trace every PORTABLE candidate yourself and quote the verbatim snippet; past sub-agent audits hallucinated removed features and fake UUIDs. Update the baseline's `Last audited`, counts and rows.
 

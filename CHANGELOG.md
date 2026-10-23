@@ -2,6 +2,258 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-10-23
+
+### Windows 11 build (experimental)
+
+- **A portable Windows build with custom models and profiles.** `scripts/windows/build-windows.sh` takes
+  Anthropic's official Windows package (verified against its `RELEASES` manifest), applies the custom models
+  patch, the Settings → Extra page (Models panel only on Windows) and the profile window title, plus the new
+  `add_windows_profiles.nim` (windows), and zips it with an `Install.cmd` that installs per user and adds
+  Start Menu shortcuts per profile (`Install.cmd -Profile work`). `claude.exe --profile=NAME` uses
+  `%APPDATA%\Claude-NAME` and `%USERPROFILE%\.claude-NAME`, and sign-in callbacks go back to the profile
+  that started them. Windows enforces the asar integrity fuse, so the build rewrites the archive hash in
+  `claude.exe` (the exe's signature no longer verifies; no auto-update). New **Build Windows** workflow builds
+  x64 and arm64 and boots the x64 build on a Windows runner. On Windows, custom models load their CLI preload
+  through the profile folder's 8.3 short name when the user folder contains a space. Linux packages are
+  unchanged. See [docs/windows.md](docs/windows.md).
+
+## 2026-10-22
+
+### "Update available" follows this project's releases
+
+- **The sidebar's "Update available" now shows when a newer claude-desktop-extra release exists, and
+  clicking it opens the install section for your package format.** Upstream compared against Anthropic's
+  apt repository, so the button appeared while our packages had not caught up yet, never showed our patch
+  releases (`v3.1623.1-2`), and its link led to apt instructions. The check now reads this project's latest
+  GitHub release against the release and package format recorded in the package at build time, and the
+  click opens the README at the pacman, deb, rpm, Nix or AppImage section. "Restart to update" after the
+  package manager replaced the app, and `disableAutoUpdates`, work as before. New
+  `fix_update_check_own_releases.nim` (linux).
+
+### The window no longer raises itself under focus-follows-mouse (thanks @balwierz, #292)
+
+- **Moving the pointer over Claude no longer brings it to the front.** With focus-follows-mouse and
+  raise-on-hover turned off (KWin, Cinnamon, ...), Claude raised itself above every other window on each
+  hover, and no window manager setting or rule stopped it. Upstream moves keyboard focus into its web view
+  from the window's `focus` event; on Linux, Electron's `webContents.focus()` first re-activates the window,
+  which goes out as an xdg_activation request on Wayland or `_NET_ACTIVE_WINDOW` on X11, and the window
+  manager answers with a raise. New `fix_focus_follows_mouse_raise.nim` (linux) skips that call when the
+  window is already active and the view already has focus; the main window and popouts are covered. So that
+  the first hover after launch also finds a focused view, the view is focused once after its first load
+  while the window is still inactive (KWin denies that request, as it does the launch one). Tray,
+  second-instance and notification activations are unchanged and still raise the window. Each decision is
+  one `[focus-no-raise]` line in `claude-patches.log`
+  ([anthropics/claude-code#75905](https://github.com/anthropics/claude-code/issues/75905)).
+
+## 2026-10-21
+
+### Blank main window after a renderer clean-exit (#287)
+
+- **The main view reloads itself when its renderer exits cleanly without the app asking.** On niri
+  Wayland with 10-16 Code sessions open the renderer went away every day or two with
+  `reason: 'clean-exit', exitCode: 0`; upstream drops that reason without reloading, so the window stayed
+  blank, Ctrl+R and F5 had nothing left to reach, and only a full restart - ending every Code session -
+  recovered. A real crash already took the reload path. New `fix_renderer_clean_exit_reload.nim`
+  (linux): a clean-exit while the app is not quitting now goes through upstream's own reload path; one
+  during quit, relaunch, Reset App Data or a view teardown stays suppressed, and after three reloads in
+  ten minutes it falls back to upstream behavior. Each decision is one `[cdb-renderer]` line in
+  `claude-patches.log`. Thanks to @ToRvaLDz for the report and the log analysis.
+
+### Custom themes: themed caption-button area
+
+- **The minimize / maximize / close area of the integrated titlebar follows the active theme.** It kept
+  upstream's own colors (stock, or the page color saved from the last run, with stock symbols), so it
+  showed as a stock box at the right end of a themed top bar and missed live switches. It now takes the
+  theme's top bar color and a `--text-200` symbol color, follows light/dark flips and switches live from
+  the theme picker. No theme, a transparent window and the native titlebar behave as before. Thanks to
+  @fatihaydost.
+
+### Claude Desktop 3.1623.0 (#285)
+
+- **Built on upstream 3.1623.0** (Electron 44.9.0, bundled Claude Code 2.1.304). The new major number
+  comes with a one-way move of the app's data folder on Windows; Linux keeps `~/.config/Claude`. Upstream
+  release notes: https://claude.com/docs/cowork/changelog. Nothing we ship was taken over or removed
+  upstream, and no new mac/Windows-only feature needs a Linux patch.
+- **Five patches re-fitted to the new code shapes**, same behavior:
+  - integrated titlebar and transparent window: the main window's background is now the page color saved
+    from the last run, read through a call that takes an argument; the titlebar color follows it;
+  - hidden start after session restore: only the window-show check is patched, the new Reset App Data
+    check of `--startup` keeps upstream behavior;
+  - Extra settings: the restart hook follows upstream's reworked relaunch;
+  - Computer Use: the first screenshot note follows a longer tool handler.
+- **Cowork's plugin page on Linux shows the same plugins as on macOS and Windows.** The package no longer
+  forces Claude Code routing for Cowork, which listed the Claude Code CLI plugins there although Cowork
+  tasks never loaded them, and made an uninstall there edit the Claude Code setup. Home-directory CLI
+  plugins still show as Personal Plugins.
+- **Catalogs:** the Anthropic Features flag list covers 619 flags, and Extra -> Deployment lists all 193
+  managed-settings keys of this version, including `quickEntryDefaultShortcut`, `releaseChannel`,
+  `skillScanningEnabled`, `sshConfigs` and `disableDesktopLocalSessions`; the five unnamed "Reserved
+  setting" keys are shown read-only.
+- **Computer Use is back for Team and Enterprise accounts.** The app now reports Computer Use as rolled
+  out (`computerUseRollout`) next to `computerUse`; claude.ai reads that key, so accounts without a web
+  rollout get the Settings -> System -> Computer use switch again instead of "Computer use isn't available
+  on the Team and Enterprise plans yet", and Code sessions and Cowork tasks on this computer carry the
+  tools once it is on. An organization compliance lock still switches it off.
+- **Computer Use in Cowork chats on X11: the tool descriptions no longer claim that screenshots contain only
+  granted apps' windows; the model asks for access through the consent card and then sees the whole
+  display.** The descriptions come from a static per-session preset that was the "granted apps only" one on
+  X11; it now reads as whole-display there, and the request_access text says so instead of calling X11 a
+  Wayland session.
+- **Build:** the Quick Entry KDE rebind harness waits for the "armed" log line instead of reading it right after the bind call (a one-in-six timing flake that turned release runs red).
+- **Build:** the Personal Plugins, window bounds, tray icon, Quick Entry ready-to-show, GrowthBook overrides
+  and profile window title patches no longer need the legacy PCRE1 library at run time (ported from
+  `std/nre` to the pure-Nim `regex` package, byte-identical output); the Personal Plugins harness now prints
+  the patch binary's output when a check fails.
+- **Docs:** Cowork VM debug tags refreshed to the native backend's `[VM:start]`/`[VM:steps]` lines, the
+  kernel-upgrade-without-reboot VM boot failure documented, Electron stamp 44.9.0.
+
+## 2026-10-20
+
+### Custom themes stay out of the browser pane (#284)
+
+- **A custom theme no longer recolors third-party pages.** The theme sheet went into every page except
+  devtools and localhost, so sites opened in the Code tab's browser pane (and Cowork file previews)
+  inherited the theme's text color: with `breeze`, light pages showed white text on white. The theme now
+  applies only to the app's own pages: claude.ai and claude.com (1P), `app://localhost` (3P), and the
+  app's local windows (Quick Entry, find-in-page, buddy). Thanks to @furiozo-ga for the report and the
+  allow-list idea.
+
+## 2026-10-18
+
+### Empty Quick Entry bar and collapsed code: no system font (#281, #282)
+
+- **An empty Quick Entry bar that drops typing, and inline code that collapses to a text-less pill, come
+  from a session in which fontconfig finds no fonts.** claude.ai text still renders because it ships its
+  own web fonts, but the Quick Entry window, code in transcripts and every fallback glyph need a system
+  font, and without one the text has no size. Reproduced on Bazzite 44 with the real app by pointing
+  `FONTCONFIG_FILE` at an empty configuration: both screenshots from the reports appear, pixel for pixel.
+  `claude-desktop --diagnose` gains a **Fonts** section (`FONTCONFIG_FILE`, `FONTCONFIG_PATH`,
+  `FONTCONFIG_SYSROOT`, `fc-match sans-serif` and `monospace`, the `fc-list` count) and names the problem
+  under **Problems found**. The launcher drops a `FONTCONFIG_*` variable that points at a missing path
+  before starting the app and logs it; a session whose `fc-match sans-serif` is empty is logged too.
+- **The app now runs with its own font cache.** The reporter traced the empty font set to a stale
+  `~/.cache/fontconfig/*.cache-11` written by an Ubuntu distrobox sharing `$HOME`: Electron's bundled
+  fontconfig uses its own cache format and trusted the container's cache for the same font directory,
+  while the host's `fc-match` (another format) stayed healthy. The launcher starts the app with
+  `~/.cache/claude-desktop/fontconfig/fonts.conf`, the distro's `/etc/fonts/fonts.conf` with the shared
+  `<cachedir>` entries replaced by a private one, so nothing else sharing `$HOME` can feed the app a
+  cache. Font directories, `conf.d` and the user's fontconfig stay as configured; the first start
+  rescans the fonts once. An explicit `FONTCONFIG_*` variable is kept, `CLAUDE_PRIVATE_FONT_CACHE=0`
+  opts out, and `--diagnose` reports which cache the app uses.
+
+### Quick Entry diagnostics (#281)
+
+- **Every Quick Entry show now logs what the window sees.** `claude-patches.log` gets one
+  `[quick-entry] shown WxH focused=... {textarea, focused, font, color, placeholder, caret, fonts}` line
+  per show, so a bar without a visible text field can be told apart by its line: font not loaded, no
+  keyboard focus, or colors from a theme. Public Electron APIs only.
+- **A KDE shortcut stored without a key is named as such.** When the "register the following shortcut"
+  dialog was dismissed once, Plasma keeps the shortcut with no key and never fires it; the re-bind log line
+  now ends in `(no key assigned - set one in System Settings > Shortcuts > Claude)` instead of listing the
+  id as if it were armed. Reproduced on Bazzite 44 (Plasma 6.7.5) after a fresh login.
+
+## 2026-10-17
+
+### Quick Entry hotkey survives a restart on KDE Plasma 6.7.4+ (#281)
+
+- **The Ctrl+Alt+Space hotkey keeps working after the app restarts on Plasma 6.7.4 and later.** The first
+  launch asked for the shortcut and it worked; every later launch left it dead while System Settings still
+  listed it. The bundled Electron (Chromium 152) only binds a portal shortcut it does not find stored, and
+  xdg-desktop-portal-kde 6.7.4 stopped arming stored shortcuts until the app binds them again (KDE bug
+  523063; Chromium fixed its side on main on 2026-10-15, CL 8527334, in no shipped Electron). A new patch
+  opens a second GlobalShortcuts portal session from the main process on every launch and re-binds the
+  stored shortcut, which Plasma accepts without a dialog; Plasma then delivers the hotkey to the app's own
+  session as on a first launch. Active only on KDE Wayland with KWin 6.4+, not on `CLAUDE_USE_XWAYLAND=1`
+  launches (those grab keys through X11); `CDB_KDE_GS_REBIND=0` turns it off. Measured on Plasma 6.7.5
+  (Bazzite 44 live) and 6.7.2 (Fedora 43, unaffected).
+
+## 2026-10-16
+
+### Menus in popped-out session windows work while the main window is hidden (#280)
+
+- **On native Wayland, menus in a popped-out Code session no longer get stuck.** With the main window on
+  another workspace (sway, and any compositor that stops drawing hidden windows), menus and dropdowns in a
+  session window opened with "Open in new window" stopped closing, or did not open, until the main window
+  was shown again. The session window's UI runs in the main window, which receives no animation frames at
+  all while the compositor hides it (electron/electron#53814; `backgroundThrottling` cannot help). The main
+  window's `requestAnimationFrame` now also advances on a 100 ms timer when no frame arrives, so a visible
+  main window behaves exactly as before. X11 and XWayland sessions are untouched; `CDB_POPOUT_RAF_SHIM=0`
+  turns the fix off.
+
+### Developer tools switch in Settings -> Extra (community)
+
+- **DevTools can be enabled from the Extra page.** The official build only opens DevTools (Ctrl+Alt+I,
+  "Toggle Dev Tools" in the app menu) with `allowDevTools: true` in `developer_settings.json` in the profile
+  directory, a file nothing in the app writes. The new Community Features row writes it. The shortcut
+  works right away, the menu entry after a restart; an organization that disabled developer mode keeps
+  DevTools off, as before.
+
+## 2026-10-15
+
+### Nix: `flake.lock` is committed (thanks @sophietelle, #278)
+
+- **`nix run github:patrickjaja/claude-desktop-extra` works again.** Without a lock file in the repo,
+  current Nix stopped with "cannot write modified lock file". The flake now ships one, which also pins
+  nixpkgs so `electron_44` stays available after nixpkgs drops it. Release builds only touch
+  `packaging/nix/package.nix`, so version bumps leave the lock alone; `nix flake update` refreshes it.
+
+### Release CI installs every release the way users do
+
+- **Each release is now installed from its published channels before it counts as done.** After
+  publishing, CI runs the README's own install commands in fresh containers: the apt repo on Ubuntu
+  22.04, 24.04 and Debian 12, the dnf repo on current Fedora and Rocky Linux 9, the pacman repo and
+  the AUR on Arch, and `nix run github:...`. Each must install the release just published. The package
+  tests only ever installed the freshly built files, which is how the missing `flake.lock` went
+  unnoticed. A failing channel comments on the release's tracking issue.
+
+## 2026-10-14
+
+### Upstream v2.37337.1 (Electron 44.7.0)
+
+- **Logout and `systemctl stop` no longer stall for 90 seconds.** With the bundled Electron 44.7.0, a
+  stop signal sent to every app process at once (logout, `systemctl --user stop`, `pkill claude`,
+  Ctrl+C) left the app spinning at full CPU in an endless loop of failed GPU-process relaunches until
+  it was force-killed. It now exits about 3 seconds after its quit cleanup instead. Quitting from the
+  tray or closing the window was not affected.
+- **`fix_app_quit` no longer rewrites upstream's own quit.** Upstream's second `app.quit()` after its
+  quit cleanup ends the app on Linux (0.4 to 0.9 s, measured on v2.26454.0 through v2.37337.1), so the switch
+  to `app.exit(0)` is gone; the patch now carries only the 3-second backstop above.
+- **No more thin frame around the window on XFCE, i3 and Awesome.** The bundled Electron 44.7.0 no
+  longer paints its 4 px band inside frameless windows (measured on xfwm4: the window is exactly its
+  content size). Hide window controls is no longer needed for that; the docs now describe it only as
+  the switch that drops the window buttons.
+- **Extra -> Deployment shows when each setting became available.** 24 settings that the panel still
+  listed as "upstream gates this @next" now show the version that enabled them; the 10 that upstream
+  still holds back keep the note.
+- Two patches re-fitted, no behavior change. **Custom models:** upstream now builds the Code session
+  env through a helper that applies managed proxy settings; our model variables go into that helper's
+  input, so a managed proxy policy still applies on top. **Computer Use** (screenshot intro note):
+  upstream moved its grant lookups into a function that can re-read them.
+- **`openssh` is a new optional dependency** (Recommends on deb/rpm, optdepends on Arch), as in the
+  official `.deb`: Claude Code SSH sessions can use the system ssh client and fall back to the built-in
+  SSH engine without it.
+- Extra -> Deployment knows the two new managed settings `developerModeEnabled` and
+  `chatAdvancedFileAnalysisNetworkEnabled` and drops `toolPolicyRules`; the GrowthBook overrides
+  template lists the 33 new flags of this release.
+
+### Custom models: Fetch models reads a gateway's model info (thanks @stratosjl, #276)
+
+- **A LiteLLM-based gateway's models arrive with their real window and capabilities.** When the list
+  leaves a window unstated (gateway preset or no preset), Fetch models also reads the host's
+  `/v1/model/info`: `max_input_tokens` sets the window, `supports_vision` / `supports_reasoning` false
+  turn those off, and embedding, speech and transcription models are left out with a note. A host
+  without the endpoint, or a failed answer, leaves the list as it was.
+
+### Custom models: streams that put thinking inside a text block (thanks @stratosjl, #277)
+
+- **GLM 5.3 on TensorX no longer falls back to non-streaming.** That LiteLLM-based gateway streams
+  reasoning as `thinking_delta` inside a block opened as `text`; Claude Code refused the stream and
+  resent the whole turn without streaming, paying for it twice. The preload now gives each run of
+  thinking or text its own block and moves the later blocks up; a stream without the mix is untouched.
+- **The usage line of such a stream** comes from the final `message_delta` when `message_start`
+  counts nothing, marked `(end of stream, no cache figures sent)` instead of printing zeros.
+
 ## 2026-10-12
 
 ### Panel tabs (thanks @dels07, #274)

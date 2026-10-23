@@ -54,6 +54,9 @@ concurrency:
 #         │                  deploy-rpm-repo (fedora:40, signs RPMs — release path)
 #         │                          │
 #         │                  deploy-pages (deploys to GitHub Pages — release path)
+#         │                          │
+#         │                  verify-install-channels (README install commands in
+#         │                    fresh containers: apt/dnf/pacman/AUR/nix — release path)
 #         │
 #         └────────────────► open-version-pr (auto_pr mode only: bump .upstream-version + Nix hash, open PR)
 #
@@ -152,12 +155,16 @@ jobs:
           }
 
           HIGHEST_VERSION=$(echo "$RELEASES_JSON" | python3 -c "
-          import sys, json
+          import sys, json, re
           releases = json.load(sys.stdin)
           versions = []
           for r in releases:
-              tag = r['tag_name'].lstrip('v')
-              base = tag.split('-')[0] if '-' in tag else tag
+              # Linux releases only: v<version>[-<pkgrel>]. Other tags in the
+              # repo (windows-v<version>, see build-windows.yml) are skipped.
+              m = re.fullmatch(r'v?(\d+(?:\.\d+)*)(?:-.*)?', r['tag_name'])
+              if not m:
+                  continue
+              base = m.group(1)
               parts = [int(x) for x in base.split('.')]
               versions.append((parts, base))
           if versions:
@@ -1199,6 +1206,7 @@ jobs:
       - name: Build AppImage (${{ matrix.arch }})
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
+          PKGREL: ${{ needs.check-version.outputs.pkgrel }}
         run: |
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
             TARBALL="claude-desktop-${VERSION}-linux-aarch64.tar.gz"
@@ -1208,7 +1216,7 @@ jobs:
             ARCH_FLAG=""
           fi
 
-          bash packaging/appimage/build-appimage.sh $ARCH_FLAG "$TARBALL" ./dist
+          bash packaging/appimage/build-appimage.sh $ARCH_FLAG "$TARBALL" ./dist "$PKGREL"
 
       - name: Test AppImage
         run: |
@@ -1926,7 +1934,7 @@ jobs:
     # Publish only on a real release dispatch — NOT in auto_pr mode (auto_pr
     # builds + validates everything, then opens a PR via open-version-pr; the
     # human merge + a follow-up plain workflow_dispatch run does the release).
-    # deploy-rpm-repo / deploy-pages / validate-nix all `needs: release`, so they
+    # deploy-rpm-repo / deploy-pages / verify-install-channels all `needs: release`, so they
     # skip transitively when this is skipped.
     if: needs.check-version.outputs.should_build == 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.auto_pr != 'true'
     runs-on: ubuntu-latest
@@ -2787,26 +2795,59 @@ jobs:
           echo "Dispatched mirror-pages for run ${RUN_ID}"
 
   # ================================================================
-  # Job 7: Validate Nix package builds from GitHub Releases
+  # Job 7: Verify the published install channels as a user hits them
+  #
+  # The package jobs install the files they just built; this job installs
+  # from what was PUBLISHED (Pages apt/dnf repos, pacman repo on the release
+  # assets, AUR, the flake on master), running the README's own install
+  # commands in fresh containers. scripts/verify-install-channel.sh reads
+  # the commands from README.md, so the docs and the check cannot drift.
+  # Package jobs cannot see channel breakage: a flake without flake.lock
+  # builds from a checkout while `nix run github:...` fails for users (#278).
+  # Retries cover Pages/CDN propagation after deploy-pages.
   # ================================================================
-  validate-nix:
-    needs: [check-version, release]
+  verify-install-channels:
+    needs: [check-version, release, deploy-pages]
     if: needs.check-version.outputs.should_build == 'true' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { channel: apt,    image: "ubuntu:22.04" }
+          - { channel: apt,    image: "ubuntu:24.04" }
+          - { channel: apt,    image: "debian:12" }
+          - { channel: dnf,    image: "fedora:latest" }
+          - { channel: dnf,    image: "rockylinux:9" }
+          - { channel: pacman, image: "archlinux:latest" }
+          - { channel: aur,    image: "archlinux:latest" }
+          - { channel: nix,    image: "nixos/nix:latest" }
+    name: verify-install-channels (${{ matrix.channel }}, ${{ matrix.image }})
     steps:
-      - name: Checkout repository (latest master with updated hash)
+      - name: Checkout repository (latest master, README as published)
         uses: actions/checkout@v7
         with:
           ref: master
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-
-      - name: Build with real fetchurl from GitHub Releases
+      - name: Install from the published ${{ matrix.channel }} channel
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+          PKGREL: ${{ needs.check-version.outputs.pkgrel }}
         run: |
-          echo "Validating Nix build using fetchurl from GitHub Releases..."
-          echo "This simulates exactly what users run."
-          NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --no-link --print-build-logs --impure
+          for i in 1 2 3 4 5; do
+            if docker run --rm \
+                -v "$PWD/scripts:/s:ro" -v "$PWD/README.md:/README.md:ro" \
+                "$IMAGE" bash /s/verify-install-channel.sh "$CHANNEL" "$VERSION" "$PKGREL" /README.md; then
+              exit 0
+            fi
+            [ "$i" = 5 ] && break
+            echo "Attempt $i/5 failed (Pages/CDN may still be propagating), retrying in 120s..."
+            sleep 120
+          done
+          echo "::error::$CHANNEL on $IMAGE did not install ${VERSION}-${PKGREL} with the README command"
+          exit 1
 
   # ================================================================
   # Job 8: Auto-PR — open a PR bumping .upstream-version + Nix hash
@@ -2906,7 +2947,7 @@ jobs:
   # version, so manual dispatches behave sensibly too.
   # ================================================================
   close-version-issue:
-    needs: [check-version, release, deploy-pages]
+    needs: [check-version, release, deploy-pages, verify-install-channels]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.auto_pr != 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -2932,7 +2973,7 @@ jobs:
           done
 
   notify-version-issue-failure:
-    needs: [check-version, build-tarball, build-aarch64-tarball, lint-scripts, package-appimage, package-deb, package-rpm, test-nix, generate-pkgbuild, test-pkgbuild, release, deploy-rpm-repo, deploy-pages]
+    needs: [check-version, build-tarball, build-aarch64-tarball, lint-scripts, package-appimage, package-deb, package-rpm, test-nix, generate-pkgbuild, test-pkgbuild, release, deploy-rpm-repo, deploy-pages, verify-install-channels]
     if: failure() && github.event_name == 'workflow_dispatch' && github.event.inputs.auto_pr != 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -2944,6 +2985,7 @@ jobs:
           VERSION: ${{ needs.check-version.outputs.version || github.event.inputs.deb_version }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_RESULT: ${{ needs.release.result }}
         run: |
           if [ -z "$VERSION" ]; then
             echo "No version resolved - skipping issue comment."
@@ -2953,6 +2995,18 @@ jobs:
             --search "New Claude Desktop v${VERSION}" --json number --jq '.[].number')
           if [ -z "$NUMBERS" ]; then
             echo "No open new-version issue for v${VERSION} - nothing to comment on."
+            exit 0
+          fi
+          if [ "$RELEASE_RESULT" = success ]; then
+            {
+              echo "**v${VERSION} was published, but installing it from a published channel FAILED** ([failed run](${RUN_URL}))."
+              echo ""
+              echo "The packages are live; the failing \`verify-install-channels\` job shows which README install command (apt / dnf / pacman / AUR / nix) does not deliver this release. Users on that channel are affected until it is fixed."
+            } > /tmp/failure-comment.md
+            for N in $NUMBERS; do
+              gh issue comment "$N" --repo "$REPO" --body-file /tmp/failure-comment.md
+              echo "Commented on issue #${N}"
+            done
             exit 0
           fi
           {

@@ -8,7 +8,7 @@
 # bridges under resources/), plus launcher/, icons/, and copyright. We do NOT
 # download or verify a separate Electron zip.
 #
-# Usage: ./build-appimage.sh [--arch x86_64|aarch64] <tarball_path> <output_dir>
+# Usage: ./build-appimage.sh [--arch x86_64|aarch64] <tarball_path> <output_dir> [pkgrel]
 #
 # Requirements: wget (appimagetool/runtime download), appimagetool (or auto-downloaded),
 #               zsyncmake (for delta updates)
@@ -45,14 +45,16 @@ esac
 # Parse positional arguments
 TARBALL_PATH="$1"
 OUTPUT_DIR="$2"
+PKGREL="${3:-1}"
 
 if [ -z "$TARBALL_PATH" ] || [ -z "$OUTPUT_DIR" ]; then
-    echo "Usage: $0 [--arch x86_64|aarch64] <tarball_path> <output_dir>"
+    echo "Usage: $0 [--arch x86_64|aarch64] <tarball_path> <output_dir> [pkgrel]"
     echo ""
     echo "Arguments:"
     echo "  --arch        Target architecture (default: x86_64, also: aarch64)"
     echo "  tarball_path  Path to claude-desktop-VERSION-linux.tar.gz"
     echo "  output_dir    Directory to write AppImage"
+    echo "  pkgrel        Package release number (default: 1)"
     echo ""
     echo "Output:"
     echo "  <output_dir>/Claude_Desktop-<version>-<arch>.AppImage"
@@ -67,6 +69,15 @@ fi
 # Extract version from tarball filename (handles both -linux.tar.gz and -linux-aarch64.tar.gz)
 VERSION=$(basename "$TARBALL_PATH" | sed -E 's/claude-desktop-([0-9]+\.[0-9]+\.[0-9]+)-linux(-aarch64)?\.tar\.gz/\1/')
 log_info "Building AppImage for version: $VERSION (arch: $APPIMAGE_ARCH)"
+
+# Release tag for the stamp below: v<version>, or v<version>-<pkgrel> for a
+# re-release (the tag scheme of our GitHub releases).
+if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $PKGREL =~ ^[1-9][0-9]*$ ]]; then
+    log_error "version '$VERSION' / pkgrel '$PKGREL' not in X.Y.Z / N form (tarball name: $(basename "$TARBALL_PATH"))"
+    exit 1
+fi
+RELEASE_TAG="v${VERSION}"
+[ "$PKGREL" = 1 ] || RELEASE_TAG="v${VERSION}-${PKGREL}"
 
 # Create work directory
 WORK_DIR=$(mktemp -d)
@@ -107,6 +118,14 @@ tar -xzf "$TARBALL_PATH" -C "$WORK_DIR/tarball"
 log_info "Installing Claude Desktop tree..."
 mkdir -p "$APPDIR/usr/lib/claude-desktop"
 cp -r "$WORK_DIR/tarball/claude-desktop/"* "$APPDIR/usr/lib/claude-desktop/"
+
+# Release stamp for the in-app update check: the release tag and the package
+# format, which picks the README install section the "Update available" button
+# opens. Exe-adjacent resources/, next to app.asar (process.resourcesPath).
+printf '{"tag":"%s","format":"appimage"}\n' "$RELEASE_TAG" \
+    > "$APPDIR/usr/lib/claude-desktop/resources/cdb-release.json"
+chmod 0644 "$APPDIR/usr/lib/claude-desktop/resources/cdb-release.json"
+log_info "Wrote release stamp: $RELEASE_TAG (appimage)"
 
 # Install full launcher from tarball
 log_info "Installing launcher..."

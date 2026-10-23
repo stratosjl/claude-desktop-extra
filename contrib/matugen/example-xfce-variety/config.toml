@@ -16,9 +16,8 @@ success = "#3fb950"
 warning = "#f5a524"
 
 # --- GTK3 (Thunar, xfce4-panel, ...) via adw-gtk3 named colors -------------
-# Two per-mode files that differ only in the headerbar color: Electron 43+ paints the 4 px
-# client-side frame of frameless X11 windows (Claude Desktop's main window) in the GTK headerbar
-# color, so it is taken from the same ramp as Claude's backgrounds and blends in.
+# Two per-mode files that differ only in the headerbar color, which is taken from the same ramp
+# as Claude's backgrounds so GTK headerbars match the app.
 # colors.css is imported by the wrapper themes in ~/.themes/adw-gtk3-matugen*. GTK3 parses
 # the user ~/.config/gtk-3.0/gtk.css only once per process, so live reload only works when
 # the colors live INSIDE the theme; reload-gtk.sh flips between two identical wrapper

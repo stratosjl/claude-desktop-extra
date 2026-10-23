@@ -34,12 +34,42 @@
 # Break risk: LOW - A has no pattern left to break; B anchors on a log string
 # that has been stable across releases. If upstream splits the setter or renames
 # the log line, B fails loud.
+#
+# Uses the `regex` package (pure Nim) like the other patches: std/nre dlopens
+# PCRE1 at run time, which ubuntu-24.04 (the CI harness runner) does not ship.
+# `regex` has no backreferences, so the "transform is called on the setter's
+# first parameter" constraint that used to be `\2` is an equality check on the
+# captured groups; its repetition ranges are capped at 100, so the 200-char
+# window between the keys count and the log line is two 100-char runs.
 
 import std/[os, strformat, strutils]
-import std/nre
+import regex
 
 const OVERRIDES_JS = staticRead("../../js/growthbook_overrides.js")
 const EXPECTED_PATCHES = 2
+
+# v1.19367.0 shape:
+#   function hTt(e){const t=lf;lf=e,AP=!0;const r=Object.keys(lf).length,
+#     n=Object.entries(lf).filter(...);v.info("[growthbook] loaded %d features (%d changed)",...)
+# v1.26832.0 shape (new minifier: `let` instead of `const`, backtick literals,
+# separate `let` for the second binding, dotted logger callee):
+#   function tS(e){let t=Mx;Mx=e,Nx=!0;let n=Object.keys(Mx).length,
+#     i=Object.entries(Mx).filter(...).length;r.o.info(`[growthbook] loaded %d features (%d changed)`,n,i)
+# v1.34493.1 shape: the setter takes a SECOND parameter (a source/status tag,
+# stored first), the dirty flag is gone, and the stored value now funnels
+# through a TRANSFORM - the deployment-mode hardcoded-features filter, which
+# used to be a separate load path calling the setter:
+#   function Fit(e,t){OS=t;let n=DS;DS=jit(e);let r=Object.keys(DS).length,
+#     i=Object.entries(DS).filter(...).length;D.info(`[growthbook] loaded %d features (%d changed)`,r,i)
+# We now wrap the TRANSFORM CALL (`jit(e)`) rather than reassigning the raw
+# parameter: overrides must apply to the map that is actually STORED, after
+# the hardcoded-mode filter - same layering as before, when the hardcoded set
+# itself arrived through the setter's parameter (user override > any rollout).
+# Groups: 0 = head "function F(e,t){OS=t;let n=DS;DS=", 1 = e (first param),
+# 2 = transform call "jit(e)", 3 = e again (must equal group 1), 4 = tail
+# ";let r=Object.keys(DS).length...loaded %d features...".
+const SETTER_PAT =
+  re2"""(function [\w$]+\(([\w$]+),[\w$]+\)\{[\w$]+=[\w$]+;(?:const|let|var) [\w$]+=[\w$]+;[\w$]+=)([\w$]+\(([\w$]+)\))(;(?:const|let|var) [\w$]+=Object\.keys\([\w$]+\)\.length[^"`]{0,100}[^"`]{0,100}["`]\[growthbook\] loaded %d features \(%d changed\)["`])"""
 
 proc apply*(input: string): string =
   result = input
@@ -59,43 +89,26 @@ proc apply*(input: string): string =
       echo "  [FAIL] growthbook overrides helper missing after injection"
 
   # --- Sub-patch B: hook the features-store setter --------------------------
-  # v1.19367.0 shape:
-  #   function hTt(e){const t=lf;lf=e,AP=!0;const r=Object.keys(lf).length,
-  #     n=Object.entries(lf).filter(...);v.info("[growthbook] loaded %d features (%d changed)",...)
-  # v1.26832.0 shape (new minifier: `let` instead of `const`, backtick literals,
-  # separate `let` for the second binding, dotted logger callee):
-  #   function tS(e){let t=Mx;Mx=e,Nx=!0;let n=Object.keys(Mx).length,
-  #     i=Object.entries(Mx).filter(...).length;r.o.info(`[growthbook] loaded %d features (%d changed)`,n,i)
-  # v1.34493.1 shape: the setter takes a SECOND parameter (a source/status tag,
-  # stored first), the dirty flag is gone, and the stored value now funnels
-  # through a TRANSFORM - the deployment-mode hardcoded-features filter, which
-  # used to be a separate load path calling the setter:
-  #   function Fit(e,t){OS=t;let n=DS;DS=jit(e);let r=Object.keys(DS).length,
-  #     i=Object.entries(DS).filter(...).length;D.info(`[growthbook] loaded %d features (%d changed)`,r,i)
-  # We now wrap the TRANSFORM CALL (`jit(e)`) rather than reassigning the raw
-  # parameter: overrides must apply to the map that is actually STORED, after
-  # the hardcoded-mode filter - same layering as before, when the hardcoded set
-  # itself arrived through the setter's parameter (user override > any rollout).
   if result.contains("=(globalThis.__cdbApplyGbOverrides||"):
     echo "  [OK] features-store setter already hooked"
     inc patchesApplied
   else:
-    let setterPat = nre.re(
-      r"""(function [\w$]+\(([\w$]+),[\w$]+\)\{[\w$]+=[\w$]+;(?:const|let|var) [\w$]+=[\w$]+;[\w$]+=)([\w$]+\(\2\))(;(?:const|let|var) [\w$]+=Object\.keys\([\w$]+\)\.length[^"`]{0,200}["`]\[growthbook\] loaded %d features \(%d changed\)["`])"""
-    )
     var hooked = 0
-    let m = result.find(setterPat)
-    if m.isSome:
-      let cap = m.get.captures
-      let head = cap[0]        # "function F(e,t){OS=t;let n=DS;DS="
-      let transformCall = cap[2]  # "jit(e)"
-      let tail = cap[3]        # ";let r=Object.keys(DS).length...loaded %d features..."
+    var setter = RegexMatch2()
+    for m in result.findAll(SETTER_PAT):
+      if result[m.group(1)] == result[m.group(3)]:
+        setter = m
+        hooked = 1
+        break
+    if hooked == 1:
+      let head = result[setter.group(0)] # "function F(e,t){OS=t;let n=DS;DS="
+      let transformCall = result[setter.group(2)] # "jit(e)"
+      let tail = result[setter.group(4)]
+        # ";let r=Object.keys(DS).length...loaded %d features..."
       let hook =
         head & "(globalThis.__cdbApplyGbOverrides||function(x){return x})(" &
         transformCall & ")" & tail
-      result = result.replace(m.get.match, hook)
-      hooked = 1
-    if hooked == 1:
+      result = result.replace(result[setter.boundaries], hook)
       echo "  [OK] features-store setter hooked (overrides applied on every flag load)"
       inc patchesApplied
     else:

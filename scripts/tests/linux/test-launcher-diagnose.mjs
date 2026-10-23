@@ -267,6 +267,51 @@ safe("D5", () => {
   // No session bus in this environment: the app's probe cannot answer, and on
   // a Wayland session that disables every global shortcut.
   check("portal probe failure is a problem on Wayland", /^- GlobalShortcuts portal probe fails/m.test(problems), true);
+  // Fonts: the section is always there; with the host's fontconfig intact it
+  // reports a sans-serif match and no font problem.
+  check("fonts section", out.includes("--- Fonts (fontconfig, as the app sees it) ---"), true);
+  check("FONTCONFIG_FILE reported unset", /^FONTCONFIG_FILE = \(unset\)$/m.test(out), true);
+  check("no font problem with an intact fontconfig", /^- (FONTCONFIG_|fontconfig finds no fonts)/m.test(problems), false);
+});
+
+// ---------------------------------------------------------------- D5b
+// A FONTCONFIG_FILE that points nowhere is what leaves the app without a
+// single system font (#281, #282): --diagnose names the variable, and the
+// launch path drops it for the app.
+console.log("D5b: --diagnose with a FONTCONFIG_FILE that points nowhere");
+safe("D5b", () => {
+  const root = join(scratch, "d5b");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const electron = fakeTree(join(root, "tree"), {});
+  const r = spawnSync(BASH, [launcherPath, "--diagnose"], {
+    env: { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron,
+           XDG_RUNTIME_DIR: join(root, "run"), XDG_SESSION_TYPE: "wayland",
+           WAYLAND_DISPLAY: "wayland-9", XDG_CURRENT_DESKTOP: "KDE",
+           FONTCONFIG_FILE: "/nonexistent/claude-test/fonts.conf",
+           FONTCONFIG_PATH: "/nonexistent/claude-test:/nonexistent/claude-test2" },
+    encoding: "utf8", timeout: 90000,
+  });
+  const out = r.stdout || "";
+  check("exit status", r.status, 0);
+  check("missing FONTCONFIG_FILE is marked", out.includes("FONTCONFIG_FILE = /nonexistent/claude-test/fonts.conf (MISSING)"), true);
+  check("FONTCONFIG_PATH without an existing dir is marked", out.includes("FONTCONFIG_PATH = /nonexistent/claude-test:/nonexistent/claude-test2 (MISSING)"), true);
+  const problems = out.slice(out.indexOf("--- Problems found ---"));
+  check("FONTCONFIG_FILE is a problem", /^- FONTCONFIG_FILE points to a missing path/m.test(problems), true);
+  check("FONTCONFIG_PATH is a problem", /^- FONTCONFIG_PATH points to a missing path/m.test(problems), true);
+  // The helper itself, as the launch path calls it: unusable values fail, an
+  // existing path and a relative file name pass.
+  const fns = runFns(["_fontconfig_var_usable"],
+    `FONTCONFIG_FILE=/nonexistent/claude-test/fonts.conf; _fontconfig_var_usable FONTCONFIG_FILE && echo A=usable || echo A=unusable;` +
+    `FONTCONFIG_FILE=/etc/fonts/fonts.conf; _fontconfig_var_usable FONTCONFIG_FILE && echo B=usable || echo B=unusable;` +
+    `FONTCONFIG_FILE=local.conf; _fontconfig_var_usable FONTCONFIG_FILE && echo C=usable || echo C=unusable;` +
+    `FONTCONFIG_PATH=/nonexistent/claude-test:/etc/fonts; _fontconfig_var_usable FONTCONFIG_PATH && echo D=usable || echo D=unusable;` +
+    `unset FONTCONFIG_SYSROOT; _fontconfig_var_usable FONTCONFIG_SYSROOT && echo E=usable || echo E=unusable`, {}).out;
+  check("helper: missing absolute file is unusable", fns.includes("A=unusable"), true);
+  check("helper: existing file is usable", fns.includes("B=usable"), existsSync("/etc/fonts/fonts.conf"));
+  check("helper: relative file name is left alone", fns.includes("C=usable"), true);
+  check("helper: path list with one existing dir is usable", fns.includes("D=usable"), existsSync("/etc/fonts"));
+  check("helper: unset variable is usable", fns.includes("E=usable"), true);
 });
 
 // ---------------------------------------------------------------- D6

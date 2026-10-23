@@ -30,6 +30,7 @@ A skill is more than a saved prompt:
 | `/fresh-upstream` | manual | you need a clean unpatched bundle to inspect |
 | `/debug` | manual | something is broken and you need the evidence |
 | `/comment` | manual | you want to reply to an issue reporter and ask for the evidence we still need |
+| `/test-native` | auto / manual | a report comes from a session type the host does not run (Wayland/sway, hidden workspaces, XWayland vs native), or a value must be measured inside the running app with an injected probe |
 
 ### How the skills connect
 

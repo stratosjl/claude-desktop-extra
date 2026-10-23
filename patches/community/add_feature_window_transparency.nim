@@ -15,22 +15,26 @@
 #      the options hook, the theme-flip guards, the CSS injection with its live
 #      transparency swap, and the Settings IPC handlers.
 #   B. The main window's options literal gets `...globalThis.__cdbWinTransExtra()`
-#      spliced in right after upstream's `backgroundColor:<fn>(),opacity:<v>,`
-#      pair. It spreads AFTER backgroundColor, so its `transparent` and
-#      `backgroundColor` keys win (last key wins in a JS object literal), and the
-#      pair itself is left untouched: patches/linux/fix_native_frame.nim matches
-#      `backgroundColor:<fn>(),opacity:` too. The window FACTORY is deliberately
-#      not rewritten - fix_profile_window_title and fix_window_bounds anchor on
-#      its exact shape.
+#      spliced in right after upstream's `backgroundColor:<fn>(<arg>),opacity:<v>,`
+#      pair, where <arg> is empty or one `{key:var}` object (v3.1623.0:
+#      `backgroundColor:fQn({signedIn:c}),opacity:1,icon:`; earlier builds
+#      called it with no argument). It spreads AFTER backgroundColor, so its
+#      `transparent` and `backgroundColor` keys win (last key wins in a JS
+#      object literal), and the pair itself is left untouched:
+#      patches/linux/fix_native_frame.nim matches
+#      `backgroundColor:<fn>(<arg>),opacity:` too. The window FACTORY is
+#      deliberately not rewritten - fix_profile_window_title and
+#      fix_window_bounds anchor on its exact shape.
 #
 # transparent is a BrowserWindow constructor option, so toggling needs an app
 # RESTART. It requires a frameless window and is skipped when the native
 # titlebar is on.
 #
 # Break risk: LOW for A (stable "use strict"; head anchor). B anchors on the key
-# order `backgroundColor:<fn>(),opacity:<v>,icon:` in the main window's options
-# literal - the same backgroundColor/opacity pair fix_native_frame anchors on -
-# with every identifier a wildcard; a reorder fails loud (match count != 1).
+# order `backgroundColor:<fn>(<arg>),opacity:<v>,icon:` in the main window's
+# options literal - the same backgroundColor/opacity pair fix_native_frame
+# anchors on - with every identifier a wildcard; a reorder fails loud (match
+# count != 1).
 
 import std/[os, strformat, strutils]
 import regex
@@ -58,7 +62,7 @@ proc apply*(input: string): string =
   # Sub-patch B first, so the module text injected by A is never searched.
   var n = 0
   result = result.replace(
-    re2"""(backgroundColor:[\w$]+(?:\.[\w$]+)*\(\),opacity:[^,{}]+,)(icon:)""",
+    re2"""(backgroundColor:[\w$]+(?:\.[\w$]+)*\((?:\{[\w$]+:[\w$]+\})?\),opacity:[^,{}]+,)(icon:)""",
     proc(m: RegexMatch2, s: string): string =
       inc n
       s[m.group(0)] & HOOK & s[m.group(1)],

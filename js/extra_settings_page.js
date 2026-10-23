@@ -563,6 +563,13 @@
     { kind: "flags", label: "Anthropic", icon: ICON_FLAGS, tooltip: "Anthropic Features" },
     { kind: "deploy", label: "Deployment", icon: ICON_DEPLOY }
   ];
+  // The Windows build (scripts/windows/build-windows.sh) carries custom models
+  // only: the other panels drive patches it does not include, or Linux paths
+  // (/etc/claude-desktop) that do not exist there.
+  var WINDOWS_NAV = { models: true };
+  if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
+    NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
+  }
 
   function applyAttrs(node, map) {
     Object.keys(map).forEach(function (k) { node.setAttribute(k, map[k]); });
@@ -1347,6 +1354,35 @@
   // read response carries what the RUNNING app started with (activeNow) next to
   // the saved value, so describe() says "after a restart" exactly while they
   // differ - the same arrangement as the transcript limits row below.
+  function renderDevToolsRow(panel) {
+    return renderToggleRow(panel, {
+      section: "Developer",
+      title: "Developer tools",
+      note: "Lets Ctrl+Alt+I open Chromium DevTools for the focused window, and shows \"Toggle Dev " +
+        "Tools\" in the app menu. Writes the official build's own opt-in file, developer_settings.json " +
+        "in the profile directory, which the app re-reads on every shortcut press - so the shortcut works " +
+        "right away; the menu entry appears after a restart. An organization that disabled developer " +
+        "mode for its workspace keeps DevTools off regardless.",
+      ariaLabel: "allow developer tools (Ctrl+Alt+I)",
+      read: "devToolsRead",
+      write: "devToolsSet",
+      lockFile: "developer_settings.json",
+      // Opt-in: only an explicit true is on, exactly like upstream's own check.
+      isOn: function (res) { return res.enabled === true; },
+      describe: function (on) {
+        return on ? "on - Ctrl+Alt+I opens DevTools"
+          : "off - DevTools stay disabled, as in the official build";
+      },
+      writeArg: function (next) { return next; },
+      toast: function (next, r) {
+        var label = next ? "Developer tools allowed - Ctrl+Alt+I opens them"
+          : "Developer tools disabled";
+        return r && r.replacedInvalid ? label + " (replaced an unreadable developer_settings.json)" : label;
+      },
+      errorPrefix: "Could not change the developer tools setting: "
+    });
+  }
+
   function renderAllowNonAnthropicModelsRow(panel) {
     return renderToggleRow(panel, {
       section: "Inference",
@@ -2229,7 +2265,8 @@
     renderNativeTitlebarRow,
     renderWindowTransparencyRow,
     renderGlowRow,
-    renderThemePickerRow
+    renderThemePickerRow,
+    renderDevToolsRow
   ];
 
   function renderFeatures(panel) {
@@ -2842,6 +2879,11 @@
       var box = el("div", "cdbx-models-fetched");
       box.appendChild(el("div", "cdbx-note", r.models.length + " model" + (r.models.length === 1 ? "" : "s") +
         " listed by " + r.source + ". Tick the ones to add."));
+      if (r.hidden && r.hidden.length) {
+        box.appendChild(el("div", "cdbx-note", r.hidden.length + " not listed: " + r.infoSource +
+          " says they are not chat models (" + r.hidden.slice(0, 10).map(function (x) { return x.id + ": " + x.mode; }).join(", ") +
+          (r.hidden.length > 10 ? ", ..." : "") + ")."));
+      }
       var have = Object.create(null);
       p.models.forEach(function (m) { have[m.id] = true; });
       var boxes = [];
@@ -2881,6 +2923,8 @@
           chain = chain.then(function () {
             var payload = { id: m.id, name: m.name && m.name !== m.id ? m.name : "" };
             if (m.context) payload.context = m.context; // the listing's context length, when it states one
+            if (m.vision === false) payload.vision = false; // the gateway's model info says no images
+            if (m.thinking === false) payload.thinking = false; // ... or no reasoning
             return api.customModelsModelSet(p.id, payload);
           });
         });

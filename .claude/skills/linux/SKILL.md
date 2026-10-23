@@ -30,7 +30,10 @@ Repackages Anthropic's **official Claude Desktop Linux `.deb`** (bundles Electro
 | RHEL 9+ | rpm | 2.34 | x86_64, aarch64 |
 | NixOS | flake | 2.40 | x86_64 (the Nix package is x86_64-only) |
 | Jetson (JetPack 6) | deb | 2.35 | aarch64 |
+| Fedora Atomic (Bazzite, Kinoite, Silverblue) | AppImage (immutable `/usr`; the rpm would need `rpm-ostree` layering, untested) | 2.39+ | x86_64, aarch64 |
 | Any (glibc) | AppImage | varies | x86_64, aarch64 |
+
+**Immutable distros** (Bazzite, Kinoite, Silverblue): everything the launcher writes is under `$HOME` or `$XDG_RUNTIME_DIR` (desktop entry + `claude://` handler, Quick Entry socket, systemd scope, userData, KDE shortcut), and the host tools it reads (`/usr/bin/busctl`, `kwin_wayland`, `systemd-run`, FUSE 2) ship in the image; verified on the Bazzite 44 live ISO (Plasma 6.7.5) 2026-10-17 (#281).
 
 **glibc floor is 2.34** (RHEL 9 / Ubuntu 22.04). Debian 11 (bullseye, glibc 2.31) is **no longer supported** - the official Linux `.deb` we repackage targets newer glibc.
 
@@ -92,6 +95,7 @@ The dispatch logic lives in checked-in JS under `js/`, embedded into `patches/li
 - GNOME hotkey: GlobalShortcuts portal exists only on GNOME 48+ and its approval is easy to miss (Electron returns true even if it failed). `claude-desktop --install-gnome-hotkey` writes a gsettings custom keybinding (bypasses portal), toggling via Unix socket in `$XDG_RUNTIME_DIR`.
 - xdg-desktop-portal-wlr has no GlobalShortcuts (Sway, river, niri): users bind `claude-desktop --toggle` in the compositor. Hyprland's portal has it but only fires through a `global` bind. The app's portal probe runs once per process (`busctl --timeout=2` under a 3 s exec timeout), so a portal that is slow at login leaves hotkeys off until restart. Per-compositor snippets: `docs/quick-entry.md`.
 - KDE stale kglobalaccel entries after crash block re-registration → `gdbus` unregister before re-register.
+- KDE Plasma 6.7.4+ (xdg-desktop-portal-kde) no longer arms a stored portal shortcut at CreateSession, and Chromium 152 (Electron 44) skips BindShortcuts when its id is already listed → hotkey dead after the first restart (#281) → `fix_quick_entry_kde_portal_rebind.nim` / `js/kde_global_shortcuts_rebind.js`: a second portal session from the main process (pure-JS D-Bus client, same app id) re-binds the stored ids on every launch, silently. Gated to KDE Wayland, KWin >= 6.4, not XWayland, Chromium < 159 (fixed upstream on main 2026-10-15). Needs the app id to resolve: systemd scope AND an installed `com.anthropic.Claude.desktop` (xdp 1.22 answers "An app id is required" otherwise - no dialog, no hotkey, on any Plasma).
 
 ## Rules
 1. Every change must work across all session types and all distro/arch rows - think through each, especially Wayland fragmentation (GNOME ≠ KDE ≠ wlroots ≠ exotic).

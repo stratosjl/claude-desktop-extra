@@ -27,6 +27,7 @@ Everything else - Chat, Cowork, Claude Code, Browser Tools, 3P inference - is An
 x86_64 and aarch64 are supported everywhere except Nix (x86_64 only). **Cowork** (the agent VM) is optional and needs QEMU/KVM, see [Cowork setup](#cowork-setup-needs-devkvm). Details per distro:
 
 <a name="arch-linux--manjaro-pacman-repository"></a>
+<a id="install-pacman"></a>
 <details>
 <summary><b>Arch Linux / Manjaro (AUR or pacman repository)</b></summary>
 
@@ -43,7 +44,7 @@ curl -fsSL https://patrickjaja.github.io/claude-desktop-extra/install-pacman.sh 
 sudo pacman -Syu claude-desktop-extra
 ```
 
-**Optional deps** (not installed automatically): QEMU/KVM for Cowork ([setup](docs/cowork.md)), `bubblewrap` + `socat` (Claude Code shell sandbox), `nodejs` (system MCP servers), `gjs` (GNOME search provider), `claude-code`.
+**Optional deps** (not installed automatically): QEMU/KVM for Cowork ([setup](docs/cowork.md)), `bubblewrap` + `socat` (Claude Code shell sandbox), `openssh` (Claude Code SSH sessions over the system ssh client), `nodejs` (system MCP servers), `gjs` (GNOME search provider), `claude-code`.
 
 <details>
 <summary>Manual <code>pacman.conf</code> setup (without the install script)</summary>
@@ -82,6 +83,7 @@ makepkg -si
 </details>
 
 <a name="debian--ubuntu-apt-repository"></a>
+<a id="install-deb"></a>
 <details>
 <summary><b>Debian / Ubuntu (APT Repository)</b></summary>
 
@@ -94,10 +96,11 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). Cowork packages come in as `Recommends`; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_2.31226.1-5_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_3.1623.4-2_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
+<a id="install-rpm"></a>
 <details>
 <summary><b>Fedora / RHEL (DNF Repository)</b></summary>
 
@@ -108,10 +111,11 @@ sudo dnf install claude-desktop-extra
 
 Cowork packages come in as weak deps; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-2.31226.1-5.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-3.1623.4-2.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>
+<a id="install-nix"></a>
 <details>
 <summary><b>NixOS / Nix</b></summary>
 
@@ -121,13 +125,14 @@ Cowork tools (`qemu`, `virtiofsd`, OVMF) are baked into the closure (`.override 
 </details>
 
 <a name="appimage-any-distro"></a>
+<a id="install-appimage"></a>
 <details>
 <summary><b>AppImage (Any Distro)</b></summary>
 
 Works on standard and immutable distros (Bazzite, Silverblue/Kinoite, SteamOS, Universal Blue). The `claude://` handler for sign-in registers itself on first launch.
 
 ```bash
-wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/Claude_Desktop-2.31226.1-x86_64.AppImage
+wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/Claude_Desktop-3.1623.4-x86_64.AppImage
 chmod +x Claude_Desktop-*-x86_64.AppImage && ./Claude_Desktop-*-x86_64.AppImage
 ```
 
@@ -237,13 +242,17 @@ Run on Bedrock, Vertex AI, Azure AI Foundry or any Anthropic-compatible gateway,
 
 Use models from other providers (DeepSeek, Kimi, GLM, MiniMax, Qwen, OpenRouter, a gateway, or Anthropic's API on your API credit) in the Code tab's model picker, next to Anthropic's. Sessions on them use your own key; everything else stays on your subscription. Off by default: add a provider in Settings → Extra → Models and turn it on. Details: [docs/custom-models.md](docs/custom-models.md).
 
+## Windows 11 (experimental)
+
+A portable Windows build of Anthropic's official Windows app with [custom models](#custom-models) and multiple profiles: unzip, run `Install.cmd`, and add profiles with `Install.cmd -Profile work`. Built by the **Build Windows** workflow. Details and caveats (unsigned exe, no auto-update): [docs/windows.md](docs/windows.md).
+
 ## Feature Flag Overrides (advanced)
 
 Override Anthropic's server-side feature flags in `~/.config/Claude/claude-desktop-extra.jsonc`, or flip them in Settings → Extra → Anthropic Features. Details: [docs/feature-flags.md](docs/feature-flags.md).
 
 ## Patches
 
-We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (16 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (7, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (32, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
+We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (17 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (7, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (37, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
 
 ## Command-line flags
 

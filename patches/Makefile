@@ -1,9 +1,10 @@
 # Build every patch source into a same-named executable next to it.
 #
-# Sources live in three category subdirectories:
+# Sources live in four category subdirectories:
 #   linux/      Linux compatibility fixes (always on)
 #   core/       always-on infrastructure (themes, extra settings, profiles)
 #   community/  optional value-add features
+#   windows/    Windows build only (scripts/windows/build-windows.sh)
 #
 # Usage:
 #   make -j$(nproc)      # parallel build (default target = all)
@@ -21,7 +22,7 @@
 NIM       ?= nim
 NIMFLAGS  ?= c -d:release --opt:speed --mm:orc --hints:off
 
-SRCS := $(wildcard linux/*.nim community/*.nim core/*.nim)
+SRCS := $(wildcard linux/*.nim community/*.nim core/*.nim windows/*.nim)
 BINS := $(SRCS:.nim=)
 
 ifeq ($(strip $(SRCS)),)
@@ -47,11 +48,19 @@ linux/fix_computer_use_linux: \
   ../js/cu_mode_preamble.js \
   ../js/executor_linux.js
 
+community/add_feature_dev_tools_toggle: ../js/dev_tools_toggle_main.js
+
 linux/fix_cowork_font: ../js/fix_cowork_font.js
 
 linux/fix_epitaxy_autoscroll: ../js/fix_epitaxy_autoscroll.js
 
 linux/fix_keep_awake_linux: ../js/keep_awake_inhibit.js
+
+linux/fix_quick_entry_kde_portal_rebind: ../js/kde_global_shortcuts_rebind.js
+
+linux/fix_renderer_clean_exit_reload: ../js/renderer_clean_exit.js
+
+linux/fix_update_check_own_releases: ../js/update_check_own_releases.js
 
 linux/fix_second_instance_diag: ../js/second_instance_diag.js
 
@@ -137,6 +146,9 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
 # The flag catalog the Extra settings page renders is parsed out of this file's
 # .jsonc template at runtime.
 core/add_growthbook_overrides: ../js/growthbook_overrides.js
+
+# Windows build only: profile selection and sign-in callback routing.
+windows/add_windows_profiles: ../js/windows_profiles_main.js
 
 clean:
 	@rm -rf $(BINS) .nimcache

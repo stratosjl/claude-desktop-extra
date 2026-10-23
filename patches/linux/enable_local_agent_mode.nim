@@ -5,7 +5,8 @@
 #
 # Two sub-patches:
 #   3  async feature merger overrides (quietPenguin, louderPenguin, computerUse,
-#      plus three inert safety nets - see the comment at the sub-patch)
+#      computerUseRollout, plus three inert safety nets - see the comment at
+#      the sub-patch)
 #   4  preferences defaults (quietPenguinEnabled / louderPenguinEnabled)
 #
 # Retired 2026-09-23 (v2.7032.0, AGENTS.md Rule 4):
@@ -54,8 +55,8 @@ proc apply*(input: string): string =
   # group" message.
   #
   # We override the features we genuinely provide the backend for on Linux.
-  # Three of the six are LOAD-BEARING and three are inert safety nets
-  # (re-verified v2.7032.0) - keep the distinction honest:
+  # Four of the seven are LOAD-BEARING and three are inert safety nets
+  # (re-verified v3.1623.0) - keep the distinction honest:
   #   quietPenguin   NEEDED  registry gives X(fn) -> unavailable when packaged
   #   louderPenguin  NEEDED  darwin/win32 + flag 4116586025 gated
   #   computerUse    NEEDED  since v2.19675.1 the platform Set includes linux,
@@ -64,12 +65,37 @@ proc apply*(input: string): string =
   #                          portal-less sessions get unsupported_session), and
   #                          the account flag 3676943315 gates it; our bridges
   #                          cover those sessions, so we override it
+  #   computerUseRollout NEEDED  the claude.ai SPA decides whether CU is shown
+  #                          and bound to a chat from THIS key (v3.1623.0,
+  #                          ion-dist shared-26: `cD(webGateOn,rolloutStatus)`
+  #                          = rolloutStatus==="supported" || (==="unavailable"
+  #                          && the account's web `chicago` gate is on); any
+  #                          other state renders "Computer use isn't available
+  #                          on the Team and Enterprise plans yet" / "isn't
+  #                          enabled for your account yet" and never binds the
+  #                          computer_* tools). Upstream's registry entry is
+  #                          "supported" only through the Linux rollout flag
+  #                          3676943315 + chicago_config, else "unsupported"
+  #                          (not_enabled) or "unavailable". So without this
+  #                          key the main process announces the tools
+  #                          (fix_computer_use_linux) while the web hides them
+  #                          for every account whose web gate is off (Team,
+  #                          Enterprise). The SPA checks complianceBlocked
+  #                          (web `taint:hipaa_regulated` + the desktop's
+  #                          computerUseComplianceGate) BEFORE the rollout, so
+  #                          an org compliance lock still wins.
   #   chillingSlothFeat  inert  already returns {status:"supported"}
   #   chillingSlothLocal inert  already returns {status:"supported"}
   #   ccdPlugins         inert  registry value is literally {status:"supported"}
   # The three inert keys are kept deliberately: they cost nothing, and they keep
   # working if upstream ever re-gates them.
   let overrides =
+    ",quietPenguin:{status:\"supported\"},louderPenguin:{status:\"supported\"},chillingSlothFeat:{status:\"supported\"},chillingSlothLocal:{status:\"supported\"},ccdPlugins:{status:\"supported\"},computerUse:{status:\"supported\"},computerUseRollout:{status:\"supported\"}"
+  # The run this patch injected before 2026-10-21 (no computerUseRollout). It is
+  # a strict prefix of `overrides`, so it only counts when the full run is absent;
+  # a bundle carrying it was patched by an older build and is stale input, not a
+  # patched end-state - never report it as success (AGENTS.md Rule 6).
+  let overridesLegacy =
     ",quietPenguin:{status:\"supported\"},louderPenguin:{status:\"supported\"},chillingSlothFeat:{status:\"supported\"},chillingSlothLocal:{status:\"supported\"},ccdPlugins:{status:\"supported\"},computerUse:{status:\"supported\"}"
 
   # Idempotency: our overrides are a verbatim literal run, so their presence IS
@@ -80,6 +106,9 @@ proc apply*(input: string): string =
     inc patchesApplied
   elif overridesCount > 1:
     echo &"  [FAIL] feature merger: overrides present {overridesCount} times, expected 1"
+    quit(1)
+  elif result.count(overridesLegacy) > 0:
+    echo "  [FAIL] feature merger: pre-2026-10-21 override run found without computerUseRollout - stale pre-patched input, re-extract a pristine bundle"
     quit(1)
   else:
     # The async merger ends `return{...STATIC(),...LOCALS}}`: STATIC() is the
@@ -115,7 +144,7 @@ proc apply*(input: string): string =
     # Insert immediately before the merger's closing "}}".
     let insertPos = m3End - 1
     result = result[0 ..< insertPos] & overrides & result[insertPos .. ^1]
-    echo &"  [OK] feature merger via {m3Callee}(): 6 features overridden (1 match)"
+    echo &"  [OK] feature merger via {m3Callee}(): 7 features overridden (1 match)"
     inc patchesApplied
 
   # Patch 4: Change preferences defaults for Code features.

@@ -66,6 +66,16 @@ sed -i 's|^Exec=claude-desktop|Exec=env CLAUDE_USE_XWAYLAND=1 CLAUDE_DISABLE_GPU
 
 Swap in whichever variables worked for you. Delete the file to return to defaults. All variables: [environment-variables.md](environment-variables.md).
 
+## Main window goes blank and Ctrl+R does nothing
+
+The main view's renderer exited and nothing is left to receive the reload key. The app reloads the view on its own when the renderer crashed (`reason: 'crashed'`) and, since [#287](https://github.com/patrickjaja/claude-desktop-extra/issues/287), when it exited cleanly without the app asking for it (`reason: 'clean-exit', exitCode: 0` - seen on niri Wayland with many Code sessions open). Check that it did:
+
+```bash
+grep -h "render process gone\|cdb-renderer" ~/.config/Claude/logs/main.log ~/.config/Claude/logs/claude-patches.log | tail
+```
+
+`[cdb-renderer] ... handing it to the reload path` followed by `Main webview render process gone` means the view was reloaded. `leaving it suppressed` names the reason: the app was quitting, or the view had already exited cleanly three times in ten minutes - a renderer that keeps exiting is left alone, as upstream does, and a restart is needed. Code sessions are not part of the main view and continue across its reload, as they do after a crash. If this hits you regularly, attach those lines to the issue.
+
 ## Global shortcut not working on KDE Plasma
 
 Electron registers shortcuts via `kglobalaccel`. Stale entries from crashed or killed sessions block new registrations silently.
@@ -101,6 +111,34 @@ done
 ```
 
 Then restart Claude Desktop; the portal prompts to approve the shortcut again. Hotkey setup for other desktops: [quick-entry.md](quick-entry.md).
+
+## Quick Entry hotkey dead after a restart on Plasma 6.7.4+
+
+Symptom: the first launch asks "Claude wants to register the following shortcut", the hotkey works, and after any restart it does nothing, while System Settings -> Shortcuts still lists it under Claude.
+
+Cause: the bundled Electron registers the hotkey through the GlobalShortcuts portal and only binds a shortcut it does not find stored; since xdg-desktop-portal-kde 6.7.4 a stored shortcut stays inactive until the app binds it again. A bundled patch (`fix_quick_entry_kde_portal_rebind`) opens a second portal session on every launch and re-binds the stored shortcut, which Plasma accepts without a dialog. The portal's own view is on the bus:
+
+```bash
+dbus-monitor --session "interface='org.freedesktop.portal.GlobalShortcuts'"
+```
+
+A working launch shows `BindShortcuts` after `ListShortcuts`, and `Activated` on every press. `~/.config/Claude/logs/claude-patches.log` logs `[quick-entry] kde-rebind: armed 1 stored shortcut(s) for this session: Ctrl+Alt+Space` once the binding is in place, or the reason the patch stays inactive. `CDB_KDE_GS_REBIND=0` turns it off; binding `claude-desktop --toggle` to a key in System Settings -> Shortcuts -> Add New -> Command works without the portal.
+
+A stored shortcut without a key never fires, however often it is re-bound: Plasma keeps a shortcut it was asked about even when the "register the following shortcut" dialog was dismissed, and `~/.config/kglobalshortcutsrc` then holds `...=none,Ctrl+Alt+Space,...` under `[com.anthropic.Claude]`. The log names that case: `armed 1 stored shortcut(s) for this session: <id> (no key assigned - set one in System Settings > Shortcuts > Claude)`. Assign the key there (or remove the Claude entry and restart the app for a new dialog).
+
+## Quick Entry opens but shows no text field or ignores typing
+
+Symptom: the bar opens with only the Claude mark in it, nothing typed appears, Enter closes it without sending, while Ctrl+V followed by Enter does send. Code in transcripts collapses to a text-less pill and code blocks show only their language label, while the surrounding text renders.
+
+Cause: the app's renderers have no system font. claude.ai text renders because it ships its own web fonts, but the Quick Entry window's font, inline code and every fallback glyph need a font from fontconfig, and with none available the text has no size. Electron's Chromium carries its own fontconfig with its own cache format: it reads and writes `*.cache-NN` files in `~/.cache/fontconfig`, keyed by a hash of the font directory path, next to the distro's files of another format. A distrobox or toolbox container, or another Electron build, that shares `$HOME` writes a cache for the same hash with its own directory layout; the app trusts it and finds nothing, while `fc-match` on the host reads the other format and looks healthy. The launcher therefore starts the app with a private font cache: `~/.cache/claude-desktop/fontconfig/fonts.conf`, the distro's `/etc/fonts/fonts.conf` with the shared `<cachedir>` entries replaced by `~/.cache/claude-desktop/fontconfig/cache`. Font directories, `conf.d` and the user's own fontconfig stay as configured; the first start after the upgrade rescans the fonts once. `claude-desktop --diagnose` shows the config and cache the app uses under **Fonts**, together with `FONTCONFIG_FILE`, `FONTCONFIG_PATH`, `FONTCONFIG_SYSROOT` and `fc-match`; an explicit `FONTCONFIG_*` variable is kept (one that points at a missing path is dropped and logged), and `CLAUDE_PRIVATE_FONT_CACHE=0` restores the shared cache. On a build without the private cache, `rm ~/.cache/fontconfig/*.cache-11` after the container ran is the workaround.
+
+Every time Quick Entry is shown, `claude-patches.log` gets one line describing what the window's renderer sees:
+
+```
+[quick-entry] shown 606x470 focused=true {"textarea":[536,40],"focused":true,"docFocus":true,"font":"anthropic-sans","color":"rgb(252, 252, 252)","placeholder":"rgb(161, 169, 177)","caret":"rgb(252, 252, 252)","fonts":"anthropic-sans:loaded ...","body":"darkTheme"}
+```
+
+A healthy window has a textarea about 40 px tall, `focused` and `docFocus` true, and the bundled `anthropic-sans` font loaded. The no-font case reads `anthropic-sans:error` with a 24 px textarea; `focused:false` points at keyboard focus (an input method or the compositor); `focused:true` with nothing visible and the font loaded points at the colors (a theme). Attach the line to a report together with `~/.config/Claude/logs/main.log`.
 
 ## Known limitations
 

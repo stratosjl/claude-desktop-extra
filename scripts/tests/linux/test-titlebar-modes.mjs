@@ -110,23 +110,27 @@ function section(title) {
 // ---------------------------------------------------------------- fixture
 // A minimal script carrying the two sites fix_native_frame targets, copied from
 // the live bundle so the minified shapes are upstream's own rather than
-// invented. Identifiers are upstream's (v1.49585.0, index.chunk-EgDgo76G.js);
+// invented. Identifiers are upstream's (v3.1623.0, index.chunk-6Ku8p4x3.js);
 // the patch captures them by wildcard, so the exact spellings do not matter -
 // what matters is the SHAPE around them.
 //
-//   1. the titleBarOverlay style helper (patch 2's target), whose declarator
-//      chain ends `;return <electron>.nativeTheme.shouldUseDarkColors?{color:`
+//   1. the titleBarOverlay style helper (patch 2's target), verbatim: the color
+//      is hoisted into `o=e==="main"&&pQn()||RI(),s=n?...:r?e0n(o):o;`
 //   2. the main-window options object (patch 1's target), reached here through
 //      a function that RETURNS the options instead of constructing a window, so
 //      the emitted expressions can be evaluated in place with real scoping.
+//      The keys up to `icon:` are verbatim; webPreferences is trimmed. The
+//      background is `fQn({signedIn:c})`, an ARGUMENT-taking call: the stub
+//      below destructures it like upstream does, so an emitted bare `fQn()`
+//      throws here exactly as it would at window creation.
 //
 // Upstream's own `icon:` key sits AFTER titleBarOverlay in the real object and
 // is kept here for faithfulness - see the closing NOTE.
 function fixture(overlaySlot) {
   return `"use strict";
-function p5t(e){let t=e==="main"&&Q8t,n=e==="main"&&e5t,r=t?d5t:e==="main"?B8t:V8t,i=n?u5t(yP()):yP();return o.nativeTheme.shouldUseDarkColors?{color:t?"#f9f8f4":i,symbolColor:t?"#000":"#c2c0b6",height:r}:{color:t?"#141412":i,symbolColor:t?"#fff":"#3d3d3a",height:r}}
-function w_e(e){return e}
-function __cdbFixtureOptions(){let r=!0,u=!1,i={earlyWindowShow:!1},a={x:0,y:0,width:1200,height:800},n={default:{join:(...s)=>s.join("/")}};return w_e({x:a.x,y:a.y,width:a.width,height:a.height,minWidth:600,minHeight:400,titleBarStyle:"hidden",titleBarOverlay:${overlaySlot},trafficLightPosition:U9t(),show:r&&!u,backgroundColor:yP(),opacity:+!!i.earlyWindowShow,icon:n.default.join(p3r(),"icon.png"),webPreferences:{preload:"mainWindow.js"}})}
+function a0n(e,t){let n=e==="main"&&H1n,r=e==="main"&&W1n,i=Math.max(n0n,Math.round((n?t0n:e==="main"?KZn:qZn)*t)),o=e==="main"&&pQn()||RI(),s=n?a.nativeTheme.shouldUseDarkColors?"#f9f8f4":"#141412":r?e0n(o):o;return a.nativeTheme.shouldUseDarkColors?{color:s,symbolColor:n?"#000":"#c2c0b6",height:i}:{color:s,symbolColor:n?"#fff":"#3d3d3a",height:i}}
+function YSe(e){return e}
+function __cdbFixtureOptions(){let e={x:0,y:0,width:1200,height:800},i=!0,c=!1,n={default:{join:(...s)=>s.join("/")}};return YSe({x:e.x,y:e.y,width:e.width,height:e.height,minWidth:600,minHeight:400,title:x$a(),titleBarStyle:"hidden",titleBarOverlay:${overlaySlot},trafficLightPosition:LVi(),show:i&&!0,backgroundColor:fQn({signedIn:c}),opacity:1,icon:n.default.join(VW(),"icon.png"),webPreferences:{preload:"mainWindow.js"}})}
 `;
 }
 
@@ -149,20 +153,26 @@ function evalFixture(src, { platform, env, dark = true, nativeTb, noWinCtl } = {
     console,
     process: { platform, env },
     // patch 2's helper environment (upstream identifiers)
-    Q8t: false,        // not the special "main" look -> the ternary takes `i`
-    e5t: true,         // the alpha-blend path IS active, i.e. the grey-strip value
-    d5t: 40,
-    B8t: 36,
-    V8t: 30,
-    u5t: BLENDED,
-    yP: () => WINDOW_BG,
-    o: { nativeTheme: { shouldUseDarkColors: dark } },
+    H1n: false,        // not the special "main" look -> the ternary reaches `r?e0n(o):o`
+    W1n: true,         // the alpha-blend path IS active, i.e. the grey-strip value
+    n0n: 24,
+    t0n: 44,
+    KZn: 36,
+    qZn: 30,
+    e0n: BLENDED,
+    pQn: () => WINDOW_BG, // the main window's stored background
+    RI: () => "#THEME-FALLBACK",
+    a: { nativeTheme: { shouldUseDarkColors: dark } },
     // the injected overlay reads nativeTheme via require("electron"), never
     // through a captured alias (a cross-chunk capture crashed v2.9939.4)
     require: (m) => (m === "electron" ? { nativeTheme: { shouldUseDarkColors: dark } } : undefined),
     // main-window options environment
-    U9t: () => ({ x: 0, y: 0 }),
-    p3r: () => "/opt/claude/resources",
+    x$a: () => "Claude",
+    LVi: () => ({ x: 0, y: 0 }),
+    VW: () => "/opt/claude/resources",
+    // upstream's fQn destructures its argument (`cQn(e)?.page`), so a call
+    // without one is a TypeError - modelled, not just stubbed
+    fQn: ({ signedIn }) => (signedIn === undefined ? "#NO-SIGNEDIN" : WINDOW_BG),
     eKi: UPSTREAM_OVERLAY_SENTINEL,
   };
   // Assigned conditionally so "no reader" means the property does not exist,
@@ -171,10 +181,10 @@ function evalFixture(src, { platform, env, dark = true, nativeTb, noWinCtl } = {
   if (nativeTb !== undefined) sandbox.__cdbNativeTb = nativeTb;
   if (noWinCtl !== undefined) sandbox.__cdbNoWinCtl = noWinCtl;
   vm.runInNewContext(
-    src + "\n;globalThis.__OPTS=__cdbFixtureOptions;globalThis.__OVERLAY=p5t;",
+    src + "\n;globalThis.__OPTS=__cdbFixtureOptions;globalThis.__OVERLAY=a0n;",
     vm.createContext(sandbox)
   );
-  return { opts: sandbox.__OPTS(), overlayMain: sandbox.__OVERLAY("main") };
+  return { opts: sandbox.__OPTS(), overlayMain: sandbox.__OVERLAY("main", 1) };
 }
 
 // Readers as the community patch injects them: memoized zero-arg functions.
@@ -414,12 +424,27 @@ try {
   check(
     "the binary reports no failure",
     /\[OK\] main window options: 1/.test(boolSlot.out) &&
-      /\[OK\] overlay background/.test(boolSlot.out) &&
+      /\[OK\] overlay color skips the alpha blend in Linux integrated mode: 1/.test(
+        boolSlot.out
+      ) &&
       !/\[FAIL\]/.test(boolSlot.out),
     true
   );
   execFileSync("node", ["--check", boolSlot.file]);
   check("the patched bundle passes node --check", true, true);
+  // The background call is re-emitted WITH its argument: fQn destructures it,
+  // so a bare `fQn()` in the overlay style would throw at window creation.
+  check(
+    "the overlay style re-emits the background call verbatim, argument included",
+    countOf(boolSlot.patched, "fQn({signedIn:c})"),
+    2
+  );
+  check("no bare fQn() is emitted", countOf(boolSlot.patched, "fQn()"), 0);
+  check(
+    "the overlay helper gates the blend, not the plain color",
+    /:!\(process\.platform==="linux"&&[^;]*\)&&r\?e0n\(o\):o;/.test(boolSlot.patched),
+    true
+  );
   check(
     "the emitted code gates on CLAUDE_NATIVE_TITLEBAR",
     boolSlot.patched.includes("CLAUDE_NATIVE_TITLEBAR"),

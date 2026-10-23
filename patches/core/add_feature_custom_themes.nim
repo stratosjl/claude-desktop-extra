@@ -222,8 +222,25 @@ var w=_BW.fromWebContents(wc);
 if(!w||(w.isDestroyed&&w.isDestroyed()))return false;
 var dark=__cdb_isDark(),c=__cdb_state.chrome,hex=(c&&(dark?c.dark:c.light))||(dark?__cdb_STOCK_CHROME.dark:__cdb_STOCK_CHROME.light);
 w.setBackgroundColor(hex);
+__cdb_paintOverlay(w,dark);
 return true;
 }catch(e){__cdb_log("window background: "+e.message);return false}
+}
+// The integrated titlebar's caption buttons sit on a Window Controls Overlay that upstream colors
+// itself (stock or page-reported gray, symbols #c2c0b6/#3d3d3a = stock --text-200) and re-pushes on
+// every mode flip, zoom or page report. With a theme active its pushes get the chrome color (the
+// top bar is .dframe-content's --df-bg-page, which the sheet pins to --bg-100) and --text-200.
+// Wrapped here, after window_transparency's constructor-time wrapper, so a transparent window still
+// ends at "#00000000". Native and bare modes have no overlay: the call throws and is ignored.
+function __cdb_tbOverlay(o,dark){var c=__cdb_state.chrome,t={},k;for(k in o)t[k]=o[k];if(c){if(dark?c.dark:c.light)t.color=dark?c.dark:c.light;if(dark?c.darkText:c.lightText)t.symbolColor=dark?c.darkText:c.lightText}return t}
+function __cdb_paintOverlay(w,dark){
+var s=w.__cdbOverlay;
+if(!s){var orig=w.setTitleBarOverlay;if(typeof orig!=="function")return;s=w.__cdbOverlay={last:null,themed:false};
+w.setTitleBarOverlay=function(o){if(o&&typeof o==="object"){s.last=o;o=__cdb_tbOverlay(o,__cdb_isDark())}return orig.call(w,o)}}
+// Nothing upstream pushed yet: only a theme (or undoing one) needs a call; stock keeps the constructor's.
+var o=s.last||((__cdb_state.chrome||s.themed)?{color:dark?__cdb_STOCK_CHROME.dark:__cdb_STOCK_CHROME.light,symbolColor:dark?"#fff":"#000"}:null);
+s.themed=!!__cdb_state.chrome;
+if(o)try{w.setTitleBarOverlay(o)}catch(e){}
 }
 function __cdb_paintAll(){var n=0;__cdb_wcKeys.forEach(function(_k,wc){if(__cdb_paintWindow(wc))n++});return n}
 function __cdb_toCss(v){
@@ -588,7 +605,7 @@ css+="svg[data-cdb-spinner].cdb-anim-pulse{animation:cdbPulse 1.2s ease-in-out i
 css+="svg[data-cdb-spinner].cdb-anim-flip [data-cdb-frame=\"1\"]{animation:cdbFlipA 1s steps(2,jump-none) infinite}";
 css+="svg[data-cdb-spinner].cdb-anim-flip [data-cdb-frame=\"2\"]{animation:cdbFlipB 1s steps(2,jump-none) infinite}";
 if(spinnerJson!=="null")__cdb_log("Spinner spec present ("+spinnerJson.length+" chars JSON) for '"+name+"'");
-return {css:css,font:fontFlag,spinnerJson:spinnerJson,overlay:overlay?overlay.name:null,chrome:{light:__cdb_chromeHex(v.light),dark:__cdb_chromeHex(v.dark)}};
+return {css:css,font:fontFlag,spinnerJson:spinnerJson,overlay:overlay?overlay.name:null,chrome:{light:__cdb_chromeHex(v.light),dark:__cdb_chromeHex(v.dark),lightText:__cdb_hslHex((v.light||{})["--text-200"]),darkText:__cdb_hslHex((v.dark||{})["--text-200"])}};
 }
 // --- top-level key persistence (comment-preserving) -------------------------
 // Walk the RAW text tracking string/comment state and return the value span of
@@ -923,14 +940,30 @@ __cdb_log("Error applying config: "+e.message)
 __cdb_startWatch(typeof __cdb_cfg0==="object"?__cdb_cfg0:null);
 // Appearance light/dark flips rebuild the sheet so the :root fallback follows the new mode.
 try{if(_nt&&_nt.on)_nt.on("updated",function(){setTimeout(function(){var r=__cdb_reload("nativeTheme "+(__cdb_isDark()?"dark":"light"));if(r&&!r.ok)__cdb_log("nativeTheme reload: "+r.error);__cdb_paintAll()},50)})}catch(e){__cdb_log("nativeTheme hook error: "+e.message)}
+// Only the app's own pages are themed: the claude.ai main view (1P), app://localhost
+// (3P) and upstream's local renderer windows (Quick Entry, find-in-page, buddy, ...).
+// Everything else - the Code tab's browser pane, Cowork file previews, devtools,
+// localhost dev servers - shows third-party content that must keep its own colors.
+// app://localhost has the opaque origin "null", so normalise to protocol + "//" + host.
+var __cdb_themeOrigins=["https://claude.ai","https://preview.claude.ai","https://claude.com","https://preview.claude.com","app://localhost"];
+function __cdb_themable(url){
+try{
+var u=new URL(url);
+if(u.protocol==="file:")return u.pathname.indexOf("/app.asar/.vite/renderer/")>=0;
+var o=u.origin;
+if(!o||o==="null")o=u.protocol+"//"+u.host;
+return __cdb_themeOrigins.indexOf(o)>=0;
+}catch(e){return false}
+}
 // Reads __cdb_state at dom-ready, so a window opened after a live switch gets
 // the CURRENT theme rather than whatever was active at startup.
 _app.on("web-contents-created",function(_ev,wc){
 wc.on("dom-ready",function(){
 try{
 var url=wc.getURL()||"";
-if(url.indexOf("devtools://")===0)return;
-if(url.indexOf("http://localhost")===0||url.indexOf("http://127.0.0.1")===0||url.indexOf("https://localhost")===0)return;
+// A tracked page that navigated to a third-party URL leaves the registry, so a
+// later live switch does not repaint it.
+if(!__cdb_themable(url)){__cdb_wcKeys.delete(wc);return}
 if(url.indexOf("cdb-theme-picker")>=0)return;
 __cdb_trackWc(wc);
 if(!__cdb_state.css)return;

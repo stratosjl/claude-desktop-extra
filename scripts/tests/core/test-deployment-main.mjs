@@ -61,12 +61,19 @@ function buildModule() {
     // Minimal stand-in for upstream's relaunch primitive, so the patch's
     // relaunch-capture sub-patch has the anchor it strictly requires. Never
     // called here; only its declaration and the appended globalThis assignment
-    // are evaluated.
-    "function nfi(e=[]){a.app.isPackaged?sA(!0,e):Uk(e)}\n");
+    // are evaluated, so its free names need no stubs. This is the v3.1623.0
+    // shape (a `let` local derived from the parameter, forwarded by both arms);
+    // test-extra-settings-css.mjs keeps the older shape without the `let`, so
+    // both branches of the capture regex stay covered.
+    "function FHa(e=[]){let t=G().type===\"3p\"&&ou()===\"1p\"?[...e,j$t]:e;a.app.isPackaged?Mj(!0,t):fj(t)}\n");
   execFileSync(PATCH_BIN, [mod], { stdio: "ignore" });
   const src = readFileSync(mod, "utf8");
   if (!src.includes("cdb-deploy:read")) {
     console.error("FAIL: the patch output carries no cdb-deploy handlers");
+    process.exit(1);
+  }
+  if (!src.includes("}globalThis.__cdbRelaunchApp=FHa;")) {
+    console.error("FAIL: the relaunch capture did not land after the v3.1623.0-shaped stand-in");
     process.exit(1);
   }
   return mod;

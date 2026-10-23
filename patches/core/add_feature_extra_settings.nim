@@ -75,6 +75,20 @@ proc markersPresent(s: string): int =
     if m in s:
       result.inc
 
+proc isIdentChar(c: char): bool =
+  c in {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_', '$'}
+
+proc referencesIdent(code, ident: string): bool =
+  ## True when `ident` occurs in `code` as a whole JS identifier token.
+  var i = code.find(ident)
+  while i >= 0:
+    let before = i == 0 or not isIdentChar(code[i - 1])
+    let after = i + ident.len >= code.len or not isIdentChar(code[i + ident.len])
+    if before and after:
+      return true
+    i = code.find(ident, i + 1)
+  false
+
 proc apply*(input: string): string =
   result = input
 
@@ -132,7 +146,10 @@ proc apply*(input: string): string =
   # processes are cut off, and the main window's geometry is never persisted.
   # Upstream's own primitive is
   #   function nfi(e=[]){a.app.isPackaged?sA(!0,e):Uk(e)}
-  # where sA sets the latch that bypasses the before-quit veto interceptor,
+  # and since v3.1623.0 it first derives the forwarded args from the parameter
+  # (the 3P->1P boot flag is appended when a 3P install runs in 1P mode):
+  #   function FHa(e=[]){let t=G().type==="3p"&&ou()==="1p"?[...e,j$t]:e;a.app.isPackaged?Mj(!0,t):fj(t)}
+  # where sA/Mj sets the latch that bypasses the before-quit veto interceptor,
   # stashes the relaunch args and calls app.quit() so the cleanup pass runs and
   # the relaunch happens at the end of it. Capture it onto globalThis so
   # js/extra_settings_main.js (a different chunk) can reach it; that file keeps
@@ -154,11 +171,13 @@ proc apply*(input: string): string =
       echo "  [OK] relaunch capture already present (idempotent)"
       patchesApplied.inc
     else:
-      # `regex` has no backreferences, so the parameter is captured at each of its
-      # three positions and the three are compared explicitly below - the same
-      # idiom add_feature_files_quick_open_worker uses for its method params.
+      # `regex` has no backreferences, so every name that must agree is captured
+      # at each of its positions and compared explicitly below - the same idiom
+      # add_feature_files_quick_open_worker uses for its method params.
+      # Groups: 0 function, 1 parameter, 2 optional `let` name, 3 its initializer,
+      # 4 and 5 the names the two arms forward.
       let relaunchPat =
-        re2"""function ([\w$]+)\(([\w$]+)=\[\]\)\{[\w$]+\.app\.isPackaged\?[\w$]+\(!0,([\w$]+)\):[\w$]+\(([\w$]+)\)\}"""
+        re2"""function ([\w$]+)\(([\w$]+)=\[\]\)\{(?:let ([\w$]+)=([^;{}]*);)?[\w$]+\.app\.isPackaged\?[\w$]+\(!0,([\w$]+)\):[\w$]+\(([\w$]+)\)\}"""
       # Count first: a second matching site after a re-minify would mean we are
       # guessing which one to capture.
       let hits = findAll(result, relaunchPat)
@@ -169,9 +188,18 @@ proc apply*(input: string): string =
       let m = hits[0]
       let fnName = result[m.group(0)]
       let param = result[m.group(1)]
-      if result[m.group(2)] != param or result[m.group(3)] != param:
-        echo "  [FAIL] relaunchApp capture: the two arms forward (" & result[m.group(2)] &
-          ", " & result[m.group(3)] & ") but the parameter is `" & param &
+      # The arms forward the `let` local when there is one, else the parameter.
+      var fwd = param
+      if m.group(2) != reNonCapture:
+        fwd = result[m.group(2)]
+        let initExpr = result[m.group(3)]
+        if not referencesIdent(initExpr, param):
+          echo "  [FAIL] relaunchApp capture: `let " & fwd & "=" & initExpr &
+            "` does not derive from the parameter `" & param & "` -- wrong site"
+          quit(1)
+      if result[m.group(4)] != fwd or result[m.group(5)] != fwd:
+        echo "  [FAIL] relaunchApp capture: the two arms forward (" & result[m.group(4)] &
+          ", " & result[m.group(5)] & ") but the expected name is `" & fwd &
           "` -- wrong site"
         quit(1)
       result =
@@ -180,7 +208,8 @@ proc apply*(input: string): string =
       if not result.find(landedPat, landed):
         echo "  [FAIL] relaunchApp capture did not land"
         quit(1)
-      echo "  [OK] relaunch capture: upstream relaunchApp published as globalThis.__cdbRelaunchApp"
+      echo "  [OK] relaunch capture: upstream relaunchApp `" & fnName & "` (forwards `" &
+        fwd & "`) published as globalThis.__cdbRelaunchApp"
       patchesApplied.inc
 
   if patchesApplied < EXPECTED_PATCHES:

@@ -523,10 +523,21 @@
   // One line per answered request with what the provider counted: input,
   // prompt-cache read and write (with the 1h/5m split when it gives one) -
   // the cache at work, without waiting for a dashboard. Read from a clone,
-  // so what the CLI reads is untouched; a stream only up to message_start.
+  // so what the CLI reads is untouched; a stream up to message_start, or to
+  // message_delta when message_start counts nothing (a LiteLLM-based gateway
+  // sends zeros there and its totals at the end, without the cache split).
+  // Returns a function that stops reading the clone: the CLI cancelling its
+  // body reaches the provider only once both halves of the clone are let go.
   function logUsage(p, m, res) {
-    function line(u) {
+    function line(u, end) {
       if (!u || typeof u !== "object") return;
+      // The end of a stream that states no cache figures: say so, rather
+      // than print a cache_read=0 nobody measured.
+      if (end && u.cache_read_input_tokens === undefined && u.cache_creation_input_tokens === undefined) {
+        log("<- " + p.id + "/" + m.id + " usage: input=" + (u.input_tokens || 0) + " output=" + (u.output_tokens || 0) +
+          " (end of stream, no cache figures sent)");
+        return;
+      }
       var cc = u.cache_creation && typeof u.cache_creation === "object" ? u.cache_creation : null;
       log("<- " + p.id + "/" + m.id + " usage: input=" + (u.input_tokens || 0) + " cache_read=" + (u.cache_read_input_tokens || 0) +
         " cache_write=" + (u.cache_creation_input_tokens || 0) +
@@ -537,14 +548,18 @@
       var type = (res.headers && res.headers.get("content-type")) || "";
       if (type.indexOf("text/event-stream") === -1) {
         copy.json().then(function (j) { line(j && j.usage); }, function () {});
-        return;
+        return function () {};
       }
-      if (!copy.body || typeof copy.body.getReader !== "function") return;
-      var reader = copy.body.getReader(), dec = new TextDecoder(), buf = "";
+      if (!copy.body || typeof copy.body.getReader !== "function") return function () {};
+      var reader = copy.body.getReader(), dec = new TextDecoder(), buf = "", atStart = null;
       var stop = function () { reader.cancel().catch(function () {}); };
+      var counted = function (u) {
+        return !!u && typeof u === "object" &&
+          !!(u.input_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens);
+      };
       var pump = function () {
         reader.read().then(function (r) {
-          if (r.done) return;
+          if (r.done) { if (atStart) line(atStart); return; }
           buf += dec.decode(r.value, { stream: true });
           var i;
           while ((i = buf.indexOf("\n")) !== -1) {
@@ -553,14 +568,116 @@
             if (l.indexOf("data:") !== 0) continue;
             var ev = null;
             try { ev = JSON.parse(l.slice(5)); } catch (e) {}
-            if (ev && ev.type === "message_start") { line(ev.message && ev.message.usage); stop(); return; }
+            if (ev && ev.type === "message_start") {
+              var su = ev.message && ev.message.usage;
+              if (counted(su) || !su) { line(su); stop(); return; }
+              atStart = su;
+            } else if (ev && ev.type === "message_delta" && atStart) {
+              // Whatever the end counts beats the zeros of the start.
+              if (ev.usage && typeof ev.usage === "object") line(ev.usage, true); else line(atStart);
+              atStart = null; stop(); return;
+            }
           }
           if (buf.length > 1000000) { stop(); return; }
           pump();
         }, function () {});
       };
       pump();
-    } catch (e) {}
+      return stop;
+    } catch (e) { return function () {}; }
+  }
+
+  // A LiteLLM-based gateway serving a reasoning model (GLM 5.3 on TensorX,
+  // October 2026) streams the model's reasoning as thinking_delta events
+  // inside a block it opened as text, and sometimes text again after it, in
+  // the same block. Claude Code refuses that stream ("Stream event
+  // unreadable") and resends the whole turn without streaming: the turn is
+  // paid for twice and takes as long as the full answer. The JSON answer to
+  // that resend carries a proper thinking block, so this only re-blocks the
+  // stream: each run of thinking or text deltas gets its own block of that
+  // kind, and the blocks after it move up by the ones inserted. A stream
+  // without such a mix reaches the CLI as the provider sent it.
+  var DELTA_KIND = { thinking_delta: "thinking", signature_delta: "thinking", text_delta: "text" };
+  function reblockStream(p, m, res, stopUsage) {
+    if (!res.body || typeof res.body.getReader !== "function" || typeof ReadableStream !== "function" ||
+        typeof TextEncoder !== "function") return res;
+    var type = (res.headers && res.headers.get("content-type")) || "";
+    if (type.indexOf("text/event-stream") === -1) return res;
+    var reader = res.body.getReader(), dec = new TextDecoder(), enc = new TextEncoder(), buf = "";
+    var shift = 0, cur = null, split = 0;
+    function sse(obj) { return "event: " + obj.type + "\ndata: " + JSON.stringify(obj) + "\n\n"; }
+    function emptyBlock(kind) { return kind === "thinking" ? { type: "thinking", thinking: "" } : { type: "text", text: "" }; }
+    // One SSE event (raw, with its blank line) in, what the CLI gets out.
+    function fix(raw) {
+      var data = raw.split("\n").filter(function (l) { return l.indexOf("data:") === 0; })
+        .map(function (l) { return l.slice(5).trim(); }).join("\n");
+      var ev = null;
+      try { ev = data ? JSON.parse(data) : null; } catch (e) {}
+      if (!ev || typeof ev.index !== "number") return raw;
+      if (ev.type === "content_block_start") {
+        cur = { up: ev.index, out: ev.index + shift, kind: ev.content_block && ev.content_block.type };
+        if (!shift) return raw;
+        ev.index = cur.out;
+        return sse(ev);
+      }
+      var mine = cur && cur.up === ev.index;
+      if (ev.type === "content_block_delta") {
+        var want = ev.delta && DELTA_KIND[ev.delta.type];
+        var out = "";
+        if (mine && want && (cur.kind === "text" || cur.kind === "thinking") && want !== cur.kind) {
+          out += sse({ type: "content_block_stop", index: cur.out });
+          shift++; split++;
+          cur.out = ev.index + shift; cur.kind = want;
+          out += sse({ type: "content_block_start", index: cur.out, content_block: emptyBlock(want) });
+        }
+        var idx = mine ? cur.out : ev.index + shift;
+        if (!out && idx === ev.index) return raw;
+        ev.index = idx;
+        return out + sse(ev);
+      }
+      if (ev.type === "content_block_stop") {
+        var at = mine ? cur.out : ev.index + shift;
+        if (mine) cur = null;
+        if (at === ev.index) return raw;
+        ev.index = at;
+        return sse(ev);
+      }
+      return raw;
+    }
+    var body = new ReadableStream({
+      // Reads on until a whole event is out: a pull that enqueues nothing is
+      // not called again, and the CLI would wait forever.
+      pull: function (ctl) {
+        function step() {
+          return reader.read().then(function (r) {
+            if (r.done) {
+              buf += dec.decode();
+              if (buf) ctl.enqueue(enc.encode(fix(buf)));
+              if (split) log("<- " + p.id + "/" + m.id + " stream: thinking and text mixed in one block, re-blocked " + split + " time(s)");
+              ctl.close();
+              return;
+            }
+            buf = (buf + dec.decode(r.value, { stream: true })).replace(/\r\n/g, "\n");
+            var i, outText = "";
+            while ((i = buf.indexOf("\n\n")) !== -1) {
+              outText += fix(buf.slice(0, i + 2));
+              buf = buf.slice(i + 2);
+            }
+            if (!outText) return step();
+            ctl.enqueue(enc.encode(outText));
+          });
+        }
+        return step();
+      },
+      cancel: function (reason) {
+        if (stopUsage) stopUsage();
+        return reader.cancel(reason);
+      }
+    });
+    // The provider's length no longer holds once a block is split.
+    var headers = new Headers(res.headers);
+    headers.delete("content-length");
+    return new Response(body, { status: res.status, statusText: res.statusText, headers: headers });
   }
 
   function jsonResponse(status, obj) {
@@ -763,7 +880,11 @@
             "claude-desktop-extra custom models: provider \"" + p.id + "\" refused the API key (HTTP " + res.status +
             ") - check it in Settings > Extra > Models. Provider said: " + t2.slice(0, 300));
         }
-      } else if (!isCount) logUsage(p, m, res);
+      } else if (!isCount) {
+        var stopUsage = logUsage(p, m, res);
+        // Anthropic's own API streams well-formed blocks: left as it is.
+        if (!native && body.stream === true) res = reblockStream(p, m, res, stopUsage);
+      }
       return res;
     })();
   }

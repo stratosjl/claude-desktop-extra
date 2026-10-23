@@ -39,6 +39,7 @@ optdepends=('nodejs: System Node.js for MCP extensions that require specific ver
             'ydotool: Computer Use input on exotic Wayland compositors ONLY (non-wlroots, non-GNOME, non-KDE; requires ydotoold daemon, v1.0+) - wlroots/GNOME/KDE use the bundled bridges'
             'bubblewrap: Claude Code shell sandbox (needed with socat when an organization sandbox policy applies)'
             'socat: Claude Code shell sandbox (with bubblewrap); also a faster Quick Entry toggle via socket (~2ms vs ~25ms python3)'
+            'openssh: Claude Code SSH sessions over the system ssh client (without it the built-in SSH engine is used)'
             'bluez: Hardware Buddy (Nibblet BLE pet) - the daemon Web Bluetooth talks to; without it the in-app device scan finds nothing'
             'gnome-keyring: credential storage backend for libsecret (KDE users: kwallet works too - upstream Recommends gnome-keyring | kwalletd)'
             'xdg-desktop-portal-gtk: portal backend for DEs without their own (GNOME/KDE ship xdg-desktop-portal-gnome/-kde) - file dialogs, screen sharing'
@@ -86,6 +87,21 @@ package() {
     if [ -f "$pkgdir/usr/lib/claude-desktop/chrome-sandbox" ]; then
         chmod 4755 "$pkgdir/usr/lib/claude-desktop/chrome-sandbox"
     fi
+
+    # Release stamp for the in-app update check: the release tag this package
+    # was built from (v<pkgver>, or v<pkgver>-<pkgrel> for a re-release, the tag
+    # scheme of our GitHub releases) and the package format, which picks the
+    # README install section the "Update available" button opens. It sits in the
+    # exe-adjacent resources/, next to app.asar (process.resourcesPath).
+    if [[ ! $pkgver =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $pkgrel =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: pkgver '$pkgver' / pkgrel '$pkgrel' not in X.Y.Z / N form - cannot write the release stamp" >&2
+        return 1
+    fi
+    local _tag="v$pkgver"
+    [ "$pkgrel" = 1 ] || _tag="v$pkgver-$pkgrel"
+    printf '{"tag":"%s","format":"pacman"}\n' "$_tag" \
+        > "$pkgdir/usr/lib/claude-desktop/resources/cdb-release.json"
+    chmod 644 "$pkgdir/usr/lib/claude-desktop/resources/cdb-release.json"
 
     # Install launcher script (Wayland/X11 detection, env setup, lock cleanup)
     install -Dm755 "$srcdir/launcher/claude-desktop" "$pkgdir/usr/bin/claude-desktop"

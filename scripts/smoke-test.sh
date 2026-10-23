@@ -15,6 +15,7 @@
 #                          must provide a live WAYLAND_DISPLAY + XDG_RUNTIME_DIR
 #                          (e.g. weston --backend=headless); the app is launched
 #                          with --ozone-platform=wayland and no X server.
+#   SMOKE_STOP_SECONDS     Grace after the closing SIGTERM before SIGKILL (default 10)
 #   SKIP_SANDBOX_CHECK=1   Skip the chrome-sandbox SUID assertion.
 #
 set -e
@@ -120,7 +121,24 @@ else
         "$ELECTRON_BIN" --no-sandbox --user-data-dir="$SMOKE_USERDATA" 2>"$STDERR_LOG" &
 fi
 APP_PID=$!
-_kill_app_tree() { kill -- "-$APP_PID" 2>/dev/null || kill "$APP_PID" 2>/dev/null || true; }
+# SIGTERM the whole process group, as `systemctl stop` / logout do to the
+# app's scope, then give it SMOKE_STOP_SECONDS to exit before SIGKILL. The
+# verdict is about startup: a slow stop is reported, never waited on forever
+# (v2.37337.1 spins in app.quit() after a group SIGTERM and never exits).
+STOP_SECONDS="${SMOKE_STOP_SECONDS:-10}"
+_kill_app_tree() {
+    kill -- "-$APP_PID" 2>/dev/null || kill "$APP_PID" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$APP_PID" 2>/dev/null && [ "$waited" -lt "$STOP_SECONDS" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$APP_PID" 2>/dev/null; then
+        echo -e "${YELLOW}[WARN]${NC} app still running ${STOP_SECONDS}s after SIGTERM to its process group - sending SIGKILL"
+        [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning title=smoke-test::app did not exit within ${STOP_SECONDS}s of SIGTERM to its process group"
+        kill -KILL -- "-$APP_PID" 2>/dev/null || kill -KILL "$APP_PID" 2>/dev/null || true
+    fi
+}
 
 # Poll every second — fail if process dies early
 ELAPSED=0

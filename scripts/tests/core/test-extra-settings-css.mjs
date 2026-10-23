@@ -70,12 +70,18 @@ function buildModule() {
     // Minimal stand-in for upstream's relaunch primitive, so the patch's
     // relaunch-capture sub-patch has the anchor it strictly requires. Never
     // called here; only its declaration and the appended globalThis assignment
-    // are evaluated.
+    // are evaluated. This is the pre-v3.1623.0 shape (both arms forward the
+    // parameter directly); test-deployment-main.mjs carries the newer shape with
+    // a `let` local, so both branches of the capture regex stay covered.
     "function nfi(e=[]){a.app.isPackaged?sA(!0,e):Uk(e)}\n");
   execFileSync(PATCH_BIN, [mod], { stdio: "ignore" });
   const src = readFileSync(mod, "utf8");
   if (!src.includes("web-contents-created")) {
     console.error("FAIL: the patch output carries no web-contents-created hook");
+    process.exit(1);
+  }
+  if (!src.includes("}globalThis.__cdbRelaunchApp=nfi;")) {
+    console.error("FAIL: the relaunch capture did not land after the pre-v3.1623.0-shaped stand-in");
     process.exit(1);
   }
   return mod;

@@ -23,20 +23,26 @@
 #   - dir:   J6A() = (XDG_CONFIG_HOME||~/.config)/autostart
 #   - file:  zmA() = `${basename(process.execPath)}.desktop`  (profile-aware: our
 #            per-profile Electron binary has a distinct basename, so each profile
-#            manages its own autostart entry — same outcome our old patch hand-rolled)
+#            manages its own autostart entry - same outcome our old patch hand-rolled)
 #   - setStartupOnLoginEnabled(A){...nco(A).catch(...)"Failed to update XDG autostart entry"}
 # The Exec line already carries --startup, so an autostart launch hides the window.
 #
 # Layer 3 was NOT upstreamed: the window-show gate is purely
-#   wco=!<proc>.argv.includes("--startup")
+#   var R3a,z3a=()=>R3a??=!r.default.argv.includes("--startup")   (v3.1623.0)
 # and the whole bundle has ZERO /run/user and ZERO gnome-session references. A
 # GNOME session-restore relaunch (no --startup) therefore still shows the window.
+# v3.1623.0 added a second reader, Reset App Data's
+#   function cIi(){return process.argv.includes("--startup")}
+# which only decides whether the reset path shows a dialog on exit. It is not a
+# window-show gate and keeps upstream behavior, so P3 anchors on the gate's
+# `??=!` lazy-init prefix and never touches it.
 #
 # So per AGENTS.md Rule 4 we only patch layer 3 and the Exec target; the native
 # read/write paths are PRECONDITIONS of those two sub-patches, not sub-patches
 # of their own (they were assert-only guards until 2026-09-23):
-#   - P3 (session-restore detection): widen the single argv.includes("--startup")
-#     gate with js/startup_session_restore_gate.js, which suppresses ONLY when an
+#   - P3 (session-restore detection): widen the window-show gate
+#     `??=!<proc>.argv.includes("--startup")` with
+#     js/startup_session_restore_gate.js, which suppresses ONLY when an
 #     enabled XDG autostart entry exists AND the graphical session started under
 #     60s ago. Requiring the autostart entry is what keeps an ordinary launch
 #     visible (issue #233). Precondition: upstream's autostart path is still
@@ -64,7 +70,7 @@ proc apply*(input: string): string =
   result = input
 
   # ── P3 (active patch): session-restore detection ─────────────────────────
-  # Upstream's only gate is `<proc>.argv.includes("--startup")`, and
+  # Upstream's only window-show gate is `<proc>.argv.includes("--startup")`, and
   # gnome-session / Plasma re-launch saved clients after a reboot WITHOUT that
   # flag, so a user who asked for a hidden start got the window on every login.
   # We widen the gate with the predicate in js/startup_session_restore_gate.js,
@@ -107,19 +113,24 @@ proc apply*(input: string): string =
   else:
     # v1.26832.0: `--startup` is a template literal and process is reached via a
     # namespace alias (L.default.argv), so accept either quoting and member chains.
-    let pattern3 = re2"""([\w$]+(?:\.[\w$]+)*)\.argv\.includes\(["`]--startup["`]\)"""
+    # v3.1623.0: Reset App Data reads `process.argv.includes("--startup")` too
+    # (exit-path dialog only, not a window-show gate), so anchor on the gate's
+    # lazy-init `<memo>??=!` prefix, which only the window-show gate carries.
+    let pattern3 =
+      re2"""(\?\?=!)([\w$]+(?:\.[\w$]+)*)\.argv\.includes\(["`]--startup["`]\)"""
     var count3 = 0
     result = result.replace(
       pattern3,
       proc(m: RegexMatch2, s: string): string =
         inc count3
-        let processVar = s[m.group(0)]
+        let processVar = s[m.group(1)]
         # The result MUST be parenthesized: upstream negates this expression
         # (`showWindow ??= !<proc>.argv.includes("--startup")`) and `!` binds
         # tighter than `||`. Without the parens the injected heuristic would
         # read `(!includes)||restore` and *show* the window on session restore
-        # - the exact opposite of what this patch is for.
-        "(" & processVar &
+        # - the exact opposite of what this patch is for. The captured `??=!`
+        # is re-emitted verbatim, so the `!` stays outside the parens.
+        s[m.group(0)] & "(" & processVar &
           ".argv.includes(\"--startup\")||process.platform===\"linux\"&&" &
           GATE_JS.strip() & ")",
     )
@@ -127,7 +138,8 @@ proc apply*(input: string): string =
       echo "  [OK] session-restore detection: augmented argv --startup gate (1 match)"
       patchesApplied += 1
     else:
-      echo "  [FAIL] session-restore: expected 1 argv --startup site, found " & $count3 &
+      echo "  [FAIL] session-restore: expected 1 `??=!<proc>.argv.includes(\"--startup\")` " &
+        "window-show gate, found " & $count3 &
         " - re-audit (the window-show gate may have changed shape)"
       quit(1)
 

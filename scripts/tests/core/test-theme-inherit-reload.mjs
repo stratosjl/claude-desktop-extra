@@ -11,6 +11,9 @@
  *   - reload() + the directory watcher: the file on disk is re-read and re-applied to
  *     every live window without persisting; identical output is a no-op; our own
  *     writes do not bounce; "themeWatch": false switches the watcher off.
+ *   - the integrated titlebar's caption-button overlay: recolored to the theme's chrome
+ *     color and --text-200 on every push, following mode flips and live switches; stock,
+ *     a transparent window and native/bare titlebars (no overlay) are left as they were.
  *
  * The engine really runs (electron shimmed, fake windows recording insertCSS /
  * executeJavaScript). The watcher checks use real inotify with short real waits: the
@@ -23,7 +26,7 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import {
-  installEngine, mkWc, pushedSpec, settle, reporter, runSuite,
+  installEngine, mkWc, pushedSpec, settle, reporter, runSuite, readJson,
 } from "../lib/theme-engine-harness.mjs";
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -577,6 +580,78 @@ await runSuite(async () => {
     r.ok(res.ok === true && res.saved === "claude-desktop-extra.json" && JSON.parse(readFileSync(join(e4.userData, "claude-desktop-extra.json"), "utf8").replace(/,(\s*[}\]])/g, "$1")).themeOverlay === "ov",
        ".json is the fallback target when no .jsonc exists", JSON.stringify(res));
     r.ok(e4.themes.overlays().length === 1 && e4.themes.overlays()[0].name === "ov" && e4.themes.overlays()[0].hidden === false, "overlays() with a single visible candidate");
+  }
+
+  // ------------------------------------------------------------------ [9] titlebar overlay
+  r.section("[9] the integrated titlebar's caption-button overlay follows the theme; stock and transparency untouched");
+  {
+    // Independent HSL triplet -> hex, so the engine's own converter is checked, not reused.
+    const hex = (t) => {
+      const [h, s, l] = t.match(/[\d.]+/g).map(Number), a = (s / 100) * Math.min(l / 100, 1 - l / 100);
+      const f = (n) => { const k = (n + h / 30) % 12; return Math.round(255 * (l / 100 - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); };
+      return "#" + [f(0), f(8), f(4)].map((v) => v.toString(16).padStart(2, "0")).join("");
+    };
+    const near = (a, b) => !!a && !!b && [1, 3, 5].every((i) => Math.abs(parseInt(a.slice(i, i + 2), 16) - parseInt(b.slice(i, i + 2), 16)) <= 1);
+    const G = readJson("js/community_themes.json").gruvboxalt, N = readJson("js/community_themes.json")["nord-aurora"];
+    const want = (t, m) => ({ color: t[m]["--claude-background-color"] || hex(t[m]["--bg-100"]), symbolColor: hex(t[m]["--text-200"]) });
+    const SHELL = "file:///usr/lib/claude-desktop/resources/app.asar/.vite/renderer/main_window/index.html";
+    const UP_DARK = { color: "#151515", symbolColor: "#c2c0b6", height: 36 };
+    const shellWith = (appEvents, setup) => {
+      const wc = mkWc(SHELL);
+      wc.win.ov = [];
+      wc.win.setTitleBarOverlay = (o) => { wc.win.ov.push(o); };
+      if (setup) setup(wc.win);
+      appEvents["web-contents-created"]({}, wc); wc.fire("dom-ready");
+      return wc;
+    };
+    const last = (w) => w.ov[w.ov.length - 1];
+    const is = (o, w, h) => !!o && near(o.color, w.color) && near(o.symbolColor, w.symbolColor) && (h === undefined || o.height === h);
+
+    const { themes: T, appEvents, nativeTheme } = installEngine({ config: { activeTheme: "gruvboxalt", themeWatch: false } });
+    const sh = shellWith(appEvents);
+    const page = mkWc(); page.win.ov = []; page.win.setTitleBarOverlay = (o) => page.win.ov.push(o);
+    appEvents["web-contents-created"]({}, page); page.fire("dom-ready");
+    await settle();
+    r.ok(is(last(sh.win), want(G, "light")), "light: the overlay gets the theme chrome color and --text-200", JSON.stringify(sh.win.ov));
+    r.ok(page.win.ov.length === 0, "the claude.ai view's window is not touched", JSON.stringify(page.win.ov));
+    nativeTheme.shouldUseDarkColors = true;
+    sh.win.setTitleBarOverlay(UP_DARK);
+    r.ok(is(last(sh.win), want(G, "dark"), 36), "upstream's own push (stock dark) is recolored, its height kept", JSON.stringify(last(sh.win)));
+    nativeTheme.emit("updated");
+    await wait(150);
+    r.ok(is(last(sh.win), want(G, "dark"), 36), "after a light/dark flip the overlay is repainted for the new mode", JSON.stringify(last(sh.win)));
+    r.ok(T.apply("nord-aurora").ok === true, "live theme switch");
+    await settle();
+    r.ok(is(last(sh.win), want(N, "dark"), 36), "the switch repaints the overlay with the new theme, no restart", JSON.stringify(last(sh.win)));
+    T.apply("");
+    await settle();
+    r.ok(JSON.stringify(last(sh.win)) === JSON.stringify(UP_DARK), "revert to stock re-sends upstream's last overlay unchanged", JSON.stringify(last(sh.win)));
+    sh.win.setTitleBarOverlay({ color: "#fcfcfb", symbolColor: "#3d3d3a", height: 40 });
+    r.ok(JSON.stringify(last(sh.win)) === JSON.stringify({ color: "#fcfcfb", symbolColor: "#3d3d3a", height: 40 }), "stock: upstream pushes pass through untouched");
+    nativeTheme.shouldUseDarkColors = false;
+
+    // No theme at boot: no call of ours at all, the constructor's overlay stands.
+    const e2 = installEngine({ config: { activeTheme: "", themeWatch: false } });
+    const sh2 = shellWith(e2.appEvents);
+    await settle();
+    r.ok(sh2.win.ov.length === 0, "no active theme: the overlay is never set by the theme engine", JSON.stringify(sh2.win.ov));
+
+    // Transparent window: window_transparency wrapped setTitleBarOverlay in the constructor (before dom-ready).
+    const e3 = installEngine({ config: { activeTheme: "gruvboxalt", themeWatch: false } });
+    const sh3 = shellWith(e3.appEvents, (w) => {
+      const rec = w.setTitleBarOverlay;
+      w.setTitleBarOverlay = (o) => rec(Object.assign({}, o, { color: "#00000000" }));
+    });
+    await settle();
+    sh3.win.setTitleBarOverlay(UP_DARK);
+    r.ok(sh3.win.ov.length >= 2 && sh3.win.ov.every((o) => o.color === "#00000000"), "transparency mode keeps the overlay fully transparent", JSON.stringify(sh3.win.ov));
+
+    // Native / bare titlebar: there is no overlay and Electron throws.
+    const e4 = installEngine({ config: { activeTheme: "gruvboxalt", themeWatch: false } });
+    let threw = 0;
+    const sh4 = shellWith(e4.appEvents, (w) => { w.setTitleBarOverlay = () => { threw++; throw new Error("Titlebar overlay is not enabled"); }; });
+    await settle();
+    r.ok(threw === 1 && near(sh4.win.bg.slice(-1)[0], want(G, "light").color), "no overlay (native/bare): the throw is swallowed, the window background is still painted", JSON.stringify({ threw, bg: sh4.win.bg }));
   }
 
   r.done();

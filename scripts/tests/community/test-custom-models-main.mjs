@@ -22,7 +22,8 @@ const PRELOAD_STUB = "/*preload*/";
 
 // Runs the module; returns the IPC handlers, the global it exports, the
 // web-contents-created listener and the diag lines it logged.
-function load(profileDir, env) {
+function load(profileDir, env, opts) {
+  opts = opts || {};
   const handlers = {};
   const appListeners = {};
   const diag = [];
@@ -35,8 +36,9 @@ function load(profileDir, env) {
   };
   const src = readFileSync(join(ROOT, "js/custom_models_main.js"), "utf8")
     .replace('"__CDB_CM_PRELOAD_SRC__"', JSON.stringify(PRELOAD_STUB));
-  const sandbox = { require: (m) => (m === "electron" ? electron : Module.createRequire(import.meta.url)(m)),
-    process: { platform: "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
+  const sandbox = { require: (m) => (m === "electron" ? electron
+      : (opts.modules && opts.modules[m]) || Module.createRequire(import.meta.url)(m)),
+    process: { platform: opts.platform || "linux", env: env || {} }, console, setTimeout, clearTimeout, Buffer, URL, AbortController,
     fetch: (url, init) => { sandbox.__fetchCalls.push({ url, init }); return sandbox.__fetchImpl(url, init); } };
   sandbox.__fetchCalls = [];
   sandbox.__fetchImpl = () => Promise.resolve(new Response(JSON.stringify({ id: "msg" }), { status: 200 }));
@@ -688,6 +690,98 @@ async function settle() { await new Promise((r) => setTimeout(r, 10)); }
   sandbox.__fetchImpl = () => Promise.resolve(new Response("nope", { status: 404 }));
   r = await h["cdb-cm:models-list"](okSenderEv, "ds");
   ok(r.ok === false && /no model list found/.test(r.error) && /HTTP 404/.test(r.error), "every candidate failing is reported with the attempts");
+  sandbox.__fetchImpl = () => Promise.resolve(new Response(JSON.stringify({ id: "msg" }), { status: 200 }));
+
+  // A LiteLLM-based gateway: bare OpenAI rows at /v1/models, what each model
+  // is at /v1/model/info (one row per deployment, so names repeat).
+  r = await h["cdb-cm:provider-set"](okSenderEv, { id: "gw", baseUrl: "https://gw.example", apiKey: "gw-secret-1234567890", preset: "gateway" });
+  ok(r.ok === true, "a gateway provider is saved: " + JSON.stringify(r));
+  const gwList = { object: "list", data: ["chat-1m", "chat-262k", "no-vision", "no-reasoning", "unknown-caps", "whisper", "embed", "not-in-info"]
+    .map((id) => ({ id, object: "model", created: 1677610602, owned_by: "openai" })) };
+  const gwInfo = { data: [
+    { model_name: "chat-1m", model_info: { mode: "chat", max_input_tokens: 1048576, supports_vision: true, supports_reasoning: true } },
+    { model_name: "chat-1m", model_info: { mode: "chat", max_input_tokens: 32768, supports_vision: false, supports_reasoning: false } },
+    { model_name: "chat-262k", model_info: { mode: "chat", max_input_tokens: 262144, supports_vision: true, supports_reasoning: true } },
+    { model_name: "no-vision", model_info: { mode: "chat", max_input_tokens: 1048576, supports_vision: false, supports_reasoning: true } },
+    { model_name: "no-reasoning", model_info: { mode: "chat", max_input_tokens: 131072, supports_vision: true, supports_reasoning: false } },
+    { model_name: "unknown-caps", model_info: { mode: "chat" } },
+    { model_name: "whisper", model_info: { mode: "audio_transcription" } },
+    { model_name: "embed", model_info: { mode: "embedding", max_input_tokens: 40960 } }] };
+  sandbox.__fetchCalls.length = 0;
+  sandbox.__fetchImpl = (url) => Promise.resolve(
+    url === "https://gw.example/v1/models" ? new Response(JSON.stringify(gwList), { status: 200 })
+      : url === "https://gw.example/v1/model/info" ? new Response(JSON.stringify(gwInfo), { status: 200 })
+      : new Response("nope", { status: 404 }));
+  r = await h["cdb-cm:models-list"](okSenderEv, "gw");
+  const byId = Object.fromEntries((r.models || []).map((m) => [m.id, m]));
+  ok(r.ok === true && r.source === "https://gw.example/v1/models" && r.infoSource === "https://gw.example/v1/model/info",
+     "a gateway's list is completed from its /v1/model/info: " + JSON.stringify(r));
+  ok(r.models.map((m) => m.id).join(",") === "chat-1m,chat-262k,no-vision,no-reasoning,unknown-caps,not-in-info" &&
+     r.hidden.map((x) => x.id + ":" + x.mode).join(",") === "whisper:audio_transcription,embed:embedding",
+     "models the gateway says are not chat models are left out and reported: " + JSON.stringify(r.hidden));
+  ok(byId["chat-1m"].context === "1m" && byId["chat-262k"].context === "200k" && byId["no-reasoning"].context === "200k" &&
+     !("vision" in byId["chat-1m"]) && !("thinking" in byId["chat-1m"]),
+     "max_input_tokens sets the context (1m only from 1M up), the first row of a repeated name wins: " + JSON.stringify(byId["chat-1m"]));
+  ok(byId["no-vision"].vision === false && !("thinking" in byId["no-vision"]) && byId["no-reasoning"].thinking === false && !("vision" in byId["no-reasoning"]),
+     "supports_vision / supports_reasoning false turn vision / thinking off");
+  ok(!("context" in byId["unknown-caps"]) && !("vision" in byId["unknown-caps"]) && !("thinking" in byId["unknown-caps"]) &&
+     JSON.stringify(byId["not-in-info"]) === JSON.stringify({ id: "not-in-info", name: "not-in-info" }),
+     "a field the gateway does not state keeps the app's default");
+  ok(sandbox.__fetchCalls.length === 2 && sandbox.__fetchCalls[1].init.method === "GET" &&
+     sandbox.__fetchCalls[1].init.headers.authorization === "Bearer gw-secret-1234567890",
+     "one GET on the same host, with the key: " + sandbox.__fetchCalls.map((c) => c.url).join(" "));
+  sandbox.__fetchCalls.length = 0;
+  sandbox.__fetchImpl = (url) => Promise.resolve(url === "https://gw.example/v1/models"
+    ? new Response(JSON.stringify(gwList), { status: 200 }) : new Response("nope", { status: 404 }));
+  r = await h["cdb-cm:models-list"](okSenderEv, "gw");
+  ok(r.ok === true && r.models.length === 8 && !("hidden" in r) && !("infoSource" in r) && r.models.every((m) => !m.context),
+     "no /v1/model/info: the list stays as the listing gave it");
+  sandbox.__fetchImpl = (url) => Promise.resolve(url === "https://gw.example/v1/models"
+    ? new Response(JSON.stringify(gwList), { status: 200 }) : new Response("<html>not json</html>", { status: 200 }));
+  r = await h["cdb-cm:models-list"](okSenderEv, "gw");
+  ok(r.ok === true && r.models.length === 8 && !("hidden" in r), "a /v1/model/info answer that is not that shape is ignored");
+  // The info body cut off mid-read (the 15 s abort): the list is kept.
+  sandbox.__fetchImpl = (url) => Promise.resolve(url === "https://gw.example/v1/models"
+    ? new Response(JSON.stringify(gwList), { status: 200 })
+    : { status: 200, ok: true, headers: new Headers(), text: () => Promise.reject(Object.assign(new Error("aborted"), { name: "AbortError" })) });
+  r = await h["cdb-cm:models-list"](okSenderEv, "gw").catch((e) => ({ threw: e.message }));
+  ok(r.ok === true && r.models.length === 8 && !("hidden" in r), "a /v1/model/info body that fails to arrive leaves the list as it was: " + JSON.stringify(r).slice(0, 200));
+  // A redirect off the host: the key is not carried along, the list is kept.
+  // The stub follows the redirect itself, as fetch does, unless the request
+  // asks for redirect: "manual".
+  sandbox.__fetchCalls.length = 0;
+  sandbox.__fetchImpl = (url, init) => {
+    if (url === "https://gw.example/v1/models") return Promise.resolve(new Response(JSON.stringify(gwList), { status: 200 }));
+    if (url !== "https://gw.example/v1/model/info") return Promise.resolve(new Response("nope", { status: 404 }));
+    if (init && init.redirect === "manual") return Promise.resolve(new Response("", { status: 302, headers: { location: "https://elsewhere.example/v1/model/info" } }));
+    sandbox.__fetchCalls.push({ url: "https://elsewhere.example/v1/model/info", init });
+    return Promise.resolve(new Response(JSON.stringify(gwInfo), { status: 200 }));
+  };
+  r = await h["cdb-cm:models-list"](okSenderEv, "gw").catch((e) => ({ threw: e.message }));
+  ok(r.ok === true && r.models.length === 8 && !("hidden" in r) && !sandbox.__fetchCalls.some((c) => c.url.indexOf("elsewhere.example") !== -1),
+     "a /v1/model/info redirect to another host is not followed: " + sandbox.__fetchCalls.map((c) => c.url).join(" "));
+  // Every model's context already listed (OpenRouter): no /v1/model/info.
+  sandbox.__fetchCalls.length = 0;
+  sandbox.__fetchImpl = (url) => Promise.resolve(url === "https://gw.example/v1/models"
+    ? new Response(JSON.stringify({ data: [{ id: "a", context_length: 200000 }, { id: "b", context_length: 1000000 }] }), { status: 200 })
+    : new Response(JSON.stringify(gwInfo), { status: 200 }));
+  r = await h["cdb-cm:models-list"](okSenderEv, "gw");
+  ok(r.ok === true && r.models.length === 2 && sandbox.__fetchCalls.length === 1 && !("infoSource" in r),
+     "a list that states every model's context is not completed from /v1/model/info: " + sandbox.__fetchCalls.map((c) => c.url).join(" "));
+  r = await h["cdb-cm:provider-delete"](okSenderEv, "gw");
+  ok(r.ok === true, "the gateway provider is removed again");
+  // Anthropic's own API serves no /v1/model/info: not asked.
+  r = await h["cdb-cm:provider-set"](okSenderEv, { id: "antinfo", baseUrl: "https://api.anthropic.com", apiKey: "sk-ant-api-1234567890" });
+  ok(r.ok === true, "an Anthropic API provider is saved: " + JSON.stringify(r).slice(0, 200));
+  sandbox.__fetchCalls.length = 0;
+  sandbox.__fetchImpl = (url) => Promise.resolve(url.indexOf("/v1/models") !== -1
+    ? new Response(JSON.stringify({ data: [{ id: "claude-x", display_name: "X" }] }), { status: 200 })
+    : new Response(JSON.stringify(gwInfo), { status: 200 }));
+  r = await h["cdb-cm:models-list"](okSenderEv, "antinfo");
+  ok(r.ok === true && r.models.length === 1 && !sandbox.__fetchCalls.some((c) => c.url.indexOf("/v1/model/info") !== -1),
+     "Anthropic's API is not asked for /v1/model/info: " + sandbox.__fetchCalls.map((c) => c.url).join(" "));
+  r = await h["cdb-cm:provider-delete"](okSenderEv, "antinfo");
+  ok(r.ok === true, "the Anthropic API provider is removed again");
   sandbox.__fetchImpl = () => Promise.resolve(new Response(JSON.stringify({ id: "msg" }), { status: 200 }));
 
   // The connectivity test: a minimal request to the first model with the stored key.
@@ -1568,6 +1662,52 @@ async function settle() { await new Promise((r) => setTimeout(r, 10)); }
   ok(cfg.webSearch === "" && diag.some((l) => /webSearch names deepseek-chat, which more than one provider lists - name one of claude-deepseek-deepseek-chat, claude-or-deepseek-chat - web search stays on Anthropic/.test(l)),
      "a hand-written reference to a shared name is not guessed: the log names the two to choose from");
   rmSync(dir, { recursive: true, force: true });
+}
+
+// --- Windows: a profile path with a space goes through its 8.3 short form ---
+// The Windows build (scripts/windows/build-windows.sh) runs this module with
+// userData under C:\Users\<name>, which often has a space BUN_OPTIONS cannot
+// carry. The short-name lookup is cmd's job; it is stubbed here.
+{
+  const dir = mkdtempSync(join(tmpdir(), "cdb cm win-"));
+  writeFileSync(join(dir, "claude-desktop-extra.jsonc"), PROVIDERS);
+  switchOn(dir);
+  const calls = [];
+  let answer = "/short/CDBCMW~1\r\n";
+  const cp = { execFileSync: (file, args, o) => { calls.push({ file, args, o }); return answer; } };
+  const { api, diag } = load(dir, { ComSpec: "C:\\Windows\\system32\\cmd.exe" }, { platform: "win32", modules: { child_process: cp } });
+  const env = api.cliEnv();
+  ok(env.BUN_OPTIONS === "--preload=/short/CDBCMW~1/custom-models/preload.js",
+     "win32: the preload is passed through the short profile path: " + env.BUN_OPTIONS);
+  ok(calls.length === 1 && calls[0].file === "C:\\Windows\\system32\\cmd.exe" &&
+     calls[0].args.join(" ") === '/d /c for %I in ("' + dir + '") do @echo %~sI' &&
+     calls[0].o.windowsVerbatimArguments === true && calls[0].o.windowsHide === true,
+     "win32: only the profile directory is shortened, by cmd, quoted verbatim and hidden");
+  ok(env.CDB_CUSTOM_MODELS_ROUTES === join(dir, "custom-models", "routes.json"),
+     "win32: the other paths travel in their own variables, spaces and all");
+  api.cliEnv();
+  ok(calls.length === 1, "win32: the short form is looked up once per profile");
+  const spawnOpts = { env: Object.assign({ PATH: "x" }, env) };
+  api.remoteSpawn(spawnOpts);
+  ok(!("BUN_OPTIONS" in spawnOpts.env) && !("CDB_CUSTOM_MODELS_JSON" in spawnOpts.env),
+     "win32: an SSH/WSL session still loses the short-form preload");
+  // A volume without 8.3 names: cmd echoes the long path back.
+  answer = dir + "\r\n";
+  const r2 = load(dir, {}, { platform: "win32", modules: { child_process: cp } });
+  ok(JSON.stringify(r2.api.cliEnv()) === "{}" && r2.diag.some((l) => /8\.3 short name/.test(l)),
+     "win32 without short names: the session is left alone, and the log says why");
+  // Characters cmd would expand are never handed to it.
+  const calls0 = calls.length;
+  const pct = mkdtempSync(join(tmpdir(), "cdb cm %x%-"));
+  writeFileSync(join(pct, "claude-desktop-extra.jsonc"), PROVIDERS);
+  switchOn(pct);
+  const r3 = load(pct, {}, { platform: "win32", modules: { child_process: cp } });
+  ok(JSON.stringify(r3.api.cliEnv()) === "{}" && calls.length === calls0, "win32: a path with % is not passed to cmd");
+  // Linux keeps refusing a path with a space, without asking anyone.
+  const r4 = load(dir, {}, { modules: { child_process: cp } });
+  ok(JSON.stringify(r4.api.cliEnv()) === "{}" && calls.length === calls0, "linux: a path with a space is still refused, no lookup");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(pct, { recursive: true, force: true });
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -4,11 +4,11 @@
 
 This project repackages Anthropic's **official Claude Desktop Linux `.deb`** for the distros Anthropic does not ship (Arch via our own pacman repo, Fedora/RHEL via RPM, NixOS, AppImage, plus our own Debian/Ubuntu `.deb`). It applies JavaScript patches to the official build's `app.asar` to add Linux-only value-adds (Computer Use, custom themes, multi-profile, Quick Entry) and Linux fixes.
 
-The official `.deb` (apt repo `https://downloads.claude.ai/claude-desktop/apt`) bundles its own **Electron** (44.4.3 as of v2.7032.0; authoritative source: the deb tree's `usr/lib/claude-desktop/version` file) and a **native Cowork VM backend**. We download it, verify GPG + SHA256, extract it, patch its `app.asar`, and repackage. We do not pin Electron or rebuild node-pty (both ship pre-built in the `.deb`).
+The official `.deb` (apt repo `https://downloads.claude.ai/claude-desktop/apt`) bundles its own **Electron** (44.9.0 as of v3.1623.0; authoritative source: the deb tree's `usr/lib/claude-desktop/version` file) and a **native Cowork VM backend**. We download it, verify GPG + SHA256, extract it, patch its `app.asar`, and repackage. We do not pin Electron or rebuild node-pty (both ship pre-built in the `.deb`).
 
 **Layout invariant (2026-07-13):** every package ships the `.deb`'s `usr/lib/claude-desktop/` tree **verbatim** (binary renamed `claude-desktop` -> `claude`; patched `resources/app.asar` exe-adjacent; our CU bridges added to `resources/`). Electron auto-loads the adjacent asar - the official build's `OnlyLoadAppFromAsar` + `EnableEmbeddedAsarIntegrityValidation` fuses are on (integrity is not enforced on Linux, which is why a patched asar boots). The launcher passes NO asar on the command line, so `process.resourcesPath` and `app.isPackaged` behave exactly as on the stock Anthropic `.deb`. Never add a patch that redirects resource paths; put bundled files at their upstream `resources/` position instead. On NixOS the nixpkgs Electron dist is merged with our `resources/` into one directory to preserve the same adjacency.
 
-- **Target platform:** Linux only (X11, Wayland, XWayland). No macOS/Windows code.
+- **Target platform:** Linux (X11, Wayland, XWayland). One exception: the experimental Windows 11 build ([docs/windows.md](docs/windows.md)) - `scripts/windows/build-windows.sh` patches Anthropic's official Windows package with `scripts/apply_patches.py --windows` (the shared patches in its `WINDOWS_PATCH_SET` plus `patches/windows/`). Shared JS that runs there gates on `linux`/`win32` explicitly; everything else stays Linux-only. No macOS code.
 - **Architectures:** x86_64 (primary) and aarch64.
 - **glibc floor:** 2.34 (RHEL 9 / Ubuntu 22.04). Debian 11 is not supported. If upstream's `claude-native-binding.node` asks for a glibc above 2.34 through weak symbols only (v2.19675.1 did, for GLIBC_2.39; v2.26454.0 tops out at 2.34), `scripts/fix-native-glibc-floor.py` marks those version-needs weak at build time; a strong symbol above the floor fails the build, and CI asserts the result.
 - **Native binaries we ship** (the four Computer Use bridges) build for x86_64 AND aarch64, each with a stated glibc floor or as static musl; CI verifies with `objdump -T | grep GLIBC_`. A new native binary picks the floor of its minimum viable distro.
@@ -26,6 +26,7 @@ The full distro, session-type, input/screenshot backend and per-bridge glibc tab
 ./scripts/build-local.sh --deb /path/to/claude-desktop_amd64.deb
 ./scripts/build-ubuntu-local.sh               # Ubuntu/Debian
 ./scripts/build-fedora-local.sh               # Fedora/RHEL
+scripts/windows/build-windows.sh              # Windows 11 portable zip (docs/windows.md)
 # local builds skip the Electron smoke test; opt in with --smoke-test (or SKIP_SMOKE_TEST=0). CI always runs it.
 
 cd patches && make -j"$(nproc)" && cd ..      # compile all Nim patches
@@ -40,7 +41,7 @@ Where each check runs:
 - **Commit:** `.githooks/pre-commit` runs `nph --check`, `nim check` and `shellcheck -S error` on staged files.
 - **Task end** (any change under `patches/` or `js/`, budget under 90 s): `make`, the absorption probe against a fresh extract, and the feature tests for the touched category.
 - **Build** (local + CI): `scripts/build-patched-tarball.sh` runs the probe, the orchestrator, and `node --check` per chunk.
-- **CI:** all of the above plus the full harness suite, sibling-noop check, jsonc template sync, `desktop-file-validate`, and the smoke test.
+- **CI:** all of the above plus the full harness suite, sibling-noop check, jsonc template sync, `desktop-file-validate`, and the smoke test. After a release, `verify-install-channels` runs the README install commands (apt, dnf, pacman, AUR, nix) in fresh containers via `scripts/verify-install-channel.sh`; changing an install command in the README changes what CI tests.
 
 ## Adding a feature
 
@@ -200,13 +201,14 @@ Runtime logs are in `~/.config/Claude/logs/`. When 3P mode is active (an `infere
 
 ```
 patches/           # Nim patch sources (.nim) + Makefile, compiled to native binaries (ls patches/*/*.nim)
-patches/linux/     #   Linux compatibility - always on, not user-configurable (32)
-patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (16)
+patches/linux/     #   Linux compatibility - always on, not user-configurable (37)
+patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (17)
 patches/core/      #   Always-on infrastructure: Extra settings pages, theme engine, GrowthBook overrides, multi-profile (7)
+patches/windows/   #   Windows build only, applied by `apply_patches.py --windows` after the shared set; pinned by EXPECTED_WINDOWS_PATCH_COUNT (1)
 js/                # Shared JS snippets embedded by Nim patches via staticRead ("../../js/..." from a patch)
 scripts/           # Build, validation, and launcher scripts
 scripts/tests/     # Feature test harnesses, grouped like patches/ (run: scripts/run-feature-tests.sh)
-packaging/         # Per-format packaging: apt, debian, rpm, appimage, nix, pacman, arch (PKGBUILD.template + .install)
+packaging/         # Per-format packaging: apt, debian, rpm, appimage, nix, pacman, arch (PKGBUILD.template + .install), windows (Install.cmd)
 docs/              # Per-feature deep-dives, the patch catalog (patches.md), troubleshooting.md, command-line.md
 baseline/          # Version-sensitive reference docs re-validated each release
 .claude/skills/    # Optional Claude Code skills for this repo (/update, /debug, /linux, ...)
@@ -229,4 +231,26 @@ vboxmanage startvm "Fedora43-KDE"
 # SSH: ssh -p 2223 localhost
 # Shared folder: /tmp/fedora-test -> auto-mounted in guest
 # Install RPM: sudo dnf install /media/sf_shared/claude-desktop-extra-*.x86_64.rpm
+
+# Bazzite live VM (KDE Plasma 6.7.5 Wayland, boots the live ISO straight into Plasma, no install)
+vboxmanage startvm "Bazzite-live" --type gui      # ISO: ~/Downloads/bazzite-stable-live-amd64.iso, 8 GB RAM, EFI
+# Credentials: liveuser / live - the live session forgets EVERYTHING on reboot (password, sshd, /tmp, layout),
+# so after each boot open Konsole via keyboard (Alt+F4 closes the welcome window, Alt+F2, type konsole, Enter) and type:
+#   echo liveuser:live | sudo chpasswd; echo 'liveuser ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/liveuser; sudo systemctl start sshd
+# The sudoers line is load-bearing: Bazzite's login MOTD runs sudo, and once liveuser has a password every
+# new graphical session blocks on that prompt (black screen). Relogin without reboot (e.g. for a new keyboard
+# layout): kill the old session FIRST, or its KWin keeps the DRM output and the new session's screen stays frozen:
+#   pkill -x kwin_wayland; pkill -x plasmashell; sleep 2; sudo systemctl restart plasmalogin   (autologin returns in ~50 s)
+# Never take a live VirtualBox snapshot of this VM: an aborted one left the console frozen.
+# SSH: sshpass -p live ssh -p 2224 liveuser@localhost
+# Keyboard layout: kwriteconfig6 --file kxkbrc --group Layout --key Use true; ... --key LayoutList de, then relogin
+# (KWin ignores the reloadConfig signal here; a new session reads kxkbrc at start).
+# /tmp is a 3.9 GB tmpfs, home has 1.5 GB: put AppImages and extracted trees under /tmp.
+# The screen auto-locks and a locked screen means the app never gets focus, so it never registers the hotkey:
+#   kwriteconfig6 --file kscreenlockerrc --group Daemon --key Autolock false; echo live | sudo -S loginctl unlock-sessions
+# Launch GUI apps with plasmashell's environment (see the Fedora VM notes in the /test-native skill), never a hand-picked env.
+# Claude for testing: copy a build tree (an extracted AppImage, or the release AppImage itself) to /tmp over scp,
+# then run it from a Konsole inside the session (Konsole has the session env). An EXTRACTED tree must be started as
+# `APPIMAGE=/tmp/<tree>/AppRun /tmp/<tree>/AppRun`: without APPIMAGE the launcher skips the .desktop integration, and
+# xdg-desktop-portal 1.22 then refuses GlobalShortcuts sessions ("An app id is required") - no KDE dialog, no hotkey.
 ```

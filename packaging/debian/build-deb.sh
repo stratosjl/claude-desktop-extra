@@ -83,6 +83,15 @@ VERSION=$(basename "$TARBALL_PATH" | sed -E 's/claude-desktop-([0-9]+\.[0-9]+\.[
 DEB_VERSION="${VERSION}-${PKGREL}"
 log_info "Building Debian package for version: $DEB_VERSION (arch: $DEB_ARCH)"
 
+# Release tag for the stamp below: v<version>, or v<version>-<pkgrel> for a
+# re-release (the tag scheme of our GitHub releases).
+if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $PKGREL =~ ^[1-9][0-9]*$ ]]; then
+    log_error "version '$VERSION' / pkgrel '$PKGREL' not in X.Y.Z / N form (tarball name: $(basename "$TARBALL_PATH"))"
+    exit 1
+fi
+RELEASE_TAG="v${VERSION}"
+[ "$PKGREL" = 1 ] || RELEASE_TAG="v${VERSION}-${PKGREL}"
+
 # Create work directory
 WORK_DIR=$(mktemp -d)
 DEB_ROOT="$WORK_DIR/claude-desktop-extra_${DEB_VERSION}_${DEB_ARCH}"
@@ -118,6 +127,14 @@ if [ -f "$DEB_ROOT/usr/lib/claude-desktop/chrome-sandbox" ]; then
     chmod 4755 "$DEB_ROOT/usr/lib/claude-desktop/chrome-sandbox"
     log_info "Set SUID permission on chrome-sandbox"
 fi
+
+# Release stamp for the in-app update check: the release tag and the package
+# format, which picks the README install section the "Update available" button
+# opens. Exe-adjacent resources/, next to app.asar (process.resourcesPath).
+printf '{"tag":"%s","format":"deb"}\n' "$RELEASE_TAG" \
+    > "$DEB_ROOT/usr/lib/claude-desktop/resources/cdb-release.json"
+chmod 0644 "$DEB_ROOT/usr/lib/claude-desktop/resources/cdb-release.json"
+log_info "Wrote release stamp: $RELEASE_TAG (deb)"
 
 # Install launcher (full launcher from tarball with Wayland/X11 detection,
 # GPU fallback, SingletonLock cleanup, and logging)
@@ -224,6 +241,8 @@ INSTALLED_SIZE=$(du -sk "$DEB_ROOT" | cut -f1)
 # - bubblewrap + socat: the Claude Code shell sandbox (organization sandbox
 #   policy) needs both on Linux; socat also speeds up the Quick Entry toggle.
 #   Recommends, as upstream declares them.
+# - openssh-client: Claude Code SSH sessions can use the system ssh client
+#   (the built-in SSH engine is used without it). Recommends, as upstream.
 log_info "Creating control file..."
 cat > "$DEB_ROOT/DEBIAN/control" << EOF
 Package: claude-desktop-extra
@@ -233,7 +252,7 @@ Priority: optional
 Architecture: ${DEB_ARCH}
 Installed-Size: ${INSTALLED_SIZE}
 Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
-Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, libsecret-tools, bubblewrap, socat, ${COWORK_RECOMMENDS}
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, libsecret-tools, bubblewrap, socat, openssh-client, ${COWORK_RECOMMENDS}
 Suggests: imagemagick, ydotool (>= 1.0), kde-spectacle, nodejs, bluez, gjs
 Conflicts: claude-desktop
 Replaces: claude-desktop, claude-desktop-bin (<< ${DEB_VERSION})

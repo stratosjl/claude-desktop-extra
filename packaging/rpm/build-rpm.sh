@@ -68,6 +68,13 @@ VERSION=$(basename "$TARBALL_PATH" | sed -E 's/claude-desktop-([0-9]+\.[0-9]+\.[
 TARBALL_NAME=$(basename "$TARBALL_PATH")
 log_info "Building RPM package for version: $VERSION (arch: $RPM_ARCH)"
 
+# The spec writes the release stamp resources/cdb-release.json from these two
+# (and checks them again); fail before rpmbuild on a malformed tarball name.
+if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $PKGREL =~ ^[1-9][0-9]*$ ]]; then
+    log_error "version '$VERSION' / pkgrel '$PKGREL' not in X.Y.Z / N form (tarball name: $TARBALL_NAME)"
+    exit 1
+fi
+
 # Create rpmbuild directory structure
 WORK_DIR=$(mktemp -d)
 RPM_BUILD="$WORK_DIR/rpmbuild"

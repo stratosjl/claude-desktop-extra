@@ -4,6 +4,15 @@
 build observed 2026-08-24 (chunks `c360a9e1c-*` tiles renderer, `c03935b01-*` side-pane
 store, `c4db265df-*` pane frame).
 
+**Re-measured live 2026-10-21** (desktop 3.1623.0, 1P claude.ai, Code tab with the Diff panel open, DevTools
+console): `[data-pane-root]` 1 with tileId `diff`, `.tiles-shell` 2 (`absolute` with 0 roots, `static` with 1),
+`.cdb-tabs-bar` present, `state().tabs == ["diff"]`, `.epitaxy-pane-close-control` 1, `button.epitaxy-panel-subheader` 2,
+and `[cdb-dv] installed: close-control-row` logged. `.epitaxy-view-panel`, `.epitaxy-side-pane`, `.epitaxy-pane-window`,
+`[data-pane-overlay]` and `.tiles-overlay-shell` are all 0: `.epitaxy-view-panel` left the SPA in early September and is
+not needed (the fiber `tileId` walk and `data-pane-root` carry both features). The `[cdb-tabs] anchor-rot` line that fires
+about 1 s after page injection is the first 500 ms sweep running before React mounts the pane; it is not a failure
+signal on its own - the probe above is.
+
 **None of these anchors ship in the desktop `app.asar`.** Every one of them is remote
 claude.ai code: `data-pane-root`, `epitaxy-view-panel`, `tiles-shell`, `tiles-handle`,
 `epitaxy-pane-close-control`, `sidePaneStore`, `tileLayoutBySession`, `expandedTile` and

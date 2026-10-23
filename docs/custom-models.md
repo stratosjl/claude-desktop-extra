@@ -112,7 +112,7 @@ The CLI reads a model's context window from its id: an id it does not know gets 
 | `"200k"` | `claude-<id>` | one entry |
 | `"both"` | both ids | `<name>` and `<name> 1M` |
 
-**Fetch models** sets the window of each model from the provider's list when it gives one (OpenRouter does). Set `"200k"` on a model with a smaller window, such as Haiku or most local models: past its real window the provider refuses the request instead of the session compacting.
+**Fetch models** sets the window of each model from the provider's list when it gives one (OpenRouter does). For a provider on the **Anthropic-compatible gateway** preset, or on no preset, whose list does not give it, Fetch models also asks the host's `/v1/model/info`, which a LiteLLM proxy and gateways built on one serve: `max_input_tokens` sets the window, `supports_vision` or `supports_reasoning` set to false turn the model's vision or thinking off, and a model whose `mode` is not `chat` or `responses` (an embedding, speech or transcription model) is left out of the checklist, with a note naming it. A field it does not state keeps the default, and a host without that endpoint changes nothing. Set `"200k"` on a model with a smaller window, such as Haiku or most local models: past its real window the provider refuses the request instead of the session compacting.
 
 ### Web search and WebFetch
 
@@ -141,6 +141,7 @@ Some differences between providers and Anthropic are handled locally:
 - When the account has server-side threads on, the CLI may send only the end of a conversation. Such a request is refused locally with the error that makes the CLI resend the whole turn.
 - A provider's 401 or 403 reaches the CLI as a 400 with the provider's message, so the CLI does not try to renew its own login.
 - `count_tokens` is estimated locally, since compatible APIs do not serve it.
+- A stream that sends a reasoning model's thinking as `thinking_delta` inside a block opened as `text` (GLM 5.3 on TensorX, a LiteLLM-based gateway, does) is re-blocked: each run of thinking or text gets its own block of that kind. Claude Code refuses the mixed stream ("Stream event unreadable") and resends the whole turn without streaming, so without this the turn is paid twice and its reasoning is lost from the stream. A stream without the mix is passed on byte for byte.
 - Regex spellings in tool schemas that some validators refuse (`\0`, `[\b]`, `[^]`) are rewritten to equivalent forms. DeepSeek refused every request carrying Claude Code's `Artifact` tool otherwise.
 
 What identifies the client can be set per provider, in its form or in the file:
@@ -191,7 +192,7 @@ SSH and WSL sessions start without any of this, since their CLI runs on another 
 
 ### Logs
 
-- `logs/custom-models.log`: one line per routed request (`-> deepseek/deepseek-flash`) and the usage the provider reported for it, cache reads included. Never the key.
+- `logs/custom-models.log`: one line per routed request (`-> deepseek/deepseek-flash`) and the usage the provider reported for it, cache reads included. Never the key. A provider whose stream counts nothing in `message_start` gets its line from the final `message_delta` instead, marked `(end of stream, no cache figures sent)` when that event has no cache fields, and a re-blocked stream adds a `stream: thinking and text mixed in one block` line.
 - `logs/claude-patches.log`: what was added to the picker (`[custom-models] bootstrap enriched: …`) and configuration warnings.
 
 `CDB_CUSTOM_MODELS_DEBUG=1` in the app's environment also logs the requests left to Anthropic. The assumptions about claude.ai and the CLI that no build can check are listed in [`baseline/CUSTOM_MODELS_ANCHORS.md`](../baseline/CUSTOM_MODELS_ANCHORS.md), with the log line that shows which one broke.

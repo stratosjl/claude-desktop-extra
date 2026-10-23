@@ -16,15 +16,15 @@
 #      the picker from it and reports the ids back to the app), and owns the
 #      Settings switch IPC.
 #   B. Splice `cliEnv(<base env>)` into the Code session manager's
-#      `buildSessionEnv(scope, baseConfig, ...)`, which copies the base env
-#      (`let u={...n.sessionEnv}`) at every Code session spawn - the main
+#      `buildSessionEnv(scope, baseConfig, ...)`, which derives the session env
+#      (`let u=await h(n.sessionEnv)`) at every Code session spawn - the main
 #      session and its forks, SSH included (sub-patch D takes it back out
 #      there). Not the base env builder itself: upstream memoises that for
 #      30 s (BASE_CONFIG_TTL_MS), which made the switch reach new sessions
 #      late, and its temporary config-loading queries run no model. The base
 #      env is passed in, so cliEnv() builds on what upstream would send - the
 #      user's Code-tab environment variables included. Anchored on the method
-#      name, which the minifier keeps, and the `.sessionEnv` spread of its
+#      name, which the minifier keeps, and the `.sessionEnv` argument of its
 #      second parameter. When the feature is off cliEnv() contributes {} and
 #      the session is exactly upstream's; when on it adds BUN_OPTIONS=
 #      --preload=<userData>/custom-models/preload.js (the Claude Code binary is
@@ -59,7 +59,7 @@
 # Break risk: VERY LOW for A (stable "use strict"; anchor). LOW for B - a
 # method name and a property name with an exact-count check; if upstream
 # reshapes that method the build fails loud here. To find it again:
-# rg -o 'buildSessionEnv\(.{0,80}' across index*.js.
+# grep -ao "buildSessionEnv([^)]*){.\{0,60\}" across index*.js.
 # LOW for C - two literal anchors plus the two shape asserts, each expected
 # exactly once across the concatenated bundle; to find them again:
 # rg 'subtype:"initialize"', rg 'this.transport=', rg 'updateEnv('.
@@ -73,47 +73,62 @@ const PRELOAD_JS = staticRead("../../js/custom_models_preload.js")
 
 const MARKER = "__CDB_CUSTOM_MODELS__"
 const PLACEHOLDER = "\"__CDB_CM_PRELOAD_SRC__\""
-# B. `async buildSessionEnv(e,n,...){let u={...n.sessionEnv}`: the method
-# name survives minification, the parameter and local names do not. The
-# spread must be of the method's own second parameter. Trailing parameters
-# may carry a default (`u=!1` since v2.26454.0).
+# B. `async buildSessionEnv(e,n,...){let d=await t.cy(n.sessionEnv)` (since
+# v2.37337.1; before it was a plain `{...n.sessionEnv}` copy): the session env
+# goes through upstream's managed-network-env helper (`cy`, `Zy` in v3.1623.0 -> fills managed
+# proxy/CA variables the env lacks, then enforces managed proxy settings). We
+# hand that helper `{...n.sessionEnv,...cliEnv(n.sessionEnv)}` instead, so
+# managed policy still has the last word; cliEnv() sets no network variables.
+# The method name survives minification, the parameter, local and helper names
+# do not. The argument must be the method's own second parameter. Trailing
+# parameters may carry a default (`u=!1` since v2.26454.0).
 proc envSplice(base: string): string =
-  ",...((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.cliEnv(" & base & ".sessionEnv))||{})}"
+  "{..." & base &
+    ".sessionEnv,...((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.cliEnv(" &
+    base & ".sessionEnv))||{})}"
+
 let envSiteRe =
-  re2"""(async buildSessionEnv\([\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let [\w$]+=\{\.\.\.([\w$]+)\.sessionEnv)\}"""
+  re2"""(async buildSessionEnv\([\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let [\w$]+=await [\w$]+(?:\.[\w$]+)?\()([\w$]+)\.sessionEnv\)"""
 # Our injected end-state, asserted positively (Rule 6): the splice, made with
-# that same parameter.
+# that same parameter, as the helper's argument.
 let envEndStateRe =
-  re2"""async buildSessionEnv\([\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let [\w$]+=\{\.\.\.([\w$]+)\.sessionEnv,\.\.\.\(\(globalThis\.__cdbCustomModels&&globalThis\.__cdbCustomModels\.cliEnv\(([\w$]+)\.sessionEnv\)\)\|\|\{\}\)\}"""
+  re2"""async buildSessionEnv\([\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let [\w$]+=await [\w$]+(?:\.[\w$]+)?\(\{\.\.\.([\w$]+)\.sessionEnv,\.\.\.\(\(globalThis\.__cdbCustomModels&&globalThis\.__cdbCustomModels\.cliEnv\(([\w$]+)\.sessionEnv\)\)\|\|\{\}\)\}\)"""
 
 proc envEndStateCount(s: string): int =
   for m in s.findAll(envEndStateRe):
     let p = s[m.group(0)]
-    if s[m.group(1)] == p and s[m.group(2)] == p: inc result
+    if s[m.group(1)] == p and s[m.group(2)] == p:
+      inc result
 
 # C. The two initialize-request fields, as the minifier spells them, each
 # routed with the query's transport (see the header).
 const INIT_SITES = [
-  ("appendSystemPrompt:this.initConfig?.appendSystemPrompt",
-   "appendSystemPrompt:((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.appendSystemPrompt)||function(x){return x})(this.initConfig?.appendSystemPrompt,this.transport)"),
-  ("agents:this.initConfig?.agents",
-   "agents:((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.agents)||function(x){return x})(this.initConfig?.agents,this.transport)")
+  (
+    "appendSystemPrompt:this.initConfig?.appendSystemPrompt",
+    "appendSystemPrompt:((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.appendSystemPrompt)||function(x){return x})(this.initConfig?.appendSystemPrompt,this.transport)",
+  ),
+  (
+    "agents:this.initConfig?.agents",
+    "agents:((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.agents)||function(x){return x})(this.initConfig?.agents,this.transport)",
+  ),
 ]
 # What sessionRouted() reads at run time: the Query's transport field and
 # the transport's options.env. Asserted before C is applied.
 let transportShapeRes = [
   re2"""\{this\.transport=[\w$]+,this\.isSingleUserTurn=""",
-  re2"""updateEnv\([\w$]+\)\{this\.options\.env\?Object\.assign\(this\.options\.env,"""
+  re2"""updateEnv\([\w$]+\)\{this\.options\.env\?Object\.assign\(this\.options\.env,""",
 ]
 
 proc initSitesDone(s: string): int =
   ## How many of the C sites carry our end-state (0, 1 or 2).
   for site in INIT_SITES:
-    if site[1] in s: inc result
+    if site[1] in s:
+      inc result
 
 # D. configureSSHSpawn(options, ...): the method name survives minification,
 # its parameter names do not.
-const REMOTE_CALL = "((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.remoteSpawn)||function(){})"
+const REMOTE_CALL =
+  "((globalThis.__cdbCustomModels&&globalThis.__cdbCustomModels.remoteSpawn)||function(){})"
 let sshSiteRe = re2"""(async configureSSHSpawn\(([\w$]+)(?:,[\w$]+)*\)\{)"""
 let sshEndStateRe =
   re2"""async configureSSHSpawn\(([\w$]+)(?:,[\w$]+)*\)\{\(\(globalThis\.__cdbCustomModels&&globalThis\.__cdbCustomModels\.remoteSpawn\)\|\|function\(\)\{\}\)\(([\w$]+)\);"""
@@ -121,9 +136,10 @@ let sshEndStateRe =
 proc sshEndStateCount(s: string): int =
   ## Our call, made with the method's own first parameter.
   for m in s.findAll(sshEndStateRe):
-    if s[m.group(0)] == s[m.group(1)]: inc result
+    if s[m.group(0)] == s[m.group(1)]:
+      inc result
 
-const EXPECTED_PATCHES = 4  # A, B, C, D
+const EXPECTED_PATCHES = 4 # A, B, C, D
 
 proc escapeJs(s: string): string =
   result = s
@@ -134,7 +150,8 @@ proc escapeJs(s: string): string =
 
 proc buildInjection(): string =
   if PLACEHOLDER notin MAIN_JS:
-    raise newException(ValueError, "custom_models_main.js lost its preload-src placeholder")
+    raise
+      newException(ValueError, "custom_models_main.js lost its preload-src placeholder")
   MAIN_JS.replace(PLACEHOLDER, "\"" & escapeJs(PRELOAD_JS) & "\"")
 
 proc apply*(input: string): string =
@@ -165,7 +182,8 @@ proc apply*(input: string): string =
     echo "  [OK] custom models: CLI env splice already present (idempotent)"
     inc patchesApplied
   elif already > 1:
-    echo "  [FAIL] custom models: env splice present " & $already & " times, expected 1 - re-audit"
+    echo "  [FAIL] custom models: env splice present " & $already &
+      " times, expected 1 - re-audit"
   else:
     var count = 0
     var sameParam = true
@@ -173,11 +191,12 @@ proc apply*(input: string): string =
       envSiteRe,
       proc(m: RegexMatch2, s: string): string =
         inc count
-        if s[m.group(1)] != s[m.group(2)]: sameParam = false
-        s[m.group(0)] & envSplice(s[m.group(2)]),
+        if s[m.group(1)] != s[m.group(2)]:
+          sameParam = false
+        s[m.group(0)] & envSplice(s[m.group(2)]) & ")",
     )
     if count != 1 or not sameParam:
-      echo "  [FAIL] custom models: expected exactly 1 `async buildSessionEnv(_,n,...){let u={...n.sessionEnv}`, found " &
+      echo "  [FAIL] custom models: expected exactly 1 `async buildSessionEnv(_,n,...){let u=await h(n.sessionEnv)`, found " &
         $count & (if sameParam: "" else: " spreading another name") &
         " - the Code session env copy moved; re-audit sub-patch B"
     elif envEndStateCount(result) != 1:
@@ -194,7 +213,8 @@ proc apply*(input: string): string =
   for r in transportShapeRes:
     let n = result.findAll(r).len
     if n != 1:
-      echo "  [FAIL] custom models: the SDK transport shape moved (" & $n & " matches, expected 1) - " &
+      echo "  [FAIL] custom models: the SDK transport shape moved (" & $n &
+        " matches, expected 1) - " &
         "sessionRouted() reads Query.transport.options.env; re-audit sub-patch C"
       shapeOk = false
   let done = initSitesDone(result)
@@ -204,13 +224,15 @@ proc apply*(input: string): string =
     echo "  [OK] custom models: initialize request already routed (idempotent)"
     inc patchesApplied
   elif done > 0:
-    echo "  [FAIL] custom models: " & $done & "/" & $INIT_SITES.len & " initialize sites already patched - re-audit"
+    echo "  [FAIL] custom models: " & $done & "/" & $INIT_SITES.len &
+      " initialize sites already patched - re-audit"
   else:
     var siteOk = true
     for site in INIT_SITES:
       let n = result.count(site[0])
       if n != 1:
-        echo "  [FAIL] custom models: expected exactly 1 initialize site `" & site[0] & "`, found " & $n &
+        echo "  [FAIL] custom models: expected exactly 1 initialize site `" & site[0] &
+          "`, found " & $n &
           " - the session initialize request moved; re-audit sub-patch C"
         siteOk = false
     if siteOk:
@@ -230,7 +252,8 @@ proc apply*(input: string): string =
     echo "  [OK] custom models: remoteSpawn() already called by configureSSHSpawn (idempotent)"
     inc patchesApplied
   elif sshDone > 1:
-    echo "  [FAIL] custom models: remoteSpawn() call present " & $sshDone & " times, expected 1 - re-audit"
+    echo "  [FAIL] custom models: remoteSpawn() call present " & $sshDone &
+      " times, expected 1 - re-audit"
   else:
     var count = 0
     result = result.replace(
@@ -240,8 +263,8 @@ proc apply*(input: string): string =
         s[m.group(0)] & REMOTE_CALL & "(" & s[m.group(1)] & ");",
     )
     if count != 1:
-      echo "  [FAIL] custom models: expected exactly 1 `async configureSSHSpawn(...){`, found " & $count &
-        " - the SSH session setup moved; re-audit sub-patch D"
+      echo "  [FAIL] custom models: expected exactly 1 `async configureSSHSpawn(...){`, found " &
+        $count & " - the SSH session setup moved; re-audit sub-patch D"
     elif sshEndStateCount(result) != 1:
       echo "  [FAIL] custom models: remoteSpawn() call missing after replacement"
     else:
@@ -249,7 +272,8 @@ proc apply*(input: string): string =
       inc patchesApplied
 
   if patchesApplied < EXPECTED_PATCHES:
-    echo "  [FAIL] Only " & $patchesApplied & "/" & $EXPECTED_PATCHES & " patches applied"
+    echo "  [FAIL] Only " & $patchesApplied & "/" & $EXPECTED_PATCHES &
+      " patches applied"
     quit(1)
 
 when isMainModule:
@@ -268,8 +292,8 @@ when isMainModule:
     writeFile(filePath, output)
     echo "  [PASS] custom models applied"
   else:
-    if MARKER notin output or envEndStateCount(output) != 1 or initSitesDone(output) != INIT_SITES.len or
-        sshEndStateCount(output) != 1:
+    if MARKER notin output or envEndStateCount(output) != 1 or
+        initSitesDone(output) != INIT_SITES.len or sshEndStateCount(output) != 1:
       echo "  [FAIL] No changes made and injection is absent"
       quit(1)
     echo "  [OK] Already applied (no changes needed)"

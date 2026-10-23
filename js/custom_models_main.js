@@ -57,7 +57,8 @@
  */
 ;/*__CDB_CUSTOM_MODELS__*/(function () {
   "use strict";
-  if (typeof process === "undefined" || process.platform !== "linux") return;
+  // Linux, and the Windows build (scripts/windows/build-windows.sh).
+  if (typeof process === "undefined" || (process.platform !== "linux" && process.platform !== "win32")) return;
   if (globalThis.__cdbCustomModels) return;
 
   var _electron = require("electron");
@@ -248,7 +249,9 @@
   }
 
   function expandHome(p) {
-    return typeof p === "string" && p.indexOf("~/") === 0 ? _path.join(_os.homedir(), p.slice(2)) : p;
+    // A leading ~\ too on Windows, where that is how a home-relative path is written.
+    var home = typeof p === "string" && (p.indexOf("~/") === 0 || (process.platform === "win32" && p.indexOf("~\\") === 0));
+    return home ? _path.join(_os.homedir(), p.slice(2)) : p;
   }
   function secretsPath() {
     var d = pathFor(SUBDIR);
@@ -1171,6 +1174,35 @@
       return null;
     }
   }
+  // Windows only: the preload path with its profile directory in 8.3 short
+  // form (C:\Users\JOHNSM~1\...\Claude), so it carries no space. Only the
+  // profile directory is shortened: the custom-models\preload.js tail stays
+  // spelled out, which remoteSpawn() recognises. null when the volume does not
+  // generate short names or the path holds a character cmd would expand.
+  var shortPathCache = Object.create(null);
+  function shortPreloadPath(p) {
+    if (process.platform !== "win32") return null;
+    var profileDir = _path.dirname(_path.dirname(p));
+    var tail = p.slice(profileDir.length);
+    if (/\s/.test(tail) || /["%^!&|<>]/.test(profileDir)) return null;
+    if (!(profileDir in shortPathCache)) {
+      var short = null;
+      try {
+        // windowsVerbatimArguments: Node's own quoting (\") means nothing to
+        // cmd. The path is checked above for every character cmd treats
+        // specially inside quotes.
+        var out = require("child_process").execFileSync(process.env.ComSpec || "cmd.exe",
+          ["/d", "/c", "for %I in (\"" + profileDir + "\") do @echo %~sI"],
+          { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true, timeout: 5000 });
+        var line = String(out).split(/\r?\n/)[0].trim();
+        if (line && !/\s/.test(line) && _path.isAbsolute(line)) short = line;
+      } catch (e) { log("short path lookup failed: " + (e && e.message ? e.message : String(e))); }
+      shortPathCache[profileDir] = short;
+      if (short) log("profile path has a space; the preload is loaded through its short form " + short);
+    }
+    return shortPathCache[profileDir] ? shortPathCache[profileDir] + tail : null;
+  }
+
   // The routing payload the preload works from: providers with their keys,
   // models with what the sanitiser needs, the app-wide web-search target.
   function routesPayload(cfg) {
@@ -1230,9 +1262,12 @@
       var preload = ensurePreload();
       if (!preload) return {};
       // BUN_OPTIONS is split on whitespace: a preload path with a space in it
-      // would load nothing, or break the CLI's start. Leave the session alone.
+      // would load nothing, or break the CLI's start. On Windows, where the
+      // user folder often has one (C:\Users\John Smith), try its 8.3 short
+      // form first; otherwise leave the session alone.
+      if (/\s/.test(preload)) preload = shortPreloadPath(preload) || preload;
       if (/\s/.test(preload)) {
-        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry - sessions are not routed");
+        warnOnce("preloadpath", "the profile path " + JSON.stringify(preload) + " contains whitespace, which BUN_OPTIONS cannot carry" + (process.platform === "win32" ? " (and the volume gave no space-free 8.3 short name)" : "") + " - sessions are not routed");
         return {};
       }
       syncRoutes();
@@ -2045,6 +2080,34 @@
     });
     return { models: out, nextAfter: nextAfter };
   }
+  // A LiteLLM proxy (and a gateway built on one, such as TensorX) lists bare
+  // OpenAI rows at /v1/models - {id, object, created, owned_by} - and states
+  // what each model is at GET /v1/model/info: {data:[{model_name, model_info:
+  // {mode, max_input_tokens, supports_vision, supports_reasoning}}]}. Several
+  // rows can share a model_name (one per deployment): the first value stated
+  // for a field wins. Returns name -> {mode, maxInput, vision, reasoning}, or
+  // null when the answer is not that shape.
+  function parseModelInfo(text) {
+    var j;
+    try { j = JSON.parse(text); } catch (e) { return null; }
+    if (!j || !Array.isArray(j.data)) return null;
+    var out = Object.create(null), any = false;
+    j.data.forEach(function (row) {
+      if (!isObj(row) || typeof row.model_name !== "string" || !isObj(row.model_info)) return;
+      var mi = row.model_info;
+      var e = out[row.model_name] || (out[row.model_name] = {});
+      if (e.mode === undefined && typeof mi.mode === "string" && mi.mode) e.mode = mi.mode;
+      if (e.maxInput === undefined && typeof mi.max_input_tokens === "number" && mi.max_input_tokens > 0) e.maxInput = mi.max_input_tokens;
+      if (e.vision === undefined && typeof mi.supports_vision === "boolean") e.vision = mi.supports_vision;
+      if (e.reasoning === undefined && typeof mi.supports_reasoning === "boolean") e.reasoning = mi.supports_reasoning;
+      any = true;
+    });
+    return any ? out : null;
+  }
+  // The modes a Code session can run on. Anything else the gateway states
+  // (embedding, audio_transcription, audio_speech, image_generation, rerank,
+  // moderation...) would fail on the first turn, so it is not offered.
+  var SESSION_MODES = { chat: true, responses: true };
   _ipc.handle("cdb-cm:models-list", function (ev, providerId) {
     if (!okSender(ev)) return { ok: false, error: "rejected: unrecognized sender" };
     providerId = cleanString(providerId, 40);
@@ -2116,8 +2179,45 @@
         // Duplicates across pages (a gateway's alias rows) are dropped.
         var seenId = Object.create(null);
         var models = r.models.filter(function (m) { if (seenId[m.id]) return false; seenId[m.id] = true; return true; });
-        return { ok: true, source: url, models: models, partial: r.fail || null };
+        return withModelInfo(models).then(function (x) {
+          var out = { ok: true, source: url, models: x.models, partial: r.fail || null };
+          if (x.source) { out.infoSource = x.source; out.hidden = x.hidden; }
+          return out;
+        });
       });
+    }
+    // What the listing did not say, the gateway's /v1/model/info may: one GET
+    // on the same host, after the list. It only fills in - a context the
+    // listing stated is kept - and it only turns vision or thinking off when
+    // the gateway says false; an absent field keeps the app's default. Any
+    // failure leaves the list as it was. Asked only of the gateway preset and
+    // of a provider with no preset: the named presets are vendors' own APIs,
+    // which serve no such endpoint. Skipped too when the listing already
+    // stated every model's context (OpenRouter).
+    function withModelInfo(models) {
+      var asIs = { models: models };
+      if (p.native || (p.preset && p.preset !== "gateway") || !origin ||
+          models.every(function (m) { return !!m.context; })) return Promise.resolve(asIs);
+      var infoUrl = origin + "/v1/model/info";
+      return getJson(infoUrl, base).then(function (r) {
+        var info = r.ok ? parseModelInfo(r.text) : null;
+        if (!info) return asIs;
+        var hidden = [];
+        var kept = models.filter(function (m) {
+          var e = info[m.id];
+          if (e && e.mode && !SESSION_MODES[e.mode]) { hidden.push({ id: m.id, mode: e.mode }); return false; }
+          return true;
+        }).map(function (m) {
+          var e = info[m.id];
+          if (!e) return m;
+          var c = Object.assign({}, m);
+          if (!c.context && e.maxInput !== undefined) c.context = e.maxInput >= 1000000 ? "1m" : "200k";
+          if (e.vision === false) c.vision = false;
+          if (e.reasoning === false) c.thinking = false;
+          return c;
+        });
+        return { models: kept, source: infoUrl, hidden: hidden };
+      }).catch(function () { return asIs; }); // e.g. the body cut off by the 15 s abort
     }
     return tryNext(0, 0);
   });

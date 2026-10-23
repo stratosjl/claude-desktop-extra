@@ -62,8 +62,10 @@ export function buildInjectedModule() {
  * how the engine sees themes and an activeTheme. `files` ({ "<relative path>": text })
  * seeds further files under userData first - claude-desktop-extra.json, themes.d/*.json
  * - so the loader's precedence and the themes.d/ reader can be exercised from boot.
+ * `transform` (src -> src) rewrites the built module before it is loaded; a suite uses it
+ * to run a control against an older variant of the engine (it must return changed text).
  */
-export function installEngine({ config, files } = {}) {
+export function installEngine({ config, files, transform } = {}) {
   const require2 = createRequire(import.meta.url);
   const fs = require2("fs"), os = require2("os"), path = require2("path");
   const Module = require2("module");
@@ -89,7 +91,14 @@ export function installEngine({ config, files } = {}) {
   const diag = [];
   globalThis.__cdbDiag = (m) => diag.push(m);
   try {
-    require2(buildInjectedModule());
+    const mod = buildInjectedModule();
+    if (transform) {
+      const src = readFileSync(mod, "utf8");
+      const out = transform(src);
+      if (out === src) throw new Error("installEngine transform left the engine unchanged");
+      writeFileSync(mod, out);
+    }
+    require2(mod);
   } finally {
     Module._load = orig;
   }

@@ -212,6 +212,16 @@
       return ipcRenderer.invoke("cdb-mb:pref-set", enabled === true);
     },
 
+    // Developer tools (upstream's developer_settings.json opt-in). BOTH channels
+    // are owned by patches/community/add_feature_dev_tools_toggle.nim, not by
+    // the settings patch - the same cross-patch arrangement as above.
+    devToolsRead: function () {
+      return ipcRenderer.invoke("cdb-dt:pref-read");
+    },
+    devToolsSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-dt:pref-set", enabled === true);
+    },
+
     // Load large sessions in full (transcript load limits). BOTH channels are
     // owned by patches/community/add_feature_transcript_limits.nim, not by the
     // settings patch - the same cross-patch arrangement as quickOpenRead/Set.

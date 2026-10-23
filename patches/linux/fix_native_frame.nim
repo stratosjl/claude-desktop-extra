@@ -11,12 +11,13 @@
 # Two patches together do the job:
 #   1. Open the main BrowserWindow with frame:false + a real titleBarOverlay
 #      style object on Linux (plus hasShadow + autoHideMenuBar).
-#   2. Force Anthropic's plain window background into the overlay style in
+#   2. Keep Anthropic's plain window background in the overlay style in
 #      Linux integrated mode, instead of the value upstream feeds through its
 #      alpha-blend helper. Electron on Wayland has painted that blended value
-#      as a grey strip, so without this swap the overlay looks like a grey
-#      block. (The literal "#00000000" placeholder this originally targeted is
-#      long gone; the swap site is the same style object either way.)
+#      as a grey strip, so without this gate the overlay looks like a grey
+#      block. Since v3.1623.0 the helper hoists the color into one ternary
+#      (`o=e==="main"&&pQn()||RI(),s=n?<light/dark>:r?e0n(o):o`), so the gate
+#      is injected before `r?e0n(o):o` and Linux integrated mode takes `o`.
 #
 # (A third sub-patch used to widen upstream's win32-only gate on the
 # setTitleBarOverlay theme-update call. Upstream dropped that gate in
@@ -39,7 +40,12 @@
 # apply live: `setTitleBarOverlay(false)` throws and there is no `setFrame`, so
 # the settings rows tell the user a restart is needed.
 #
-# Why bare mode exists: on window managers where Chromium refuses to set
+# Since Electron 44.5.0 (electron#54391; bundled 44.7.0 from v2.37337.1)
+# Chromium no longer paints that border on these WMs - measured on xfwm4:
+# the window is exactly its content size with no _GTK_FRAME_EXTENTS - so bare
+# mode is now purely "no window-control buttons". History below.
+#
+# Why bare mode existed: on window managers where Chromium refused to set
 # _GTK_FRAME_EXTENTS - xfwm4 (hardcoded carve-out in X11Window::
 # CanSetDecorationInsets, see electron/electron#52024) and WMs that do not
 # advertise the hint at all (i3, Awesome) - Chromium paints a 4 px client-side
@@ -56,10 +62,9 @@
 # is that there are no window-control buttons (close/minimize via the WM).
 #
 # Anthropic's bundle is minified and renames identifiers between releases.
-# We capture them (background helper, Electron alias, platform gate, and
-# transparent placeholder) at patch time via [\w$]+ wildcards so the
-# generated code references the current names. We fail loudly if any
-# capture is missing.
+# We capture the main window's background call at patch time via [\w$]+
+# wildcards so the generated code references the current names, and match
+# everything else by shape. We fail loudly if any capture is missing.
 #
 # Quick Entry's BrowserWindow is matched by `transparent:!0,frame:!1` and
 # has no titleBarOverlay -- none of the patterns below touch it.
@@ -95,12 +100,21 @@ const LINUX_FRAMELESS = LINUX & "&&!" & NATIVE_ON
 const LINUX_BARE = LINUX & "&&!" & NATIVE_ON & "&&" & BARE_ON
 const LINUX_INTEGRATED = LINUX & "&&!" & NATIVE_ON & "&&!" & BARE_ON
 
+# Patch 2's injection. Unique to that sub-patch (patch 1 emits LINUX_INTEGRATED
+# only as `(...)?`), so the idempotency check can assert it positively.
+const OVERLAY_GATE = "!(" & LINUX_INTEGRATED & ")&&"
+
 proc capture(s: string, pat: Regex2, name: string): string =
-  ## Capture group 1 of `pat` from `s`, or raise with `name` in the message.
-  var m: RegexMatch2
-  if not s.find(pat, m):
-    raise newException(ValueError, "fix_native_frame: " & name & " not found")
-  s[m.group(0)]
+  ## Capture group 1 of the single match of `pat` in `s`, or raise with `name`
+  ## in the message (no match, or more than one).
+  var hits = 0
+  var cap = ""
+  for m in s.findAll(pat):
+    inc hits
+    cap = s[m.group(0)]
+  if hits != 1:
+    raise newException(ValueError, &"fix_native_frame: {name}: {hits}/1 matches")
+  cap
 
 proc apply*(input: string): string =
   # Assert OUR OWN injected end-state, not merely that the pre-patch shape is
@@ -115,20 +129,25 @@ proc apply*(input: string): string =
   # overlay, upstream's own titlebar, and a GREEN build. Never key idempotency
   # off a token another patch can emit.
   if "__CDB_NATIVE_FRAME__" in input:
+    if OVERLAY_GATE notin input:
+      raise newException(
+        ValueError, "marker present but the overlay-color gate (patch 2) is missing"
+      )
     echo "  [INFO] already patched"
     return input
   result = input
 
   # Anthropic identifiers (minified, renamed between releases):
-  #   bgFn      e.g. "G$" / "T.r" -- window background color, called as bgFn().
-  # bgFn is captured from the main-window options site, which since v1.26832.0
-  # lives in index.js itself; it is only ever emitted back into that same
-  # site (patch 1). Patch 2 may sit in a *different* code-split chunk (it did
-  # v1.26832.0-v1.30096.1) and captures its own local background helper --
-  # see there.
-  let bgFn = result.capture(
-    re2"""backgroundColor:([\w$]+(?:\.[\w$]+)*)\(\),opacity:""",
-    "backgroundColor function",
+  #   bgCall    the window background color CALL, verbatim: `yL()` up to
+  #             v2.42304.2, `fQn({signedIn:c})` since v3.1623.0. The argument
+  #             is load-bearing - fQn destructures it, so a bare `fQn()` throws
+  #             a TypeError while the options are built (no window at all).
+  # bgCall is captured from the main-window options site and only ever emitted
+  # back into that same object (patch 1), where its argument is in scope; the
+  # shadowing guard below asserts that.
+  let bgCall = result.capture(
+    re2"""backgroundColor:([\w$]+(?:\.[\w$]+)*\((?:\{[\w$]+:[\w$]+\})?\)),opacity:""",
+    "backgroundColor call",
   )
   # The electron alias is NOT captured: the first `X.nativeTheme` in the staged
   # stub+chunks file can live in another chunk with a different alias (v2.9939.4
@@ -153,7 +172,7 @@ proc apply*(input: string): string =
   # the tree we repackage, so there is nothing to fix - only dead code to not
   # write. See the shadowing guard below.
   let overlayStyle =
-    "{color:" & bgFn & "(),symbolColor:" & electron &
+    "{color:" & bgCall & ",symbolColor:" & electron &
     ".nativeTheme.shouldUseDarkColors?\"#fff\":\"#000\",height:36}"
   var n = 0
   # v1.26832.0: `"hidden"` became a template literal and the titleBarOverlay
@@ -211,41 +230,46 @@ proc apply*(input: string): string =
             "upstream likely passes its own now, which would shadow ours " &
             "(later key wins). Re-audit before shipping.",
         )
+    # The captured background call is emitted into this object; its argument
+    # (e.g. `c` in `{signedIn:c}`) is only in scope if it came from here.
+    if ("backgroundColor:" & bgCall & ",") notin opts:
+      raise newException(
+        ValueError,
+        &"captured {bgCall} is not in the main-window options object we patched",
+      )
     echo "  [OK] no upstream duplicate shadows our injected options"
 
-  # Patch 2: opaque-color swap inside the helper that builds the overlay
-  # style. The non-Hb branch uses a background value that upstream may run
-  # through an alpha-blend helper; on Linux Wayland that has produced a grey
-  # strip instead of the window background. Force the plain background color
-  # in Linux integrated mode. Two occurrences: one per theme.
+  # Patch 2: overlay color inside the helper that builds the titleBarOverlay
+  # style for main and popout windows. Since v3.1623.0 it hoists the color into
+  # one declarator chain:
+  #   o=e==="main"&&pQn()||RI(),s=n?<dark>?"#f9f8f4":"#141412":r?e0n(o):o;
+  # `o` is the plain window background, `e0n(o)` upstream's alpha-blend that
+  # has painted as a grey strip on Linux Wayland. Gate the blend off in Linux
+  # integrated mode: `r?e0n(o):o` -> `!(LINUX_INTEGRATED)&&r?e0n(o):o`, which
+  # parses as `(!(...)&&r)?e0n(o):o`. Only existing locals are used, so it does
+  # not matter which code-split chunk the helper lives in.
   #
-  # This helper can live in a DIFFERENT code-split chunk than the main-window
-  # options patched above (it did v1.26832.0-v1.30096.1). `bgFn` captured up
-  # there would then not be in scope here -- emitting it would be a
-  # ReferenceError at runtime. Capture the helper's own background function
-  # from the declarator that feeds the style object instead.
-  #
-  # Up to v1.40609.0 the helper was an arrow whose declarator chain continued
-  # with `,n=<electron>.nativeTheme...`; since v1.46388.2 it is a
-  # `function(e)` taking "main"/"popout" (the overlay now also styles popout
-  # windows) and the chain ends with `;return <electron>.nativeTheme...`.
-  # Accept both joiners.
-  let localBg = result.capture(
-    re2"""=[\w$]+\?[\w$]+\(([\w$]+)\(\)\):[\w$]+\(\)(?:,[\w$]+=|;return )[\w$]+\.nativeTheme\.shouldUseDarkColors\?\{color:""",
-    "titleBarOverlay-helper background function",
-  )
+  # nim-regex has no backreferences: the three `o` captures (declarator, blend
+  # argument, else branch) and the `s` captures (declarator, `{color:s`) are
+  # compared here instead.
   n = 0
+  var mismatch = ""
   result = result.replace(
-    re2"""(\{color:[\w$]+\?["`]#[0-9a-fA-F]+["`]:)([\w$]+)(,symbolColor:)""",
+    re2"""(([\w$]+)=[\w$]+===["`]main["`]&&[\w$]+\(\)\|\|[\w$]+\(\),([\w$]+)=[\w$]+\?[\w$]+\.nativeTheme\.shouldUseDarkColors\?["`]#[0-9a-fA-F]+["`]:["`]#[0-9a-fA-F]+["`]:)([\w$]+\?[\w$]+\(([\w$]+)\):([\w$]+);return [\w$]+\.nativeTheme\.shouldUseDarkColors\?\{color:([\w$]+),)""",
     proc(m: RegexMatch2, s: string): string =
       inc n
-      let bgVar = s[m.group(1)]
-      s[m.group(0)] & "(" & LINUX_INTEGRATED & ")?" & localBg & "():" & bgVar &
-        s[m.group(2)],
+      let bg = s[m.group(1)]
+      if s[m.group(4)] != bg or s[m.group(5)] != bg or s[m.group(6)] != s[m.group(2)]:
+        mismatch = s[m.boundaries]
+      s[m.group(0)] & OVERLAY_GATE & s[m.group(3)],
   )
-  if n != 2:
-    raise newException(ValueError, &"titleBarOverlay background swap: {n}/2")
-  echo &"  [OK] overlay background -> {localBg}() in Linux integrated mode: {n}"
+  if mismatch.len > 0:
+    raise newException(
+      ValueError, "overlay color: captured locals disagree in: " & mismatch
+    )
+  if n != 1:
+    raise newException(ValueError, &"titleBarOverlay color gate: {n}/1")
+  echo &"  [OK] overlay color skips the alpha blend in Linux integrated mode: {n}"
 
 when isMainModule:
   if paramCount() != 1:

@@ -9,7 +9,7 @@
 # embeds them via staticRead at compile time; Python reads them at runtime.
 # No codegen — the .js files are the single source of truth.
 #
-# All 35 sub-patches use std/nre (PCRE) because many require backreferences.
+# All 37 sub-patches use std/nre (PCRE) because many require backreferences.
 #
 # Idempotency is a MARKER SET (endStateMarkers below): one positive end-state
 # pattern per sub-patch, each with its exact expected count. All present =
@@ -193,6 +193,15 @@ proc cuPlatformSetName(content: string): string =
     return ""
   return names[0]
 
+const CU_X11_ACCESS_SENTENCE =
+  # What request_access tells the model on an X11 session (sub-patch 13b.linux):
+  # the bridge captures the whole display and input goes to whatever is under
+  # it, and the consent card is still the grant the user expects.
+  "\"Screenshots capture the whole primary display, not individual apps, and " &
+  "clicks and keystrokes go to whatever is under them. Name the apps you intend " &
+  "to use in request_access; after the grant a screenshot shows the entire " &
+  "display, and open_application brings an app forward. \""
+
 proc endStateMarkers(): seq[EndStateMarker] =
   ## One positive end-state pattern per sub-patch, with its exact count.
   proc lit(name, s: string, expected = 1): EndStateMarker =
@@ -210,6 +219,10 @@ proc endStateMarkers(): seq[EndStateMarker] =
       "2 CU platform gate",
       "function [\\w$]+\\(\\)\\{if\\(process\\.platform===\"linux\"\\)return!0;" &
         CU_PLATFORM_FN_BODY,
+    ),
+    lit(
+      "2b PLATFORM_CAPABILITIES X11 arm",
+      ":process.platform===\"linux\"?{screenshotFiltering:\"none\",platform:\"linux\"}:",
     ),
     rx(
       "4 createDarwinExecutor",
@@ -286,6 +299,7 @@ proc endStateMarkers(): seq[EndStateMarker] =
       "13b request_access prefix",
       "(process.platform===\"linux\"?(globalThis.__cuKwinMode?`This computer is running Linux with KDE Plasma. The file manager is \"Dolphin\". `",
     ),
+    lit("13b.linux request_access X11 sentence", CU_X11_ACCESS_SENTENCE),
     rx(
       "13b.kwin-alias",
       """[\w$]+=globalThis\.__cuKwinMode\?[\w$]+\.map\(v=>v==="org\.kde\.plasmashell"\?"plasmashell":v\):[\w$]+,""",
@@ -354,7 +368,7 @@ proc apply*(input: string): string =
   let original = input
   var patchesApplied = 0
   var changes = 0
-  const EXPECTED_PATCHES = 35
+  const EXPECTED_PATCHES = 37
 
   let gateSet = cuPlatformSetName(content)
   if gateSet == "":
@@ -432,6 +446,67 @@ proc apply*(input: string): string =
         ValueError, &"  [FAIL] CU platform gate ({gateSet}): {n} matches, expected 1"
       )
     echo &"  [OK] CU platform gate ({gateSet}): Linux always supported (1 match)"
+    inc changes
+    inc patchesApplied
+
+  # ── Patch 2b: PLATFORM_CAPABILITIES X11 arm → none-filtering preset ───
+  block:
+    # v3.1623.0 (same shape in v2.42304.2): the `computer-use` session MCP
+    # server and the Cowork chat's remote-devices computer_* tools both build
+    # their tool definitions from the STATIC preset
+    #   PLATFORM_CAPABILITIES = isWayland() ? LINUX_WAYLAND : LINUX
+    # and never from the live executor's capabilities. LINUX is
+    # {screenshotFiltering:"native"}, so on X11 the model read upstream's
+    # "The image is composed from the granted apps' windows only ... blank"
+    # screenshot text, refused to screenshot on its own, and sub-patch 13f
+    # (the "none" arm) never engaged. Route the X11 arm to a none-filtering
+    # preset instead. No `hitTest` key on purpose: the input gate keeps its
+    # "frontmost" arm (the one 13a blanks on Linux) and the hitTest-keyed
+    # dialog-focus refusals stay off. Upstream's own X11 executor spreads
+    # LINUX into its capabilities, so LINUX itself is left untouched.
+    let pat =
+      re"""(?<![\w$.])([\w$]+)=([\w$]+)\(\)\?([\w$]+):([\w$]+),([\w$]+)=!\2\(\),"""
+    var found = 0
+    var waylandPreset, nativePreset = ""
+    for m in content.findIter(pat):
+      inc found
+      waylandPreset = m.captures[2]
+      nativePreset = m.captures[3]
+    if found != 1:
+      raise newException(
+        ValueError,
+        &"  [FAIL] 2b PLATFORM_CAPABILITIES preset (`X=isWayland()?A:B,Y=!isWayland(),`): {found} matches, expected 1",
+      )
+    let nativeDecl = re(
+      "(?<![\\w$.])" & escapeRe(nativePreset) &
+        """=\{screenshotFiltering:"native",platform:"linux"\}"""
+    )
+    let noneDecl = re(
+      "(?<![\\w$.])" & escapeRe(waylandPreset) &
+        """=\{screenshotFiltering:"none",platform:"linux",hitTest:"none"\}"""
+    )
+    let nNative = countMatches(content, nativeDecl)
+    let nNone = countMatches(content, noneDecl)
+    if nNative != 1 or nNone != 1:
+      raise newException(
+        ValueError,
+        &"  [FAIL] 2b PLATFORM_CAPABILITIES preset: {nativePreset} native decl {nNative} match(es), {waylandPreset} wayland decl {nNone} match(es), expected 1 each - re-audit",
+      )
+    let n = replaceFirst(
+      content,
+      pat,
+      proc(m: RegexMatch): string =
+        let c = m.captures
+        &"{c[0]}={c[1]}()?{c[2]}:process.platform===\"linux\"?" &
+          "{screenshotFiltering:\"none\",platform:\"linux\"}" &
+          &":{c[3]},{c[4]}=!{c[1]}(),",
+    )
+    if n != 1:
+      raise newException(
+        ValueError,
+        &"  [FAIL] 2b PLATFORM_CAPABILITIES preset: {n} rewrites, expected 1",
+      )
+    echo &"  [OK] 2b PLATFORM_CAPABILITIES ({waylandPreset}/{nativePreset}): X11 uses the none-filtering preset (1 match)"
     inc changes
     inc patchesApplied
 
@@ -594,7 +669,7 @@ proc apply*(input: string): string =
     # flow ending in `||X.call(Y)}}}const <dims>=...` instead of the old
     # `;X()}}const <dims>=...`). The old prologue anchor `;[\w$]+\(\)\}\}const`
     # no longer matches. The screenshot-dims decl itself is unique, so anchor
-    # the async header, then lazily skip (up to 8000 chars) straight to that
+    # the async header, then lazily skip (up to 12000 chars) straight to that
     # decl - do not try to pin the exact prologue shape.
     #
     # v1.26832.0 rewrote the decl itself: the `X||(a=b.getLastScreenshotDims)==
@@ -617,8 +692,17 @@ proc apply*(input: string): string =
     # v1.32352.1: the minifier parenthesises arrow arguments -
     # `setTimeout((()=>v.abort()),or)` - so the wrapping parens around the
     # abort arrow are optional.
+    # v2.37337.1 folded those hoisted grant reads into a zero-arg closure
+    # (`,x=()=>{let e=[...ctx.getAllowedApps()],...;return{allowedApps:e,...}}`)
+    # that the options object spreads (`S={...x(),readTheGrantsAfresh:x,...`).
+    # Its body has braces and commas, so a hoisted decl may also be a
+    # `()=>{...}` arrow with at most one nested brace level.
+    # v3.1623.0 grew the handler prologue: the header-to-decl gap is 8078
+    # chars (7789 in v2.42304.2), past the old 8000 cap, so the skip window is
+    # 12000. The `return async(` header is still the only one within 30k
+    # chars before the decl, so the wider window cannot pick another handler.
     let seedPat =
-      re"""return async\(([\w$]+),[\w$]+\)=>\{[\s\S]{0,8000}?(?:const|let|var) ([\w$]+)=([\w$]+)\?void 0:[\w$]+(?:\.[\w$]+)*\.getLastScreenshotDims\?\.\(\),([\w$]+)=new AbortController(?:,[\w$]+=setTimeout\(\(?\(\)=>\4\.abort\(\)\)?,[\w$]+\))?(?:,[\w$]+=[^{},]{1,200})*,([\w$]+)=\{"""
+      re"""return async\(([\w$]+),[\w$]+\)=>\{[\s\S]{0,12000}?(?:const|let|var) ([\w$]+)=([\w$]+)\?void 0:[\w$]+(?:\.[\w$]+)*\.getLastScreenshotDims\?\.\(\),([\w$]+)=new AbortController(?:,[\w$]+=setTimeout\(\(?\(\)=>\4\.abort\(\)\)?,[\w$]+\))?(?:,[\w$]+=(?:[^{},]{1,200}|\(\)=>\{(?:[^{}]|\{[^{}]{0,400}\}){1,600}\}))*,([\w$]+)=\{"""
     let maybeSeed = content.find(seedPat)
     if maybeSeed.isNone:
       echo "  [FAIL] screenshot intro note: wrapper seed anchor not found"
@@ -1202,6 +1286,10 @@ proc apply*(input: string): string =
     # v1.26832.0: single-quoted literal → backtick template. Inside a template
     # literal the embedded `"Finder"` / `"Dolphin"` quotes need no escaping.
     # v1.46388.2: back to a single-quoted literal (it contains `"`).
+    # v2.42304.2+: the prefix is keyed by `[t.platform]` and has its own
+    # `linux:` entry, so on Linux the model sees that key, never this darwin
+    # literal (the Linux arms below are inert there). The live Linux part is
+    # 13b.linux, the wrapper around the `linux:` key's Wayland sentence.
     let old13b = [
       "'This computer is running macOS. The file manager is \"Finder\". '",
       "`This computer is running macOS. The file manager is \"Finder\". `",
@@ -1223,6 +1311,35 @@ proc apply*(input: string): string =
       inc patchesApplied
     else:
       echo "  [FAIL] 13b request_access macOS prefix: not found"
+
+  # 13b.linux: request_access `linux:` prefix → session-aware sentence
+  block:
+    # The `linux:` key's second sentence is keyed on the preset's
+    # screenshotFiltering: "none" reads "This is a Wayland session, so access is
+    # to the entire screen ...". With 2b the X11 preset is "none" too, so that
+    # arm would be chosen on X11 as well. Pick it only on a Wayland session
+    # (KDE Wayland or XDG_SESSION_TYPE) and give X11 a sentence that matches
+    # the bridge: whole display, input goes to whatever is under it. The
+    # request_access/resolve_access consent flow itself is untouched.
+    let pat =
+      re""""This is a Wayland session, so access is to the entire screen[^"]*""""
+    let nFound = countMatches(content, pat)
+    if nFound != 1:
+      echo &"  [FAIL] 13b.linux request_access Wayland sentence: {nFound} matches, expected 1"
+    else:
+      let n = replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          "(globalThis.__cuKwinMode||process.env.XDG_SESSION_TYPE===\"wayland\"?" &
+            m.match & ":" & CU_X11_ACCESS_SENTENCE & ")",
+      )
+      if n == 1:
+        echo "  [OK] 13b.linux request_access: Wayland sentence only on Wayland, X11 gets the whole-display sentence"
+        inc descChanges
+        inc patchesApplied
+      else:
+        echo "  [FAIL] 13b.linux request_access Wayland sentence: not rewritten"
 
   # 13b.kwin-alias: plasmashell alias in request_access
   block:
@@ -1521,7 +1638,7 @@ proc apply*(input: string): string =
 
   if descChanges > 0:
     inc changes, descChanges
-    echo &"  [OK] {descChanges}/12 description patches applied (7 regular + 5 kwin-wayland KDE)"
+    echo &"  [OK] {descChanges}/13 description patches applied (8 regular + 5 kwin-wayland KDE)"
   else:
     echo "  [FAIL] No description patches applied (descriptions unchanged)"
 

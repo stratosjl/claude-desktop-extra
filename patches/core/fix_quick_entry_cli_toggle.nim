@@ -20,7 +20,10 @@
 #         "reload-theme"  -> __cdbThemes.reload("socket"); one-line JSON result
 #                             {ok,changed,name,windows} written back, then end
 #         anything else   -> logged as unknown, connection ended
-# EXPECTED = 3 because A+C+D share one regex match slot; B is the other.
+#   E - Quick Entry window probe: one "[quick-entry] shown WxH@x,y focused=..
+#       {textarea,focused,font,color,placeholder,fonts,...}" line per show
+#       (public Electron APIs; diagnostics for reports like #281)
+# EXPECTED = 3 because A+C+D+E share one regex match slot; B is the other.
 #
 # Debug anchors (rg -a on the concatenated stub+chunks, see AGENTS.md):
 #   sub-patch A:  rg -ao '.{0,40}\.QUICK_ENTRY,\(?\(\)=>\{.{0,160}'
@@ -166,9 +169,33 @@ proc apply*(input: string): string =
           "(globalThis.__cdbDiag||console.log)(\"[quick-entry] socket trigger ready: \"+_qeS)}" &
           "}catch(e){}" & "})()"
 
+        # E: Quick Entry window probe (diagnostics, #281). Each time the Quick
+        # Entry BrowserWindow is shown, log its size and focus plus the
+        # renderer's view of the textarea (size, focus, used font, text and
+        # placeholder colors, webfont statuses). Public Electron APIs only; the
+        # window is recognised by its quick-window.html URL at show time (the
+        # first show can precede did-finish-load). One "[quick-entry] shown ..."
+        # line per show in claude-patches.log.
+        let windowProbe =
+          ",(()=>{" & "if(process.platform!==\"linux\")return;" & "try{" &
+          "var _e=require(\"electron\");" &
+          "_e.app.on(\"browser-window-created\",(_ev,w)=>{try{var wc=w.webContents;" &
+          "w.on(\"show\",()=>{try{" &
+          "if(!/quick_window\\/quick-window\\.html/.test(wc.getURL()||\"\"))return;" &
+          "setTimeout(()=>{try{if(w.isDestroyed())return;var b=w.getBounds();" &
+          "wc.executeJavaScript(`(()=>{try{var t=document.getElementById('prompt-input');" &
+          "if(!t)return 'no #prompt-input';var r=t.getBoundingClientRect(),c=getComputedStyle(t),p=getComputedStyle(t,'::placeholder');" &
+          "return JSON.stringify({textarea:[Math.round(r.width),Math.round(r.height)],focused:document.activeElement===t,docFocus:document.hasFocus()," &
+          "font:c.fontFamily.split(',')[0],color:c.color,placeholder:p.color,caret:c.caretColor," &
+          "fonts:Array.from(document.fonts).map(function(f){return f.family+':'+f.status}).join(' '),body:String(document.body.className).slice(0,80)})" &
+          "}catch(e){return 'probe error '+e.message}})()`).then(s=>{" &
+          "(globalThis.__cdbDiag||console.log)(\"[quick-entry] shown \"+b.width+\"x\"+b.height+\" focused=\"+w.isFocused()+\" \"+s)" &
+          "}).catch(e=>{(globalThis.__cdbDiag||console.log)(\"[quick-entry] probe failed: \"+(e&&e.message))})" &
+          "}catch(e){}},400)" & "}catch(e){}})}catch(e){}})" & "}catch(e){}" & "})()"
+
         resultStr &=
           regFn & "(" & enumVar & ".QUICK_ENTRY," & assign & ")" & firstInstance &
-          socketTrigger
+          socketTrigger & windowProbe
         lastEnd = bounds.b + 1
         inc countA
         break

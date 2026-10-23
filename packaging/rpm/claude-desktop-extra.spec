@@ -85,6 +85,9 @@ Recommends:     virtiofsd
 # toggle). Recommends, as the official .deb declares them.
 Recommends:     bubblewrap
 Recommends:     socat
+# Claude Code SSH sessions can use the system ssh client (the built-in SSH
+# engine is used without it). Recommends, as the official .deb declares it.
+Recommends:     openssh-clients
 # Computer Use is fully first-party now: bundled x11-bridge (X11/XWayland),
 # wlroots-bridge (Sway/Hyprland/Niri), gnome-portal-bridge (GNOME Wayland) and
 # kwin-portal-bridge (KDE Plasma 6.6+). Remaining Suggests cover only the
@@ -135,6 +138,22 @@ rm -rf %{buildroot}
 # remapping and no binary rename are needed here.
 mkdir -p %{buildroot}/usr/lib/claude-desktop
 cp -a tarball/claude-desktop/* %{buildroot}/usr/lib/claude-desktop/
+
+# Release stamp for the in-app update check: the release tag (v<version>, or
+# v<version>-<release> for a re-release, the tag scheme of our GitHub releases)
+# and the package format, which picks the README install section the "Update
+# available" button opens. Exe-adjacent resources/, next to app.asar
+# (process.resourcesPath); %%files covers it through /usr/lib/claude-desktop/.
+if ! printf '%%s\n' "%{version}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' ||
+   ! printf '%%s\n' "%{release}" | grep -Eqx '[1-9][0-9]*'; then
+    echo "ERROR: version '%{version}' / release '%{release}' not in X.Y.Z / N form - cannot write the release stamp" >&2
+    exit 1
+fi
+cdb_tag="v%{version}"
+[ "%{release}" = 1 ] || cdb_tag="v%{version}-%{release}"
+printf '{"tag":"%%s","format":"rpm"}\n' "$cdb_tag" \
+    > %{buildroot}/usr/lib/claude-desktop/resources/cdb-release.json
+chmod 0644 %{buildroot}/usr/lib/claude-desktop/resources/cdb-release.json
 
 # RHEL 9 / Rocky / Alma: qemu-kvm installs QEMU only as /usr/libexec/qemu-kvm,
 # but the Cowork probe and cowork-linux-helper look up qemu-system-<arch> on

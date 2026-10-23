@@ -2,10 +2,16 @@
 # @patch-type: nim
 # Fix BrowserWindow child view bounds, ready-to-show jiggle, and Quick Entry blur.
 # Two patches: bounds fix IIFE injection and Quick Entry blur before hide.
-# Uses std/nre for backreference support in patterns.
+#
+# Uses the `regex` package (pure Nim) like the other patches: std/nre dlopens
+# PCRE1 at run time, which ubuntu-24.04 (the CI harness runner) does not ship.
+# `regex` has no backreferences, so the "same window variable" constraints that
+# used to be `\1`/`\2` are a two-stage match (head pins the variable, the full
+# pattern is built with it spliced in literally) or an equality check on the
+# captured groups.
 
-import std/[os, strformat, strutils, options]
-import std/nre
+import std/[os, strformat, strutils]
+import regex
 
 const BOUNDS_FIX_JS =
   "(function(__wb_w){" & "if(process.platform!==\"linux\")return;" &
@@ -26,6 +32,48 @@ const BOUNDS_FIX_JS =
   "setTimeout(function(){" & "if(__wb_w.isDestroyed())return;" &
   "__wb_w.setSize(__wb_s[0],__wb_s[1]);" & "__wb_fasc()" & "},50)" & "})" & "})"
 
+# Main window factory, stage 1: the head that pins the window variable.
+# Allow optional code between BrowserWindow() and the setup call (midCode),
+# AND between the setup call and the final `,W}` (trailing). v1.15962 added a
+# `,Cft(tt)` call after the MAIN_WINDOW setup call which broke the old adjacency anchor.
+# v1.19367.0 changed the window variable from a minified local (`it`) to a dotted
+# property path (`exports.mainWindow`), so winVar allows `.`-joined segments.
+# v1.26832.0 moved the logger-tagging helper and the window-name enum behind chunk
+# namespaces (`t.c(J.webContents,t.n.MAIN_WINDOW)`), so the setup call's callee and
+# the enum holder are dotted chains too.
+# Groups: 0 = prefix, 1 = winVar, 2 = electronVar, 3 = paramVar.
+const MAIN_WIN_HEAD =
+  re2"(function [\w$]+\([\w$]+\)\{return )([\w$]+(?:\.[\w$]+)*)=new ([\w$]+)\.BrowserWindow\(([\w$]+)\),"
+
+proc mainWinPattern(winVar: string): Regex2 =
+  ## Stage 2: the full factory with the window variable spliced in literally
+  ## where std/nre used the `\2` backreference. Same groups as the head, plus
+  ## 4 = midCode, 5 = setupCall, 6 = trailing.
+  let w = escapeRe(winVar)
+  re2(
+    r"(function [\w$]+\([\w$]+\)\{return )(" & w &
+      r")=new ([\w$]+)\.BrowserWindow\(([\w$]+)\),(.*?)([\w$]+(?:\.[\w$]+)*\(" & w &
+      r"\.webContents,[\w$]+(?:\.[\w$]+)*\.MAIN_WINDOW\))(.*?)," & w & r"\}"
+  )
+
+proc findMainWindowFactory(s: string): (bool, RegexMatch2) =
+  ## Leftmost factory head whose full pattern matches at that very position
+  ## (what nre's `find` with the backreference returned).
+  for head in s.findAll(MAIN_WIN_HEAD):
+    var m = RegexMatch2()
+    if s.find(mainWinPattern(s[head.group(1)]), m, head.boundaries.a) and
+        m.boundaries.a == head.boundaries.a:
+      return (true, m)
+  (false, default(RegexMatch2))
+
+# Positive end state of Patch 2: the guard function whose single `||` arm blurs
+# and then hides the same window. Groups 0 and 1 must be the same variable.
+const QE_BLUR_CHECK =
+  re2"function [\w$]+\(\)\{[\w$]+\(\)\|\|\(([\w$]+)\.blur\(\),([\w$]+)\.hide\(\)\)\}"
+
+const QE_HIDE_PATTERN =
+  re2"(function [\w$]+\(\)\{)([\w$]+\(\))\|\|([\w$]+)(\.hide\(\))\}"
+
 proc apply*(input: string): string =
   result = input
   var applied: seq[string] = @[]
@@ -36,41 +84,28 @@ proc apply*(input: string): string =
     echo "  [INFO] Window bounds fix already injected"
     applied.add("bounds-fix(skip)")
   else:
-    # Pattern uses \2 backreference for winVar.
-    # Allow optional code between BrowserWindow() and the setup call (group 5, midCode),
-    # AND between the setup call and the final `,W}` (group 7, trailing). v1.15962 added a
-    # `,Cft(tt)` call after the MAIN_WINDOW setup call which broke the old adjacency anchor.
-    # v1.19367.0 changed the window variable from a minified local (`it`) to a dotted
-    # property path (`exports.mainWindow`), so winVar allows `.`-joined segments.
-    # v1.26832.0 moved the logger-tagging helper and the window-name enum behind chunk
-    # namespaces (`t.c(J.webContents,t.n.MAIN_WINDOW)`), so the setup call's callee and
-    # the enum holder are dotted chains too.
-    let mainWinPattern =
-      nre.re"(function [\w$]+\([\w$]+\)\{return )([\w$]+(?:\.[\w$]+)*)=new ([\w$]+)\.BrowserWindow\(([\w$]+)\),(.*?)([\w$]+(?:\.[\w$]+)*\(\2\.webContents,[\w$]+(?:\.[\w$]+)*\.MAIN_WINDOW\))(.*?),\2\}"
-
-    let m1 = result.find(mainWinPattern)
-    if m1.isSome:
-      let m = m1.get
-      let prefix = m.captures[0]
-      let winVar = m.captures[1]
-      let electronVar = m.captures[2]
-      let paramVar = m.captures[3]
-      let midCode = m.captures[4]
-      let setupCall = m.captures[5]
+    let (found, m) = result.findMainWindowFactory()
+    if found:
+      let prefix = result[m.group(0)]
+      let winVar = result[m.group(1)]
+      let electronVar = result[m.group(2)]
+      let paramVar = result[m.group(3)]
+      let midCode = result[m.group(4)]
+      let setupCall = result[m.group(5)]
       # trailing: any setup calls between the MAIN_WINDOW call and the final `,W}`.
       # v1.15962 added `,Cft(tt)`; on v1.15200 this is "". Already includes its own
       # leading comma, so it slots in directly after setupCall.
-      let trailing = m.captures[6]
+      let trailing = result[m.group(6)]
       let iife = BOUNDS_FIX_JS & "(" & winVar & ")"
       let replacement =
         prefix & winVar & "=new " & electronVar & ".BrowserWindow(" & paramVar & ")," &
         midCode & setupCall & trailing & "," & iife & "," & winVar & "}"
       result =
-        result[0 ..< m.matchBounds.a] & replacement & result[m.matchBounds.b + 1 .. ^1]
+        result[0 ..< m.boundaries.a] & replacement & result[m.boundaries.b + 1 .. ^1]
       echo "  [OK] Window bounds fix + size jiggle injected: 1 match(es)"
       applied.add("bounds-fix(1)")
     else:
-      # Must raise on its own miss — do NOT rely on the `applied.len == 0` guard
+      # Must raise on its own miss - do NOT rely on the `applied.len == 0` guard
       # below, which Patch 2 (Quick Entry blur) independently satisfies, masking a
       # silent Patch 1 miss and shipping broken child-view geometry on Linux.
       echo "  [FAIL] Main window factory pattern not matched"
@@ -81,25 +116,25 @@ proc apply*(input: string): string =
   # 2. Quick Entry blur before hide
   # Positive end state: the exact shape Patch 2 produces - the guard function
   # whose single `||` arm blurs and then hides the same window.
-  let qeBlurCheck =
-    re"function [\w$]+\(\)\{[\w$]+\(\)\|\|\(([\w$]+)\.blur\(\),\1\.hide\(\)\)\}"
-  let alreadyBlurred = result.find(qeBlurCheck).isSome
+  var alreadyBlurred = false
+  for m in result.findAll(QE_BLUR_CHECK):
+    if result[m.group(0)] == result[m.group(1)]:
+      alreadyBlurred = true
+      break
 
   if alreadyBlurred:
     echo "  [INFO] Quick Entry blur already applied"
     applied.add("qe-blur(skip)")
   else:
-    let qeHidePattern =
-      re"(function [\w$]+\(\)\{)([\w$]+\(\))\|\|([\w$]+)(\.hide\(\))\}"
     var countQe = 0
     result = result.replace(
-      qeHidePattern,
-      proc(m: RegexMatch): string =
+      QE_HIDE_PATTERN,
+      proc(m: RegexMatch2, s: string): string =
         inc countQe
-        let funcDecl = m.captures[0]
-        let guardCall = m.captures[1]
-        let winVar = m.captures[2]
-        let hideCall = m.captures[3]
+        let funcDecl = s[m.group(0)]
+        let guardCall = s[m.group(1)]
+        let winVar = s[m.group(2)]
+        let hideCall = s[m.group(3)]
         funcDecl & guardCall & "||(" & winVar & ".blur()," & winVar & hideCall & ")}",
     )
     if countQe == 1:
