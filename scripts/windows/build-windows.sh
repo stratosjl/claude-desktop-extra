@@ -133,9 +133,20 @@ make -C "$SRC/patches" -j"$(nproc)" >/dev/null
 log "Applying the Windows patch set"
 python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 
+# resources/ion-dist (the third-party inference setup window) is not inside
+# app.asar: its `@patch-type: nim-dir` patches run on the folder itself, as in
+# build-patched-tarball.sh. The Linux-only ion fix (fix_ion_dist_linux) stays out.
+WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
+for p in "${WINDOWS_ION_PATCHES[@]}"; do
+    grep -q '^# @patch-type: nim-dir$' "$SRC/patches/$p.nim" || die "$p is not a nim-dir patch"
+    log "Applying $p to resources/ion-dist"
+    "$SRC/patches/$p" "$RES/ion-dist" || die "ion-dist patch failed: $p"
+done
+
 log "Validating JavaScript syntax"
 bad=0
-for js in "$WORK/app/app.asar.contents/.vite/build/"*.js; do
+for js in "$WORK/app/app.asar.contents/.vite/build/"*.js "$WORK/app/app.asar.contents/.vite/build/"*-worker/*.js; do
+    [ -f "$js" ] || continue
     node --check "$js" 2>/dev/null || { echo "  syntax error: $(basename "$js")" >&2; bad=1; }
 done
 [ "$bad" = 0 ] || die "patched JavaScript does not parse"
