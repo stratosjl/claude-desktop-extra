@@ -22,6 +22,12 @@
 #     t=await a.net.fetch(`${Cti}/dists/stable/main/binary-${e}/Packages`);
 #     if(!t.ok)return null; ...max "Version:" of Package: claude-desktop...}
 #
+# v3.6556.2 keeps those shapes with two additions: the init ends
+# `...,Sti(),Hti()}` (a restart-enforcement ticker for the ready/replaced
+# states), and the poll opens `let e=a.app.getVersion(),t=async()=>{` and, before
+# the apt check, asks upstream's release API only to emit a
+# desktop_update_available telemetry event (it never sets the button state).
+#
 # where `a` is require("electron"). So the button shows whenever Anthropic's
 # apt has a newer claude-desktop than app.getVersion(). Our users update from
 # our own packages, which trail Anthropic's apt; our patch releases
@@ -266,10 +272,12 @@ proc apply*(input: string): string =
   let initPrefix =
     """[\w$]+\.info\(["`]\[updater\] Linux: in-app updater off \(updates via apt\)["`]\),""" &
     """[\w$]+\(["`]desktop_update_disabled["`],\{reason:["`]managed_by_package_manager["`]\}\),"""
-  let initRe = re2("(" & initPrefix & """)([\w$]+)\(\)\}""")
+  # v3.6556.2 starts a second ticker after the poll (`...,POLL(),TICK()}`), so
+  # the poll call is matched up to `,` or `}` and that tail is left in place.
+  let initRe = re2("(" & initPrefix & """)([\w$]+)\(\)(?=[,}])""")
   let initDoneRe = re2(
     "(" & initPrefix &
-      """)globalThis\.__cdbUpdateOwn\.hookLinks\(([\w$]+)\),([\w$]+)\(\)\}"""
+      """)globalThis\.__cdbUpdateOwn\.hookLinks\(([\w$]+)\),([\w$]+)\(\)(?=[,}])"""
   )
   let inits = allMatches(result, initRe)
   let initsDone = allMatches(result, initDoneRe)
@@ -292,7 +300,7 @@ proc apply*(input: string): string =
   # The function the init starts must be the poll that owns B's compare.
   let pollRe = re2(
     "function " & rxEscape(pollFn) & """\(\)\{let [\w$]+=""" & rxEscape(electron) &
-      """\.app\.getVersion\(\);"""
+      """\.app\.getVersion\(\)[;,]"""
   )
   let polls = allMatches(result, pollRe)
   if polls.len != 1:
@@ -323,7 +331,7 @@ proc apply*(input: string): string =
     let m = inits[0]
     let injected =
       result[m.group(0)] & "globalThis.__cdbUpdateOwn.hookLinks(" & electron & ")," &
-      pollFn & "()}"
+      pollFn & "()"
     result = result[0 ..< m.boundaries.a] & injected & result[m.boundaries.b + 1 .. ^1]
     echo &"  [OK] C: updater init now hooks the update link before starting the poll {pollFn}"
     patchesApplied += 1

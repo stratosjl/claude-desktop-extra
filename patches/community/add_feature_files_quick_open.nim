@@ -64,15 +64,20 @@ const EXPECTED_PATCHES = 2 # A: page/main injection, B: worker-host env passthro
 # Sub-patch B, exactly one occurrence in the staged stub+chunks bundle
 # (1.46388.2 shape; 1.40609.0 emitted the same call with backtick strings):
 #   utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe"})
+# 3.6556.2 appends per-worker opt-ins after stdio (only the frame-local worker
+# sets `env`, to a minimal PATH/TMPDIR set):
+#   utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",...this.opts.env&&{env:this.opts.env()},...})
+# We insert our env right after stdio, BEFORE that spread, so a worker that
+# passes its own env keeps it and every other worker gets main's live env.
 # The string quote style flips between minifier releases, so it is matched with
 # the quote-agnostic ["`] class and re-emitted as captured.
 # Groups: 0 = the worker bundle path, 1 = the service name, 2 = the quote char.
 let forkRe =
-  re2"""utilityProcess\.fork\(([\w$]+),\[\],\{serviceName:([\w$]+),stdio:(["`])pipe["`]\}\)"""
+  re2"""utilityProcess\.fork\(([\w$]+),\[\],\{serviceName:([\w$]+),stdio:(["`])pipe["`](?=[,}])"""
 # Our injected end-state, asserted positively (Rule 6) rather than inferred from
 # the absence of the pre-patch shape. Quote-agnostic for the same reason.
 let forkEndStateRe =
-  re2"""stdio:["`]pipe["`],env:Object\.assign\(\{\},process\.env\)\}"""
+  re2"""stdio:["`]pipe["`],env:Object\.assign\(\{\},process\.env\)[,}]"""
 
 proc endStateCount(s: string): int =
   s.findAll(forkEndStateRe).len
@@ -133,7 +138,7 @@ proc apply*(input: string): string =
         inc count
         let q = s[m.group(2)]
         "utilityProcess.fork(" & s[m.group(0)] & ",[],{serviceName:" & s[m.group(1)] &
-          ",stdio:" & q & "pipe" & q & ",env:Object.assign({},process.env)})",
+          ",stdio:" & q & "pipe" & q & ",env:Object.assign({},process.env)",
     )
     if count != 1:
       echo "  [FAIL] files quick open: expected exactly 1 generic worker-host fork site, found " &

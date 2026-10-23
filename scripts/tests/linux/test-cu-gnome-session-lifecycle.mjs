@@ -30,7 +30,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const EXECUTOR = path.join(ROOT, "js", "cu_linux_executor.js");
 
 // session-start takes CONSENT_MS (the XDG RemoteDesktop dialog); everything else is instant.
-function makeRig(consentMs) {
+// reply(sub, args) may return a string (stdout) or throw (the subprocess failed);
+// subcommands it does not handle answer "{}".
+function makeRig(consentMs, reply) {
   const log = [];
   const cp = {
     execFileSync(bin, args) {
@@ -46,7 +48,12 @@ function makeRig(consentMs) {
       const sub = (args || [])[0];
       log.push("CALL " + sub);
       const delay = sub === "session-start" ? consentMs : 0;
-      setTimeout(() => { log.push("DONE " + sub); cb(null, "{}", ""); }, delay);
+      setTimeout(() => {
+        log.push("DONE " + sub);
+        let out = "{}";
+        if (reply) { try { out = reply(sub, args) ?? "{}"; } catch (e) { cb(e, "", String(e.message)); return; } }
+        cb(null, out, "");
+      }, delay);
     },
     spawn() { return { on() {}, unref() {} }; }
   };
@@ -197,6 +204,43 @@ console.log("\n[6] a release with nothing ever started does not spawn session-en
   const seq = calls(rig.log);
   ok(seq.length === 0, "no bridge subprocess is spawned at all", seq.join(" ") || "(none)");
   rig.restore();
+}
+
+console.log("\n[7] a failed `screens` enumeration is retried after the cooldown (#293)");
+{
+  // Before: one failed `screens` was cached as "no monitors" for the whole
+  // process, so every later zoom went out in GLOBAL coordinates with no
+  // --display - on a two-monitor GNOME layout that is the region-out-of-bounds
+  // error from issue #293, repeated until the app restarts.
+  let screensCalls = 0;
+  const SCREENS = JSON.stringify([{ id: "eDP-1", name: "eDP-1", geometry: { x: 0, y: 240, width: 100, height: 100 }, scale: 1, is_primary: true, is_active: true }]);
+  const rig = makeRig(5, (sub) => {
+    if (sub === "screens") { screensCalls++; if (screensCalls === 1) throw new Error("Command failed: screens"); return SCREENS; }
+    if (sub === "zoom") return JSON.stringify({ base64: "QUJD", width: 10, height: 10 });
+    return "{}";
+  });
+  const realNow = Date.now;
+  try {
+    rig.ex.__setLockHeld(true);
+    await sleep(50);
+    const first = await rig.ex.zoom({ x: 10, y: 250, w: 10, h: 10 }, 1, null);
+    ok(first && first.base64 === "QUJD", "the first zoom still captures (bridge zoom answered)");
+    ok(screensCalls === 1, "screens was asked once and failed", String(screensCalls));
+    const second = await rig.ex.zoom({ x: 10, y: 250, w: 10, h: 10 }, 1, null);
+    ok(second && second.base64 === "QUJD" && screensCalls === 1,
+       "inside the cooldown no second screens subprocess is spawned", String(screensCalls));
+    Date.now = () => realNow() + 31000;          // jump past SCREENS_RETRY_MS
+    const third = await rig.ex.zoom({ x: 10, y: 250, w: 10, h: 10 }, 1, null);
+    ok(third && third.base64 === "QUJD" && screensCalls === 2,
+       "after the cooldown screens is asked again", String(screensCalls));
+    await rig.ex.zoom({ x: 10, y: 250, w: 10, h: 10 }, 1, null);
+    ok(screensCalls === 2, "a successful list is cached for the rest of the process", String(screensCalls));
+    ok(rig.log.some(l => l.includes("screens failed") && l.includes("retrying in 30s")),
+       "and the retry is announced in the diagnostics log");
+  } finally {
+    Date.now = realNow;
+    rig.restore();
+  }
 }
 
 console.log("\n" + (fail ? `${pass} passed, ${fail} FAILED` : `ALL ${pass} CHECKS PASSED`));

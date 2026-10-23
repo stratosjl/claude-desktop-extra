@@ -2,6 +2,39 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-10-23
+
+### Claude Desktop v3.6556.2
+
+- **Rebased on the official v3.6556.2 `.deb` (bundled Electron 44.9.3).** Three patches were re-fitted to
+  the new code; none of them was absorbed upstream:
+  - `add_feature_files_quick_open.nim`: the worker host now has a per-worker `env` option, which only the
+    new frame-local worker sets. Main's live environment is now inserted ahead of that option, so a
+    worker's own `env` still takes precedence. The file-index and heavy-work workers again receive
+    `CDB_FILES_QUICK_OPEN` and `CDB_TRANSCRIPT_LIMITS`.
+  - `fix_marketplace_linux.nim`: upstream's local-plugin reader now sorts entries into plugins and
+    "other folder" plugins. Personal plugins, which the CLI stores as project scope on `$HOME`, again list
+    under Personal Plugins.
+  - `fix_update_check_own_releases.nim`: the Linux updater init now also starts a restart-enforcement
+    ticker. The update-link hook still runs before the poll.
+- **Extra -> Deployment lists upstream's new managed-settings keys**: `installedUpdateEnforcementEnabled`
+  and `installedUpdateEnforcementHours`, plus `quickEntryScreenshotsEnabled` and
+  `quickEntryFileSharingEnabled`, which only the macOS Quick Entry reads. `toolPolicyEndpoint`, which
+  upstream removed, is gone (196 keys).
+- **The GrowthBook override template covers the 17 new flags** (635 entries).
+
+### Computer Use on GNOME Wayland: consent dialog on every action, no restore token, `screens` timing out (#293)
+
+Three defects in `gnome-portal-bridge` (github.com/patrickjaja/gnome-bridge), present since its first release:
+
+- **Monitor enumeration never reached Mutter.** The bridge's decoder for `org.gnome.Mutter.DisplayConfig.GetCurrentState` was one field short of Mutter's mode signature, and zbus rejects the whole reply on a mismatch, so `screens` always fell back to opening a fresh portal session. That is the consent dialog behind `screens`, and because every pointer and capture command resolves its monitor the same way, a dialog per click and per zoom too, daemon or not. It is also why `claude-desktop --diagnose` reported `screens` timing out and why the ids were `stream-116` instead of connector names. Fixed, with a unit test pinning the decoder to Mutter's published signature; `screens` now answers in milliseconds.
+- **No restore token was ever stored.** The portal only accepts persistence for a combined RemoteDesktop + ScreenCast session through `RemoteDesktop.SelectDevices`; the library the bridge used asked on `ScreenCast.SelectSources` as well, the portal refused, and the bridge retried without persistence on every GNOME version. The bridge now builds the session itself and requests persistence the way the portal specifies. Verified on GNOME 48: after the first grant, sessions and one-shot commands run with no dialog.
+- **`session-end` could leave `serve-session` running** (and the screen-sharing indicator on). The daemon now records its pid, `session-end` waits for it and escalates to SIGTERM and SIGKILL, the daemon bounds its own teardown, and a client killed mid-request (the executor's timeout) no longer takes the daemon down with it. Its stderr goes to `$XDG_RUNTIME_DIR/gnome-portal-bridge/daemon.log`.
+
+On top: `zoom` without `--display` (the executor's fallback when it has no monitor list) now takes global coordinates and clamps the region to the display instead of refusing it on a monitor not at the origin, and the executor no longer caches a failed `screens` enumeration for the whole process (it retries after 30 s), so one slow reply cannot pin every later capture to global coordinates. The GNOME lifecycle harness covers the retry. Operator notes: in the consent dialog keep "Remember This Selection" on and turn on "Allow Remote Interaction"; `gnome-portal-bridge doctor` reports `restore_token_present`.
+
+`kwin-portal-bridge` (KDE Plasma) had the same restore-token defect: the consent prompt came back for every Computer Use session because the token was never stored. Fixed the same way in our fork and verified on Plasma 6.7.2; the next build picks it up. Keep "Allow restoring on future sessions" on in the KDE prompt.
+
 ## 2026-10-22
 
 ### "Update available" follows this project's releases

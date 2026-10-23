@@ -26,6 +26,19 @@ exactly once. The DOM/fiber rows were not re-measured live. NB the 3P Code tab r
 `"Show file tree"` 4, `"Hide file tree"` 2, `data-perf-screen` 3, `"More options for ` 39, `onPreview:` 28),
 so a 3P-mode regression can be grepped there; 1P mode still loads remote claude.ai.
 
+**Local rows re-verified statically on v3.6556.2 (2026-10-23, pristine extract):** the generic
+worker-host fork is still exactly one site, but upstream now appends per-worker opt-ins after `stdio`:
+`utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",...this.opts.env&&{env:this.opts.env()},...this.opts.disclaim&&!1})`
+(`index.chunk-Dq5Ox9te.js`, same chunk as `worker:{buildName:"file-index-worker",fileName:"fileIndexWorker.js"}`).
+Only the `frame-local-worker` host sets `env:()=>({...PATH...})` (and `disclaim:!0`); `file-index-worker`
+and `heavy-work-worker` set neither, so the `env:` sub-patch B injects right after `stdio` is the one
+those workers get, and the later spread still wins for the frame-local worker. The other three fork
+sites keep their shapes (MCP host `fork(e,t,{...o,env:s})`, the shell extractor with a literal
+`serviceName`, the pty host `fork(t.ZU("pty-host","ptyHostWorker.js")` in `index.chunk-BjNw3hmD.js`);
+main implements `fetchMentionOptions:(e,t)=>aPr(e,t??void 0)`, `mainView.js` still invokes
+`Resources_$_fetchMentionOptions`, and `file-index-worker/fileIndexWorker.js` contains
+`of this.index.search(` exactly once.
+
 ## Anchors
 
 | Anchor | Used for | Measured value | If it moves |
@@ -39,7 +52,7 @@ so a 3P-mode regression can be grepped there; 1P mode still loads remote claude.
 | `window["claude.web"].Resources.fetchMentionOptions(q, "files")` **(LOCAL, not remote - greppable in the bundle: `mainView.js` wraps the eIPC channel, `index*.chunk-*.js` registers and implements it over `FileIndexHost.search`)** | search | ≤ 50 `{id: "file-<abs>", label: "<rel>", icon, category: "Files", metadata: JSON {path, isDirectory, positions}}`, ~90 ms; rooted at the FOCUSED session cwd | warning `search-*`; hint "Search unavailable" |
 | `MENU_SEEDS` → `SESSION_MENU_SEL` → the `Files` entry | creating a Files pane when none is open | The session ⋮ is `button[aria-label^="More options for "]`, but ~76 of those exist (one per sidebar session), and it is **not** a sibling of the `Terminal` / `Diff (uncommitted changes)` / `Browser` toolbar buttons. Measured 2026-08-30 on 1.40609.0: climbing from one of those buttons, the ancestor **2 parents up** holds exactly one - that climb (`MENU_CLIMB_HOPS`, refuses on >1 match) is the anchor. Its menu renders async and its entry reads **`FilesCtrlF`** (label + shortcut, no separator, hence the `/^files/i` prefix test); clicking it mounts the pane in ~900 ms. The entry is a **TOGGLE** - only ever pressed when there is no pane. Upstream's own `Ctrl+F` accelerator is unusable from the page: a synthetic key event is untrusted and does nothing. **Nothing the page can dispatch closes that menu either** (measured 2026-08-30: Escape on body/document/the menu itself, an outside pointerdown, and a second click on the ⋮ all leave it open) - it stays mounted behind our own full-screen overlay and disappears together with it when the modal closes, so no menu is ever left over the app. `dismissMenu()` is a best-effort attempt kept for other builds, not a guarantee | the modal degrades to `HINT_NO_PANE`; warnings `no-files-menu-item` / `session-menu-threw` / `files-item-threw`. A relabelled entry means updating `FILES_ITEM_RE` |
 | `Ctrl+P` | hotkey | unbound in upstream's Electron menu (only `CmdOrCtrl+Plus` matches the substring); renderer bindings unknown, hence the capture-phase listener | a conflict shows up as both actions firing - re-check `mainView`/renderer |
-| generic worker-host fork (LOCAL bundle) | the `CDB_FILES_QUICK_OPEN` env gate reaches the file-index worker | `utilityProcess.fork(<path>,[],{serviceName:<name>,stdio:"pipe"})` - exactly ONE occurrence in the staged bundle (1.46388.2; the string quotes flip between backtick and double quote across minifier releases, so the patch matches them with a `["\`]` class), the host that `worker:{buildName:"file-index-worker"` uses. `add_feature_files_quick_open.nim` **sub-patch B rewrites it** to add `env:Object.assign({},process.env)`, because Electron hands a `fork()` with no `env` option the browser's INITIAL environment, not main's live `process.env` (measured live: the key was in main's `/proc/<pid>/environ` and in none of the utility processes). Passing main's LIVE env also forwards whatever upstream writes into it after startup - measured on 1.37937.3: `CLAUDE_CODE_SESSION_ACCESS_TOKEN` and `CLAUDE_CONFIG_DIR` - to every worker that host spawns (file-index, transcript-search, heavy-work, stall-sampler), which the initial-env default did not; same user, same app, so an exposure-surface widening rather than a boundary crossing | the patch **fails the build** (strict count: exactly one match required), so this cannot regress silently; `add_feature_transcript_limits.nim` asserts the same end state as a precondition and fails too (second consumer, see below). If upstream adds its own `env:` there, merge into it instead of prepending a second key |
+| generic worker-host fork (LOCAL bundle) | the `CDB_FILES_QUICK_OPEN` env gate reaches the file-index worker | `utilityProcess.fork(<path>,[],{serviceName:<name>,stdio:"pipe"` followed by `})` or, since 3.6556.2, by upstream's own opt-in spreads (`,...this.opts.env&&{env:this.opts.env()},...this.opts.disclaim&&!1})`) - exactly ONE occurrence in the staged bundle (1.46388.2; the string quotes flip between backtick and double quote across minifier releases, so the patch matches them with a `["\`]` class), the host that `worker:{buildName:"file-index-worker"` uses. `add_feature_files_quick_open.nim` **sub-patch B rewrites it** to add `env:Object.assign({},process.env)`, because Electron hands a `fork()` with no `env` option the browser's INITIAL environment, not main's live `process.env` (measured live: the key was in main's `/proc/<pid>/environ` and in none of the utility processes). Passing main's LIVE env also forwards whatever upstream writes into it after startup - measured on 1.37937.3: `CLAUDE_CODE_SESSION_ACCESS_TOKEN` and `CLAUDE_CONFIG_DIR` - to every worker that host spawns (file-index, transcript-search, heavy-work, stall-sampler), which the initial-env default did not; same user, same app, so an exposure-surface widening rather than a boundary crossing | the patch **fails the build** (strict count: exactly one match required), so this cannot regress silently; `add_feature_transcript_limits.nim` asserts the same end state as a precondition and fails too (second consumer, see below). Upstream's own `env:` arrived in 3.6556.2 as a conditional spread AFTER `stdio`; the patch inserts its key BEFORE that spread, so a host that opts in (today only `frame-local-worker`) keeps upstream's env and every other host gets ours |
 
 ## The harvest is row-driven, and it retries
 
@@ -92,18 +105,20 @@ at runtime never arrives).
 # 1. Which chunk hosts the file-index worker (quotes flip per minifier release - match both)
 grep -alE 'buildName:["`]file-index-worker["`]' index*.js
 # 2. Every fork call site - the one with serviceName + stdio is OUR anchor (exactly one)
-grep -aoE 'utilityProcess\.fork\([^)]{0,120}\)' index*.js | sort -u
-#    1.46388.2, UNPATCHED:
-#      utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe"})   <- generic worker host  (sub-patch B rewrites this)
-#      utilityProcess.fork(e,t,{...a,env:s})                    <- MCP host             (upstream already passes env)
-#      utilityProcess.fork(e,[],{serviceName:"Claude Desktop Shell Environment Extractor"})
-#      utilityProcess.fork(t.yS("pty-host","ptyHostWorker.js")  <- pty host
+grep -aoE 'utilityProcess\.fork\([^)]{0,160}\)' index*.js | sort -u
+#    3.6556.2, UNPATCHED (the generic host line is cut at the first ")" of this.opts.env()):
+#      utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",...this.opts.env&&{env:this.opts.env()   <- generic worker host (sub-patch B rewrites this)
+#      utilityProcess.fork(e,t,{...o,env:s})                    <- MCP host             (upstream already passes env)
+#      utilityProcess.fork(n,[],{serviceName:"Claude Desktop Shell Environment Extractor"})
+#      utilityProcess.fork(t.ZU("pty-host","ptyHostWorker.js")  <- pty host
+#    (1.46388.2 .. 3.1623.x the generic host read utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe"}))
 #    FOUR lines, not three. Neither of the last two can collide with our anchor:
 #    the pty host's serviceName is a STRING LITERAL, not the [\w$]+ identifier the
 #    regex requires, and the shell extractor has no stdio key.
 #    Use grep -a: the bundle contains NUL bytes and rg returns nothing on it.
-# 3. After patching, the anchor reads (quote char preserved as captured):
-#      utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",env:Object.assign({},process.env)})
+# 3. After patching, the anchor reads (quote char preserved as captured; our env sits BEFORE
+#    upstream's opt-in spreads, so a host that sets opts.env still overrides it):
+#      utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",env:Object.assign({},process.env),...this.opts.env&&{env:this.opts.env()},...this.opts.disclaim&&!1})
 ```
 
 If the anchor shape changes, the patch fails the build with `expected exactly 1 generic worker-host

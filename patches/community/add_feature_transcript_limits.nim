@@ -42,7 +42,7 @@
 # this patch take an "already" branch on a pristine bundle, and the absorption
 # probe blocks that. So it is asserted instead, and the build fails loudly if the
 # pass-through is ever missing, e.g. if that patch is dropped. The pinned shape is
-#   utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",env:Object.assign({},process.env)})
+#   utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",env:Object.assign({},process.env)...})
 #
 # PRECONDITION, not a sub-patch: upstream still CONSUMES the option. C's end
 # state only proves that WE pass `loadLimits:`. If upstream renamed the option,
@@ -75,7 +75,7 @@ const CTOR_SITES = 2
 # The precondition's end state (written by add_feature_files_quick_open.nim
 # sub-patch B). Quote-agnostic: the style flips between minifier releases.
 let forkEndStateRe =
-  re2"""stdio:["`]pipe["`],env:Object\.assign\(\{\},process\.env\)\}"""
+  re2"""stdio:["`]pipe["`],env:Object\.assign\(\{\},process\.env\)[,}]"""
 
 # Precondition P: upstream's two reads of the option (see the header).
 let limitsCtorReadRe = re2"""new [\w$.]+\([\w$]+\.loadLimits\)"""

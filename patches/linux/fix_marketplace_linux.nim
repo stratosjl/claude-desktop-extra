@@ -29,9 +29,17 @@ const ANCHOR_RETURN =
 const ANCHOR_PUSH =
   re2"""if\(([\w$]+)\.scope===["`]user["`]\)\{([\w$]+)\.push\(this\.entryToPluginInfo\(([\w$]+),([\w$]+),([\w$]+),([\w$]+)\)\);continue\}"""
 
-# Positive end-state (Rule 6): our `||X.scope==="project"&&X.projectPath` arm.
+# Thunk-style anchor (v3.6556.2+; scope cached in a local, result wrapped):
+#   P=()=>this.entryToPluginInfo(A,X,B,C),M=X.scope;if(M==="user")return{plugin:P()};
+# Groups: 0 = P, 1 = A, 2 = X, 3 = B, 4 = C, 5 = M, 6 = X again, 7 = M again,
+# 8 = P again (6/7/8 must equal 2/5/0).
+const ANCHOR_THUNK =
+  re2"""([\w$]+)=\(\)=>this\.entryToPluginInfo\(([\w$]+),([\w$]+),([\w$]+),([\w$]+)\),([\w$]+)=([\w$]+)\.scope;if\(([\w$]+)===["`]user["`]\)return\{plugin:([\w$]+)\(\)\};"""
+
+# Positive end-state (Rule 6): our `||X.scope==="project"&&X.projectPath` arm
+# (the thunk-style injection tests the cached local `M==="user"` first).
 const ALREADY_PATCHED =
-  re2"""if\([\w$]+\.scope==="user"\|\|[\w$]+\.scope==="project"&&[\w$]+\.projectPath"""
+  re2"""if\([\w$.]+==="user"\|\|[\w$]+\.scope==="project"&&[\w$]+\.projectPath"""
 
 proc firstWithSameEntry(
     s: string, pattern: Regex2, entryGroup: int
@@ -56,9 +64,34 @@ proc apply*(input: string): string =
     echo "  [SKIP] B already patched"
     inc patchesApplied
   else:
+    var foundThunk = false
+    var mThunk: RegexMatch2
+    for m in result.findAll(ANCHOR_THUNK):
+      if result[m.group(6)] == result[m.group(2)] and
+          result[m.group(7)] == result[m.group(5)] and
+          result[m.group(8)] == result[m.group(0)]:
+        foundThunk = true
+        mThunk = m
+        break
     let (foundNew, mNew) = result.firstWithSameEntry(ANCHOR_RETURN, 2)
     let (foundOld, mOld) = result.firstWithSameEntry(ANCHOR_PUSH, 3)
-    if foundNew:
+    if foundThunk:
+      let p = result[mThunk.group(0)]
+      let a = result[mThunk.group(1)]
+      let e = result[mThunk.group(2)]
+      let b = result[mThunk.group(3)]
+      let c = result[mThunk.group(4)]
+      let m = result[mThunk.group(5)]
+      result =
+        result[0 ..< mThunk.boundaries.a] & p & "=()=>this.entryToPluginInfo(" & a & "," &
+        e & "," & b & "," & c & ")," & m & "=" & e & ".scope;if(" & m & "===\"user\"||" &
+        homedirArm(e) & ")return{plugin:this.entryToPluginInfo(" & a & ",{..." & e &
+        ",scope:\"user\"}," & b & "," & c & ")};" & result[
+          mThunk.boundaries.b + 1 .. ^1
+        ]
+      echo "  [OK] B scope normalization (1 match, thunk-style)"
+      inc patchesApplied
+    elif foundNew:
       let e = result[mNew.group(0)]
       let g = result[mNew.group(1)]
       let n = result[mNew.group(3)]

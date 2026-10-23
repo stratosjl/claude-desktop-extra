@@ -83,6 +83,16 @@ const PRESET_PRISTINE = String.raw`Vvr={screenshotFiltering:"native",platform:"l
 const SELECTOR_PRISTINE = String.raw`_={darwin:"Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level \u2014 only granted apps and the desktop are visible.",win32:"Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level \u2014 only granted apps and the desktop are visible.",linux:"Take a screenshot of the primary display. The image is composed from the granted apps' windows only \u2014 everything else, including the desktop and other apps, is blank."}[t.platform],v=t.screenshotFiltering==="native"?_:t.screenshotFiltering==="mask"?"Take a screenshot of the primary display. Applications not in the session allowlist are masked with a solid rectangle \u2014 their content is hidden from you, but the rectangle's position shows where the window is.":"Take a screenshot of the primary display. On this platform, screenshots are NOT filtered \u2014 all open windows are visible."+(t.hitTest==="none"?" That includes this assistant's own window; input aimed at it is discarded.":" Input actions targeting apps not in the session allowlist are rejected.")`;
 const ACCESS_PRISTINE = String.raw`{win32:'This computer is running Windows. The file manager is "File Explorer" (not Finder). Elevated processes \u2014 Task Manager, UAC prompts, installers running as administrator \u2014 cannot be controlled even when granted: Windows UIPI blocks input from lower-integrity processes. If one appears, ask the user to handle it manually. ',linux:'This computer is running Linux. The file manager is usually listed as "Files" (not Finder). '+(t.screenshotFiltering==="none"?"This is a Wayland session, so access is to the entire screen rather than to individual apps: still list the apps you intend to use in request_access (the user sees them, and open_application can launch them), and once the user allows, screenshots show everything on the shared screen and clicks and keystrokes go to whatever is under them. Apps the user denied, and apps you did not ask for, are on that screen too: leave them alone. Other apps cannot be raised or hidden for you; if a window covers the one you need, click a visible part of it or ask the user to bring it forward. ":"The desktop shell (panels, docks, the Activities overview) cannot be granted; use open_application to bring apps forward. "),darwin:'This computer is running macOS. The file manager is "Finder". '}[t.platform]`;
 const SHOT_PRISTINE = String.raw`v+" Returns an error if the allowlist is empty. The returned image is what subsequent click coordinates are relative to."`;
+// The preset's five names are re-minified every release (Vvr/vV/Hvr/rA/Uvr in
+// v3.1623.0, NCr/YG/PCr/zj/FCr in v3.6556.2), so the drift check matches its
+// shape with those names wildcarded; [1] keeps evaluating the verbatim excerpt.
+const PRESET_SHAPE_RE = new RegExp(
+  ["Vvr", "vV", "Hvr", "rA", "Uvr"].reduce(
+    (src, name) => src.replace(new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "g"), "[\\w$]+"),
+    PRESET_PRISTINE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  ),
+  "g",
+);
 
 const VVR_LITERAL = '{screenshotFiltering:"native",platform:"linux"}';
 const VV_LITERAL = '{screenshotFiltering:"none",platform:"linux",hitTest:"none"}';
@@ -170,7 +180,7 @@ if (patchMissing || !existsSync(stub)) {
     writeFileSync(staged, blob);
 
     console.log("\n[2] the pristine excerpts are still verbatim in the extract (anchor drift)");
-    check("preset line present once", count(blob, PRESET_PRISTINE), 1);
+    check("preset line present once", (blob.match(PRESET_SHAPE_RE) || []).length, 1);
     check("screenshot selector present once", count(blob, SELECTOR_PRISTINE), 1);
     check("request_access prefix present once", count(blob, ACCESS_PRISTINE), 1);
     check("screenshot suffix present once", count(blob, SHOT_PRISTINE), 1);

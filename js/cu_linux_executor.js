@@ -236,15 +236,23 @@ function _gnomeEnsureSessionSync(){
 // Bridge-side monitor list (snake_case screens) for the active Wayland bridge.
 // Mirrors _x11BridgeScreens; used to map a global-logical region to a monitor
 // name + monitor-relative coords for `zoom --display`.
-var _wlScreensCache=null;
+// A successful list is cached for the process. A FAILED enumeration is not:
+// it is retried after SCREENS_RETRY_MS, so one slow D-Bus reply (or a bridge
+// that was still coming up) does not pin every later capture to global
+// coordinates for the rest of the session (issue #293).
+var SCREENS_RETRY_MS=30000;
+var _wlScreensCache=null,_wlScreensRetryAt=0;
 async function _wlBridgeScreens(){
   if(_wlScreensCache!==null)return _wlScreensCache;
-  try{var s=await _wlBridgeCallAsync(["screens"],SCREENS_TIMEOUT_MS);_wlScreensCache=Array.isArray(s)?s:[]}catch(e){globalThis.__cdbDiag("[claude-cu] "+(_wlBridge()?_wlBridge().name:"bridge")+" screens failed: "+(e.message||e));_wlScreensCache=[]}
+  if(Date.now()<_wlScreensRetryAt)return [];
+  var list;
+  try{var s=await _wlBridgeCallAsync(["screens"],SCREENS_TIMEOUT_MS);list=Array.isArray(s)?s:[];_wlScreensCache=list}
+  catch(e){globalThis.__cdbDiag("[claude-cu] "+(_wlBridge()?_wlBridge().name:"bridge")+" screens failed: "+(e.message||e)+" - retrying in "+Math.round(SCREENS_RETRY_MS/1000)+"s");_wlScreensRetryAt=Date.now()+SCREENS_RETRY_MS;list=[]}
   // An empty monitor list means the region below is sent in GLOBAL logical
   // coordinates with no --display, which is wrong on any multi-monitor layout.
   // Say so once instead of silently returning a mis-cropped image (issue #232).
-  if(!_wlScreensCache.length)globalThis.__cdbDiag("[claude-cu] no bridge monitor list - zoom will use global coordinates with no --display (multi-monitor captures will be wrong)");
-  return _wlScreensCache;
+  if(!list.length)globalThis.__cdbDiag("[claude-cu] no bridge monitor list - zoom will use global coordinates with no --display (multi-monitor captures will be wrong)");
+  return list;
 }
 // Map a global-logical region to the bridge monitor containing its top-left,
 // returning {name, x, y} with monitor-relative x/y (mirrors _x11MonForRegion).
