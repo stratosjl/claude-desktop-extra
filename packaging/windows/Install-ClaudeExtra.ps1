@@ -4,9 +4,9 @@
   current user, and manages its profile shortcuts.
 
 .DESCRIPTION
-  Copies the app\ folder next to this script to the install folder and adds
-  Start Menu shortcuts. No administrator rights are needed and nothing outside
-  the current user's profile is changed.
+  Unpacks app.zip (or copies the app\ folder) next to this script to the
+  install folder and adds Start Menu shortcuts. No administrator rights are
+  needed and nothing outside the current user's profile is changed.
 
   Run it from the unzipped folder:
     .\Install.cmd                       install or update
@@ -104,9 +104,12 @@ if ($RemoveProfile) {
 
 if ($ProfileName) { Test-ProfileName $ProfileName }
 
-# Install or update the app when this script sits next to an app\ folder.
-$Source = Join-Path $PSScriptRoot 'app'
-if (Test-Path (Join-Path $Source 'claude.exe')) {
+# Install or update the app when this script sits next to app.zip (the
+# release download) or an app\ folder (an unpacked one).
+$SourceZip = Join-Path $PSScriptRoot 'app.zip'
+$SourceDir = Join-Path $PSScriptRoot 'app'
+$HasZip = Test-Path $SourceZip
+if ($HasZip -or (Test-Path (Join-Path $SourceDir 'claude.exe'))) {
   Stop-IfRunning
   Write-Host "Installing $AppName to $InstallDir"
   # A zip downloaded from the internet marks every file; clear the mark so
@@ -114,15 +117,35 @@ if (Test-Path (Join-Path $Source 'claude.exe')) {
   Get-ChildItem -Recurse -File $PSScriptRoot | Unblock-File
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
   $dest = Join-Path $InstallDir 'app'
+  $staging = Join-Path $InstallDir 'app.new'
+  if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
+  if ($HasZip) {
+    # Unpacked here rather than by Explorer: the app's deepest paths fit
+    # Windows' 260-character limit under this folder, not under any folder.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($SourceZip)
+    $longest = 0
+    try {
+      foreach ($e in $zip.Entries) { if ($e.FullName.Length -gt $longest) { $longest = $e.FullName.Length } }
+    } finally { $zip.Dispose() }
+    if ($staging.Length + 1 + $longest -ge 260) {
+      throw "The install folder path is too long for Windows' 260-character limit: $InstallDir. Use a shorter -InstallDir."
+    }
+    Write-Host '  Unpacking...'
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($SourceZip, $staging)
+  } else {
+    Copy-Item -Recurse -Force $SourceDir $staging
+  }
+  if (-not (Test-Path (Join-Path $staging 'claude.exe'))) { throw "claude.exe missing after unpacking to $staging" }
   if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-  Copy-Item -Recurse -Force $Source $dest
+  Rename-Item $staging 'app'
   foreach ($f in @('VERSION.txt', 'README-Windows.txt', 'Install-ClaudeExtra.ps1', 'Install.cmd')) {
     $p = Join-Path $PSScriptRoot $f
     if (Test-Path $p) { Copy-Item -Force $p $InstallDir }
   }
   Add-Shortcuts ''
 } elseif (-not (Test-Path $Exe)) {
-  throw "No app\ folder next to this script and nothing installed in $InstallDir. Run this from the unzipped download."
+  throw "No app.zip next to this script and nothing installed in $InstallDir. Run this from the unzipped download."
 }
 
 if ($ProfileName) { Add-Shortcuts $ProfileName }

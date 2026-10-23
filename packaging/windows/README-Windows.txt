@@ -25,12 +25,17 @@ Install
 
 1. Unzip the download anywhere.
 2. Double-click Install.cmd.
-   It copies the app to %LOCALAPPDATA%\Programs\Claude Desktop Extra and adds
-   "Claude (Extra)" to the Start Menu. No administrator rights are needed.
+   It unpacks the app (app.zip) to %LOCALAPPDATA%\Programs\Claude Desktop
+   Extra and adds "Claude (Extra)" to the Start Menu. No administrator rights
+   are needed. Do not unzip app.zip yourself: some of its paths are too long
+   for Windows' limit when unpacked under a download folder.
 
-Windows may warn that the app is unrecognized ("Windows protected your PC"):
-patching the app invalidates Anthropic's code signature. Click "More info",
-then "Run anyway".
+Windows may warn about Install.cmd ("Windows protected your PC"): this build
+is not signed, because patching the app breaks Anthropic's signature. Click
+"More info", then "Run anyway".
+
+Smart App Control (Windows Security > App & browser control) blocks unsigned
+apps: while it is on, this build will not start.
 
 If the official Claude app is installed too, quit it before starting this one:
 the default profile shares its data folder (%APPDATA%\Claude), so you stay

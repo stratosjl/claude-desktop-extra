@@ -189,7 +189,21 @@ rm -f "$APP_TREE/squirrel.exe" "$APP_TREE/claude_ExecutionStub.exe"
 NAME="claude-desktop-extra-$VERSION-windows-$ARCH"
 STAGE="$WORK/$NAME"
 mkdir -p "$STAGE"
-mv "$APP_TREE" "$STAGE/app"
+
+# The app goes in as app.zip, which Install-ClaudeExtra.ps1 unpacks straight
+# into its install folder. Unpacked by Explorer instead, its deepest files
+# (ion-dist fonts) would sit under the user's download folder plus our folder
+# names and pass Windows' 260-character path limit ("Error 0x80010135: Path
+# too long"). The installer folder is short and known, so cap the app's own
+# paths here: %LOCALAPPDATA%\Programs\Claude Desktop Extra\app.new\ is about 70
+# characters for a typical user name.
+MAX_REL_PATH=150
+longest="$(cd "$APP_TREE" && find . -type f | sed 's|^\./||' \
+    | awk 'length($0) > n { n = length($0); p = $0 } END { print n "\t" p }')"
+[ "${longest%%$'\t'*}" -le "$MAX_REL_PATH" ] \
+    || die "app path longer than $MAX_REL_PATH characters, too close to Windows' path limit: ${longest#*$'\t'}"
+( cd "$APP_TREE" && zip -qr -X "$STAGE/app.zip" . )
+rm -rf "$APP_TREE"
 cp "$PKG_DIR/Install-ClaudeExtra.ps1" "$PKG_DIR/Install.cmd" "$STAGE/"
 sed 's/$/\r/' "$PKG_DIR/README-Windows.txt" > "$STAGE/README-Windows.txt"
 {
@@ -204,6 +218,7 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 ZIP="$OUT_DIR/$NAME.zip"
 rm -f "$ZIP"
-( cd "$WORK" && zip -qr -X "$ZIP" "$NAME" )
+# -n .zip: app.zip is already compressed; store it as is.
+( cd "$WORK" && zip -qr -X -n .zip "$ZIP" "$NAME" )
 ( cd "$OUT_DIR" && sha256sum "$NAME.zip" > "$NAME.zip.sha256" )
 log "Built $ZIP ($(du -h "$ZIP" | cut -f1))"

@@ -20,12 +20,24 @@ Everything else is Anthropic's Windows app as shipped. Left out because Windows 
 ## Install
 
 1. Download `claude-desktop-extra-<version>-windows-x64.zip` (or `-arm64`) from a `windows-v<version>` release, or from the artifacts of a **Build Windows** workflow run.
-2. Unzip it and double-click **Install.cmd**. It copies the app to `%LOCALAPPDATA%\Programs\Claude Desktop Extra` and adds **Claude (Extra)** to the Start Menu. No administrator rights are needed.
-3. The first start may show "Windows protected your PC": click **More info → Run anyway**. Patching the app invalidates Anthropic's code signature (see [How it is built](#how-it-is-built)).
+2. Unzip it and double-click **Install.cmd**. It unpacks the app (`app.zip` in the download) to `%LOCALAPPDATA%\Programs\Claude Desktop Extra` and adds **Claude (Extra)** to the Start Menu. No administrator rights are needed.
+3. Windows may show "Windows protected your PC" for `Install.cmd`: click **More info → Run anyway**. See [Code signing](#code-signing) for why.
+
+The app ships zipped inside the download because its deepest files are about 100 characters below the app folder. Unzipped by Explorer under a download folder, they can pass Windows' 260-character path limit ("Error 0x80010135: Path too long"); the installer unpacks them under its own short folder instead.
 
 To update, install the next zip the same way; data and sign-in are kept. `Install.cmd -Uninstall` removes the app and its shortcuts and keeps the data.
 
 **With the official app installed too:** the default profile uses the same data folder (`%APPDATA%\Claude`), so you stay signed in, but only one of the two runs at a time - quit the official app first. Sign-in links (`claude://`) may open either app; quit the one you are not signing in to.
+
+## Code signing
+
+Anthropic signs `claude.exe`. The build has to change it (see [How it is built](#how-it-is-built)), so its signature no longer verifies, and the build is not signed by anyone else. What that means:
+
+- **SmartScreen.** Files from a downloaded zip carry the "downloaded from the internet" mark, so Windows may warn once when you run `Install.cmd`. The installer clears the mark, and the app it unpacks never had it, so starting Claude afterwards should not warn.
+- **Smart App Control.** If it is on (Windows Security → App & browser control), Windows blocks apps whose signature is missing or broken, so this build will not start. Smart App Control has no per-app exception.
+- **Antivirus** may look harder at an exe whose signature does not verify. The build changes only the 64-character asar hash inside it; `scripts/windows/asar_integrity.py` checks the old value before replacing it.
+
+A signature of our own would need a code-signing certificate (an OV certificate from a certificate authority, or Microsoft's Artifact Signing, which only organizations or US/Canadian individuals can get) and the right to distribute Anthropic's app under that name. Even then SmartScreen and Smart App Control trust a new publisher only after it builds a reputation. The build is not signed for now; a signing step can be added to the **Build Windows** workflow if a project identity with a certificate exists.
 
 ## Profiles
 
@@ -79,7 +91,7 @@ Save hand-edited files as **UTF-8 without a byte-order mark**: Notepad's default
    - `apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (every core and community feature except the Linux window handling, the Quick Entry socket and the Linux profile URL routing), then everything in `patches/windows/`;
    - the allow-non-Anthropic-models patch of `resources/ion-dist` (the 3P setup window) runs on that folder. The strictness rules are the same as on Linux: a patch that does not match fails the build.
 4. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
-5. Drops the Squirrel updater (the build is portable and does not auto-update) and zips `app\` with `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` and `VERSION.txt`.
+5. Drops the Squirrel updater (the build is portable and does not auto-update), checks that no path in the app is longer than 150 characters, packs the app as `app.zip` and zips it with `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` and `VERSION.txt`.
 
 ```bash
 scripts/windows/build-windows.sh                    # current release, x64
