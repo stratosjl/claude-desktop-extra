@@ -74,6 +74,28 @@ for (const [file, marker] of MODULES) {
      "allow_non_anthropic_models.js: the real module on win32, the inert stub on darwin");
 }
 
+// The custom models router runs inside the Claude Code binary, which the
+// Windows app starts as claude.exe: it must hook fetch there, as it does for
+// claude on Linux, and stay out of any other Bun program.
+{
+  const cfg = JSON.stringify({ providers: [{ id: "or", baseUrl: "https://openrouter.ai/api", apiKey: "sk-or-test-1234567890",
+    models: [{ id: "deepseek/deepseek-v4.1-flash", context: "1m" }] }] });
+  const hooks = (execPath) => {
+    const rawFetch = () => Promise.resolve(new Response("{}"));
+    const sandbox = {
+      require: (m) => Module.createRequire(import.meta.url)(m),
+      process: { env: { CDB_CUSTOM_MODELS_JSON: cfg }, pid: 1, execPath },
+      Bun: {}, fetch: rawFetch, Response, Headers, URL, Buffer, console, TextDecoder, TextEncoder, ReadableStream
+    };
+    sandbox.globalThis = sandbox;
+    vm.runInNewContext(readFileSync(join(ROOT, "js", "custom_models_preload.js"), "utf8"), vm.createContext(sandbox));
+    return sandbox.fetch !== rawFetch;
+  };
+  ok(hooks("/opt/Claude/claude-code/2.1.300/claude.exe"), "custom_models_preload.js: hooks fetch in claude.exe (Windows)");
+  ok(hooks("/opt/Claude/claude-code/2.1.300/claude"), "custom_models_preload.js: hooks fetch in claude (Linux)");
+  ok(!hooks("/usr/bin/bun.exe"), "custom_models_preload.js: leaves other Bun programs alone");
+}
+
 // The inline modules of the Nim patches (theme engine, theme picker) carry the
 // same widened gate; the Windows smoke test proves they run.
 for (const nim of ["patches/core/add_feature_custom_themes.nim", "patches/community/add_feature_theme_picker.nim"]) {

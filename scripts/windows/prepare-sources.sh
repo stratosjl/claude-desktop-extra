@@ -4,7 +4,8 @@
 # The fork never edits upstream files in place (that is what keeps the daily
 # upstream sync conflict-free). The upstream files the Windows build needs
 # changed - the win32 gates of the shipped features, the Windows Settings ->
-# Extra nav and Community list, Windows fixes (custom models short path, diff
+# Extra nav and Community list, Windows fixes (custom models short path and
+# claude.exe, diff
 # views git resolution, quick open path joins, theme engine details, the 3P
 # folder), apply_patches.py --windows, the patches/windows Makefile rule and
 # the Windows test cases - live in scripts/windows/upstream-overlay.patch and

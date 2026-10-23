@@ -11,6 +11,20 @@ index c8ce7db..c8bbc7c 100644
      globalThis.__cdbAllowNonAnthropicModels = function () { return false; };
      return;
    }
+diff --git a/js/custom_models_preload.js b/js/custom_models_preload.js
+index 966d92f..1783462 100644
+--- a/js/custom_models_preload.js
++++ b/js/custom_models_preload.js
+@@ -73,7 +73,8 @@
+ 
+   if (!SELFTEST) {
+     if (typeof Bun === "undefined") return;
+-    if (path.basename(process.execPath) !== "claude") return;
++    // claude on Linux, claude.exe on Windows (the app's binaryName for win32).
++    if (path.basename(process.execPath).replace(/\.exe$/i, "") !== "claude") return;
+   }
+   if (!rawJson && !routesPath) return;
+ 
 diff --git a/js/diff_views_main.js b/js/diff_views_main.js
 index 9a8009c..e735c06 100644
 --- a/js/diff_views_main.js

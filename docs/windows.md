@@ -111,7 +111,7 @@ This fork follows [patrickjaja/claude-desktop-extra](https://github.com/patrickj
   - the `win32` gates of the shipped features;
   - the Windows Settings → Extra nav and Community list (`js/extra_settings_page.js`);
   - Windows fixes:
-    - the custom models 8.3 short path;
+    - custom models: the 8.3 short path, and the router accepting `claude.exe` (the Windows name of the Claude Code binary) as well as `claude`;
     - git resolved from PATH only, with no console window, in diff views;
     - native path joins in files quick open;
     - the theme caption colors, BOM-tolerant config reads, and no app menu in the theme picker;
