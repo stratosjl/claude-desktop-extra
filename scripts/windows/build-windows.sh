@@ -185,6 +185,8 @@ sed 's/$/\r/' "$PKG_DIR/README-Windows.txt" > "$STAGE/README-Windows.txt"
 } | sed 's/$/\r/' > "$STAGE/VERSION.txt"
 
 mkdir -p "$OUT_DIR"
+# Absolute: zip runs from inside $WORK below.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 ZIP="$OUT_DIR/$NAME.zip"
 rm -f "$ZIP"
 ( cd "$WORK" && zip -qr -X "$ZIP" "$NAME" )
