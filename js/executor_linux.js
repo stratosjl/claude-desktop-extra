@@ -6,6 +6,48 @@ const execFile = promisify(execFileCb)
 
 const DEFAULT_HOST_BUNDLE_ID = 'com.anthropic.claude'
 
+// execFile budgets for kwin-portal-bridge. Each sits above the bridge's own
+// bound for that command, so a stuck daemon surfaces as the bridge's error
+// (which names its daemon.log) and the kill here is only the backstop; the
+// values match the GNOME executor (js/cu_linux_executor.js).
+//   session-start  bridge waits up to 120 s for the consent dialog
+//   portal         daemon-proxied commands; bridge client budget 25 s
+//   local          KWin D-Bus / desktop-file commands, no portal involved
+//   session-end    bridge reaps a silent daemon within ~4 s
+// type and hold-key take time by design and get it on top (the bridge adds
+// the same: per character its delay plus TYPE_PER_CHAR_ALLOWANCE_MS).
+// teach-step and teach-wait-event block until the user acts in the overlay,
+// so they have no timeout.
+const KWIN_SESSION_START_MS = 125000
+const KWIN_PORTAL_MS = 30000
+const KWIN_LOCAL_MS = 15000
+const KWIN_SESSION_END_MS = 15000
+const KWIN_EXIT_SESSION_END_MS = 5000
+const KWIN_TYPE_DEFAULT_DELAY_MS = 12
+const TYPE_PER_CHAR_ALLOWANCE_MS = 5
+const KWIN_PORTAL_COMMANDS = new Set([
+  'pointer-move', 'pointer-click', 'pointer-scroll', 'pointer-drag',
+  'left-mouse-down', 'left-mouse-up', 'key-sequence', 'type', 'hold-key',
+  'read-clipboard', 'write-clipboard', 'screenshot', 'zoom',
+  'set-overlay-display',
+])
+const KWIN_UNBOUNDED_COMMANDS = new Set(['teach-step', 'teach-wait-event'])
+
+function bridgeTimeoutMs(command) {
+  if (command === 'session-start') return KWIN_SESSION_START_MS
+  if (command === 'session-end') return KWIN_SESSION_END_MS
+  if (KWIN_UNBOUNDED_COMMANDS.has(command)) return 0
+  if (KWIN_PORTAL_COMMANDS.has(command)) return KWIN_PORTAL_MS
+  return KWIN_LOCAL_MS
+}
+
+function typeTimeoutMs(text, delayMs) {
+  const delay = typeof delayMs === 'number' && Number.isFinite(delayMs)
+    ? Math.max(0, Math.round(delayMs))
+    : KWIN_TYPE_DEFAULT_DELAY_MS
+  return KWIN_PORTAL_MS + [...String(text)].length * (delay + TYPE_PER_CHAR_ALLOWANCE_MS)
+}
+
 const LINUX_CU_CAPABILITIES = {
   screenshotFiltering: 'native',
   platform: 'linux',
@@ -15,6 +57,16 @@ let sessionReadyPromise = null
 let sessionStopPromise = null
 let bridgeSessionActive = false
 let exitHookInstalled = false
+// True from the first session-start until a session-end succeeds: a
+// session-start that failed or timed out can still leave a daemon waiting on
+// its consent dialog, which only a session-end removes.
+let bridgeDaemonMayExist = false
+// The user stopped screen sharing (bridge exit 5) during the current CU lock.
+// Every later bridge action in that lock fails fast with
+// STOPPED_BY_USER_MESSAGE and no session is started again; cleared when the
+// lock is released (after its session-end, which removes the bridge's
+// stopped-by-user marker) or a new lock starts.
+let stoppedByUser = false
 const legacyDisplayIdToElectronDisplayId = new Map()
 
 const SYNTHETIC_INSTALLED_APPS = [
@@ -107,14 +159,68 @@ function rememberDisplayIdMappings(displays) {
   }
 }
 
+// Bridge CLI contract exit codes (docs/computer-use-bridge-contract.md):
+// 3 = the target monitor is not shared in the live portal session, 4 = no live
+// session (the session daemon is gone), 5 = the user stopped screen sharing
+// (the portal session was closed from the desktop's screen-sharing indicator).
+// Consumers switch on these; the text matching is only the fallback for
+// bridges below contract 1.
+const BRIDGE_EXIT_NOT_SHARED = 3
+const BRIDGE_EXIT_NO_SESSION = 4
+const BRIDGE_EXIT_STOPPED_BY_USER = 5
+
+// What the model reads after the user stopped screen sharing. Twin:
+// _CU_STOPPED_BY_USER_MSG in js/cu_linux_executor.js.
+// It cannot promise more than "the next session": upstream keeps the CU lock
+// across turns while a guided tour (teach mode) runs, so the latch holds until
+// the tour ends or the user clicks Stop in Claude. Teach mode ending is NOT a
+// clear signal here: a stop during a tour fails the step, which itself ends
+// teach mode, and restarting there would re-share the screen behind the user.
+export const STOPPED_BY_USER_MESSAGE = "Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use resumes with the next Computer Use session - in a guided tour, after the tour ends or the user clicks Stop in Claude."
+
+function stoppedByUserError() {
+  const error = new Error(STOPPED_BY_USER_MESSAGE)
+  error.__cdbStoppedByUser = true
+  return error
+}
+
+// A bridge error about a monitor the user did not share in the portal consent
+// dialog. Contract-1 bridges exit 3 with "monitor <ID> (<geometry>) is not
+// shared in the portal session (shared: <list>)"; older kwin-portal-bridge
+// builds said "no portal stream matched screen `<id>`". Users only have
+// `claude-desktop`, and this text is what the model reads: rewrite it into an
+// instruction for the user. Text that does not parse keeps its wording and gets
+// the instruction appended - always on exit 3, otherwise when it names the
+// condition. Twin: _cuNotSharedText in js/cu_linux_executor.js.
+const RESET_SCREEN_SHARING_HINT = 'Ask the user to run `claude-desktop --reset-screen-sharing`, then share all monitors when the screen-sharing dialog appears.'
+
+export function notSharedText(message, isNotShared = false) {
+  const text = String(message ?? '')
+  let m = text.match(/monitor (\S+) \([^)]*\) is not shared in the portal session \(shared: ([^)]*)\)(?:;[^\n]*?forget-session[^\n]*)?/)
+  if (m) {
+    return `${text.slice(0, m.index)}Monitor ${m[1]} is not shared with Claude (shared: ${m[2].trim() || 'none'}). ${RESET_SCREEN_SHARING_HINT}${text.slice(m.index + m[0].length)}`
+  }
+  m = text.match(/no portal stream matched screen `([^`]+)`/)
+  if (m) {
+    return `${text.slice(0, m.index)}Monitor ${m[1]} is not shared with Claude. ${RESET_SCREEN_SHARING_HINT}${text.slice(m.index + m[0].length)}`
+  }
+  if (isNotShared || /no portal stream matched|is not shared in the portal session|forget-session/.test(text)) {
+    const trimmed = text.replace(/\s+$/, '')
+    return `${trimmed}${/[.!?]$/.test(trimmed) ? ' ' : '. '}${RESET_SCREEN_SHARING_HINT}`
+  }
+  return null
+}
+
 async function execBridge(command, args, opts = {}) {
   const spec = buildBridgeCommand(command, args)
-  debugLog(`exec ${command}`, { args: spec.args })
+  const timeout = opts.timeoutMs ?? bridgeTimeoutMs(command)
+  debugLog(`exec ${command}`, { args: spec.args, timeout })
   try {
     const { stdout } = await execFile(spec.command, spec.args, {
       encoding: 'utf8',
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
+      timeout,
     })
     debugLog(`exec ${command} ok`, {
       stdoutLength: stdout.trim().length,
@@ -123,7 +229,10 @@ async function execBridge(command, args, opts = {}) {
   } catch (error) {
     const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : ''
     const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : ''
-    const detail = stderr || stdout || error?.message || String(error)
+    const timedOut = timeout > 0 && error?.killed === true && !!error?.signal
+    const detail = timedOut
+      ? `no reply within ${timeout} ms (killed with ${error.signal})${stderr ? `: ${stderr}` : ''}`
+      : stderr || stdout || error?.message || String(error)
 
     if (opts.allowAlreadyActive && /already active/i.test(detail)) {
       debugLog(`exec ${command} already active`, { detail })
@@ -134,7 +243,44 @@ async function execBridge(command, args, opts = {}) {
       detail,
       args: spec.args,
     })
-    throw new Error(`[kwin-portal-bridge] ${command} failed: ${detail}`)
+    // The session daemon is gone while we still hold its session open:
+    // `claude-desktop --reset-screen-sharing` (the bridge's forget-session)
+    // ended it. Forget the memoized start so the next command starts one fresh
+    // session; this one is not retried (no consent dialog behind the model's
+    // back for a command it already got an answer to).
+    const exitCode = typeof error?.code === 'number' ? error.code : null
+    // The user stopped screen sharing: the daemon is gone on purpose. Latch it
+    // for this lock (ensureBridgeSession then fails fast and never starts a
+    // new session) and keep sessionReadyPromise, so the lock release still
+    // sends session-end, which clears the bridge's stopped-by-user marker.
+    // session-start counts too: it exits 5 when the new daemon was closed
+    // before it became ready (bridgeDaemonMayExist keeps the release's
+    // session-end even though ensureBridgeSession drops the failed start).
+    if (
+      command !== 'session-end'
+      && (exitCode === BRIDGE_EXIT_STOPPED_BY_USER || /screen sharing was stopped|stopped by the user/.test(detail))
+    ) {
+      if (bridgeSessionActive && !sessionStopPromise && !stoppedByUser) {
+        stoppedByUser = true
+        bridgeDaemonMayExist = true
+        globalThis.__cdbDiag(`[linux-executor] screen sharing was stopped (${command}); no new session until this Computer Use lock ends`)
+      }
+      throw stoppedByUserError()
+    }
+    if (
+      KWIN_PORTAL_COMMANDS.has(command)
+      && (exitCode === BRIDGE_EXIT_NO_SESSION || /no active portal session/.test(detail))
+      && bridgeSessionActive
+      && !stoppedByUser
+      && sessionReadyPromise
+      && !sessionStopPromise
+    ) {
+      sessionReadyPromise = null
+      globalThis.__cdbDiag('[linux-executor] session daemon is gone (screen sharing reset?); the next command starts a new session')
+      throw new Error(`[kwin-portal-bridge] ${command} failed: ${detail} - the screen-sharing session was ended; retry the action to start a new one (the screen-sharing dialog may appear)`)
+    }
+    const rewritten = notSharedText(detail, exitCode === BRIDGE_EXIT_NOT_SHARED)
+    throw new Error(`[kwin-portal-bridge] ${command} failed: ${rewritten ?? detail}`)
   }
 }
 
@@ -160,9 +306,13 @@ async function ensureBridgeSession() {
   if (!bridgeSessionActive) {
     throw new Error('[kwin-portal-bridge] bridge session is not active; cuLock is not held')
   }
+  if (stoppedByUser) {
+    throw stoppedByUserError()
+  }
   if (!sessionReadyPromise) {
     debugLog('starting bridge session')
     sessionReadyPromise = (async () => {
+      bridgeDaemonMayExist = true
       await execBridge('session-start', [], { allowAlreadyActive: true })
     })().catch(error => {
       sessionReadyPromise = null
@@ -177,13 +327,16 @@ function installExitHook() {
   if (exitHookInstalled) return
   exitHookInstalled = true
   process.once('exit', () => {
-    if (!bridgeSessionActive && !sessionReadyPromise) return
+    if (!bridgeSessionActive && !sessionReadyPromise && !bridgeDaemonMayExist) return
     const shutdownSpec = buildBridgeCommand('session-end', [])
     try {
       debugLog('stopping bridge session on process exit', shutdownSpec)
+      // Bounded: this blocks app quit. The bridge itself reaps a silent
+      // daemon (SIGTERM, then SIGKILL) well inside this budget.
       spawnSync(shutdownSpec.command, shutdownSpec.args, {
         stdio: 'ignore',
         windowsHide: true,
+        timeout: KWIN_EXIT_SESSION_END_MS,
       })
     } catch {}
   })
@@ -192,6 +345,12 @@ function installExitHook() {
 async function startBridgeSession() {
   installExitHook()
   bridgeSessionActive = true
+  // A new lock is a new task: a stop from the previous one no longer applies
+  // (this session-start removes the bridge's stopped-by-user marker).
+  if (stoppedByUser) {
+    stoppedByUser = false
+    globalThis.__cdbDiag('[linux-executor] stopped-by-user latch cleared (new lock)')
+  }
   if (sessionStopPromise) {
     await sessionStopPromise
   }
@@ -203,8 +362,13 @@ async function stopBridgeSession() {
   if (sessionStopPromise) {
     return sessionStopPromise
   }
-  if (!sessionReadyPromise) {
+  // No start in flight. A start that FAILED cleared sessionReadyPromise but
+  // may still have left a daemon waiting on its consent dialog (the bridge's
+  // ready timeout leaves it waiting by design), so only skip when no daemon
+  // can exist.
+  if (!sessionReadyPromise && !bridgeDaemonMayExist) {
     debugLog('stopBridgeSession skipped; no active session promise')
+    stoppedByUser = false
     return
   }
 
@@ -212,20 +376,27 @@ async function stopBridgeSession() {
   sessionReadyPromise = null
   sessionStopPromise = (async () => {
     try {
-      await readyPromise
+      if (readyPromise) await readyPromise
     } catch (error) {
+      // Still end it: a session-start that timed out leaves the daemon
+      // waiting on its consent dialog. session-end is idempotent.
       debugLog('stopBridgeSession after failed startup', {
         detail: error instanceof Error ? error.message : String(error),
       })
-      return
     }
     debugLog('stopping bridge session')
     await execBridge('session-end', [])
+    bridgeDaemonMayExist = false
   })().catch(error => {
     globalThis.__cdbDiag('[linux-executor] bridge session shutdown failed', error)
     throw error
   }).finally(() => {
     sessionStopPromise = null
+    // The lock that saw the user stop sharing is over.
+    if (stoppedByUser && !bridgeSessionActive) {
+      stoppedByUser = false
+      globalThis.__cdbDiag('[linux-executor] stopped-by-user latch cleared (lock released)')
+    }
   })
 
   return sessionStopPromise
@@ -686,7 +857,9 @@ export function createRustLinuxBackend() {
         '--duration-ms',
         String(durationMs),
       ]
-      await execBridgeJson('hold-key', args)
+      await execBridgeJson('hold-key', args, {
+        timeoutMs: KWIN_PORTAL_MS + Math.max(0, Number(durationMs) || 0),
+      })
     },
 
     async type(text, opts) {
@@ -696,7 +869,9 @@ export function createRustLinuxBackend() {
         return
       }
       await ensureBridgeSession()
-      await execBridgeJson('type', ['--text', text])
+      await execBridgeJson('type', ['--text', text], {
+        timeoutMs: typeTimeoutMs(text),
+      })
     },
 
     async typePaced(text, delayMs) {
@@ -706,7 +881,9 @@ export function createRustLinuxBackend() {
       if (typeof delayMs === 'number' && Number.isFinite(delayMs)) {
         args.push('--delay-ms', String(Math.max(0, Math.round(delayMs))))
       }
-      await execBridgeJson('type', args)
+      await execBridgeJson('type', args, {
+        timeoutMs: typeTimeoutMs(text, delayMs),
+      })
     },
 
     async readClipboard() {

@@ -1915,6 +1915,16 @@ async function run() {
   const items = ourItems();
   const box = navbox();
 
+  // --- the Windows build: the page runs with navigator.platform "Win32" and
+  //     offers the Models panel only.
+  if (kind === "windows") {
+    ok(items.length === 1, "Windows: one row was added (" + items.length + ")");
+    ok(items.length === 1 && items[0].textContent.trim() === "Models",
+       "Windows: the row is Models (" + (items[0] ? items[0].textContent.trim() : "none") + ")");
+    if (items.length === 1) await assertPanelMounts(items[0]);
+    return;
+  }
+
   ok(items.length === LABELS.length, LABELS.length + " rows were added (" + items.length + ")");
   ok(!!document.querySelector(".cdbx-navgroup"), "the rainbow Extra label is in the DOM");
   ok(document.querySelector(".cdbx-navgroup").textContent === "Extra", "it says Extra");
@@ -2530,6 +2540,9 @@ window.cdbExtra = {
 };
 </script>
 <script>
+${name === "windows" ? 'Object.defineProperty(navigator, "platform", { get: function () { return "Win32"; } });' : ""}
+</script>
+<script>
 // Exactly how the main process delivers it: the source as one evaluated string,
 // whose value is the status line executeJavaScript() logs.
 var __status = eval(${JSON.stringify(PAGE_JS)});
@@ -2564,7 +2577,8 @@ const scenarios = [
   ["es-testid", FIXTURE_ES(true)],
   ["es-labels", FIXTURE_ES(false)],
   ["no-headers", FIXTURE_NO_HEADERS],
-  ["bare", FIXTURE_BARE]
+  ["bare", FIXTURE_BARE],
+  ["windows", FIXTURE_REAL(true, false)]
 ];
 
 let pass = 0;
