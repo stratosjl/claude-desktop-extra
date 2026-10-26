@@ -50,7 +50,233 @@ function _xdgAppDirs(){
   var dh=process.env.XDG_DATA_HOME;add(dh&&dh.charAt(0)==="/"?dh:_path.join(home,".local/share"));
   (process.env.XDG_DATA_DIRS||"/usr/local/share:/usr/share").split(":").forEach(add);
   add(_path.join(home,".local/share/flatpak/exports/share"));add("/var/lib/flatpak/exports/share");
+  // Dirs that are normally in XDG_DATA_DIRS but not for a session that skipped
+  // the profile scripts: snap, NixOS system + per-user profiles, nix-env.
+  var usr=process.env.USER||process.env.LOGNAME||"";
+  if(!usr){try{usr=_os.userInfo().username}catch(e){}}
+  add("/var/lib/snapd/desktop");add("/run/current-system/sw/share");
+  if(usr&&/^[\w.-]+$/.test(usr))add("/etc/profiles/per-user/"+usr+"/share");
+  add(_path.join(home,".nix-profile/share"));
   return out;
+}
+// ── Desktop Entry parsing + launching (shared by listInstalledApps / openApp) ──
+// Parses only the [Desktop Entry] group (first plain Exec/Name/Icon/Path/
+// TryExec/Terminal/DBusActivatable; localized keys and [Desktop Action ...]
+// groups are ignored). Exec follows the Desktop Entry spec: the string escapes
+// (\s \n \t \r \\) are applied once, then the value is split into argv on
+// unquoted space/tab ("-quoting, backslash escapes " ` $ \ inside quotes; an
+// unquoted backslash escapes the next character, as in g_shell_parse_argv, so
+// the result does not depend on gio being installed), then field codes are
+// expanded. An unterminated quote, a trailing lone backslash or a trailing
+// lone % marks the Exec malformed (argv=null, launcher tools take over).
+function _deUnescape(v){return v.replace(/\\(s|n|t|r|\\)/g,function(m,c){return c==="s"?" ":c==="n"?"\n":c==="t"?"\t":c==="r"?"\r":"\\"})}
+function _splitExec(s){
+  var out=[],cur="",has=false,inq=false;
+  for(var i=0;i<s.length;i++){
+    var c=s.charAt(i);
+    if(inq){
+      if(c==="\\"){
+        if(i+1>=s.length)return null;
+        var nx=s.charAt(i+1);
+        if(nx==='"'||nx==="`"||nx==="$"||nx==="\\"){cur+=nx;i++}else cur+=c;
+      }else if(c==='"')inq=false;
+      else cur+=c;
+    }else if(c==='"'){inq=true;has=true}
+    else if(c===" "||c==="\t"){if(has||cur){out.push(cur);cur="";has=false}}
+    else if(c==="\\"){if(i+1>=s.length)return null;cur+=s.charAt(++i);has=true}
+    else cur+=c;
+  }
+  if(inq)return null;
+  if(has||cur)out.push(cur);
+  return out;
+}
+function _expandExecCodes(argv,e){
+  var out=[];
+  for(var j=0;j<argv.length;j++){
+    var a=argv[j];
+    if(a==="%i"){if(e.icon)out.push("--icon",e.icon);continue}
+    if(/^%[fFuUdDnNvm]$/.test(a))continue;
+    var r="";
+    for(var i=0;i<a.length;i++){
+      if(a.charAt(i)!=="%"){r+=a.charAt(i);continue}
+      var k=a.charAt(++i);
+      if(k==="")return null;
+      if(k==="%")r+="%";else if(k==="c")r+=e.name;else if(k==="k")r+=e.file;
+    }
+    out.push(r);
+  }
+  return out;
+}
+var _hasOwn=Object.prototype.hasOwnProperty;
+// -> {name,dfn,file,icon,path,tryExec,terminal,dbus,argv,malformed,base} or null.
+function _parseDesktopEntry(content,fp,fname){
+  var g={},inG=false,seen=false,lines=content.replace(/^\uFEFF/,"").split("\n");
+  for(var i=0;i<lines.length;i++){
+    var l=lines[i].replace(/\r$/,"");
+    if(!l||l.charAt(0)==="#")continue;
+    var h=l.match(/^\[([^\]]+)\]\s*$/);
+    if(h){if(inG)break;inG=h[1]==="Desktop Entry";if(inG)seen=true;continue}
+    if(!inG)continue;
+    var kv=l.match(/^([A-Za-z0-9-]+)[ \t]*=[ \t]*(.*)$/);
+    if(kv&&!_hasOwn.call(g,kv[1]))g[kv[1]]=kv[2];
+  }
+  if(!seen||!g.Name)return null;
+  if(g.Type&&g.Type.trim()!=="Application")return null;
+  var e={name:_deUnescape(g.Name).trim(),dfn:fname.replace(/\.desktop$/,""),file:fp,
+    icon:g.Icon?_deUnescape(g.Icon).trim():"",path:g.Path?_deUnescape(g.Path).trim():"",
+    tryExec:g.TryExec?_deUnescape(g.TryExec).trim():"",terminal:(g.Terminal||"").trim()==="true",
+    dbus:(g.DBusActivatable||"").trim()==="true",argv:null,malformed:false,base:""};
+  if(!e.name)return null;
+  var raw=g.Exec!==void 0?_deUnescape(g.Exec).trim():"";
+  if(raw){
+    var sp=_splitExec(raw),ex=sp&&_expandExecCodes(sp,e);
+    if(ex&&ex.length&&ex[0])e.argv=ex;else e.malformed=true;
+  }else if(!e.dbus)return null;
+  e.base=_entryBase(e);
+  return e;
+}
+// Prototype-less sets: `constructor` / `toString` are not wrappers.
+function _strSet(l){var o=Object.create(null);for(var i=0;i<l.length;i++)o[l[i]]=1;return o}
+var _WRAPPER_BINS=_strSet(["env","flatpak","sh","bash","dash","zsh","gio","gtk-launch","snap","xdg-open","setsid","nohup"]);
+var _FLATPAK_VALUED=_strSet(["--command","--branch","--arch","--runtime","--runtime-version","--cwd"]);
+// The name a launcher goes by: the real argv0 basename, skipping `env` and its
+// VAR=val tokens; `flatpak run ... <app.id>` -> the app id. Wrapper binaries are
+// never returned (the desktop-file id stands in), so they cannot become aliases.
+function _entryBase(e){
+  var a=e.argv;
+  if(!a)return e.dfn;
+  var i=0;
+  if(_path.basename(a[0])==="env"){
+    i=1;
+    while(i<a.length){
+      if(/^[A-Za-z_][A-Za-z0-9_]*=/.test(a[i]))i++;
+      else if(a[i]==="-u"||a[i]==="-C"||a[i]==="--unset"||a[i]==="--chdir")i+=2;
+      else if(a[i].charAt(0)==="-"&&a[i]!=="-")i++;
+      else break;
+    }
+  }
+  if(i>=a.length)return e.dfn;
+  var b=_path.basename(a[i]);
+  if(b==="flatpak"){
+    var r=false;
+    for(var k=i+1;k<a.length;k++){
+      var t=a[k];
+      if(!r){if(t==="run"){r=true}else if(t.charAt(0)!=="-")break;continue}
+      if(t.charAt(0)==="-"){if(_FLATPAK_VALUED[t])k++;continue}
+      return t.indexOf(".")>0?t:e.dfn;
+    }
+    return e.dfn;
+  }
+  return _WRAPPER_BINS[b]?e.dfn:b;
+}
+// fresh=true bypasses _hasCmd's permanent per-process cache (launch pre-checks:
+// an app or tool installed after the first attempt must launch without a restart).
+function _execResolvable(b,cwd,fresh){
+  if(b.indexOf("/")<0){if(fresh)delete _cmdCache[b];return _hasCmd(b)}
+  var p=b.charAt(0)==="/"?b:_path.resolve(cwd||process.cwd(),b);
+  try{_fs.accessSync(p,(_fs.constants&&_fs.constants.X_OK)||1);return!_fs.statSync(p).isDirectory()}catch(e){return false}
+}
+// Every installable entry in the XDG app dirs, in precedence order (first file
+// with a given desktop-file ID wins). Entries whose TryExec does not resolve are
+// skipped: the app is not installed.
+function _readDesktopEntries(dirs){
+  var out=[],seenIds={};
+  for(var d=0;d<dirs.length;d++){
+    var files;
+    try{files=_fs.readdirSync(dirs[d])}catch(de){continue}
+    for(var i=0;i<files.length;i++){
+      if(files[i].indexOf(".desktop")===-1||seenIds[files[i]])continue;
+      seenIds[files[i]]=1;
+      try{
+        var fp=_path.join(dirs[d],files[i]);
+        var e=_parseDesktopEntry(_fs.readFileSync(fp,"utf-8"),fp,files[i]);
+        if(!e)continue;
+        if(e.tryExec&&!_execResolvable(e.tryExec,null,true))continue;
+        out.push(e);
+      }catch(fe){}
+    }
+  }
+  return out;
+}
+// Spawn without a shell and wait until the outcome is known. "direct" resolves
+// on the child's spawn event; "tool" (gio, kioclient, ...) on its exit status. An
+// error event (missing binary, bad cwd) or a non-zero tool exit is a failure the
+// caller moves on from; a child that is still running after the settle window
+// counts as launched.
+function _spawnWait(cmd,args,opts,mode){
+  return new Promise(function(resolve){
+    var done=false,tm=null;
+    function fin(r){if(done)return;done=true;if(tm)clearTimeout(tm);resolve(r)}
+    var c;
+    try{c=_cp.spawn(cmd,args,opts)}catch(e){resolve({ok:false,reason:cmd+": "+(e.message||e)});return}
+    c.on("error",function(err){
+      var m=cmd+": "+(err&&err.message||err);
+      if(done)globalThis.__cdbDiag("[claude-cu] detached launch failed ("+cmd+"): "+m);
+      fin({ok:false,reason:m});
+    });
+    if(mode==="tool")c.on("exit",function(code){fin(code?{ok:false,reason:cmd+" exited with code "+code}:{ok:true})});
+    else c.on("spawn",function(){fin({ok:true})});
+    tm=setTimeout(function(){fin({ok:true})},mode==="tool"?1500:500);
+    c.unref();
+  });
+}
+// Launch an entry: direct argv first (every entry with a parseable Exec, D-Bus
+// activatable ones included), then the optional desktop launcher tools for
+// entries with no/malformed Exec, Terminal=true, or a binary that would not
+// spawn. Throws a clear error when every tier is unavailable or fails.
+async function _launchEntry(e,label){
+  var reasons=[],cwd=e.path||null,SO={detached:true,stdio:"ignore"};
+  function _has(b){return _execResolvable(b,null,true)}
+  var cwdBad=false;
+  if(cwd){
+    try{cwdBad=!_fs.statSync(cwd).isDirectory()}catch(ce){cwdBad=true}
+    if(cwdBad)cwd=null;else SO.cwd=cwd;
+  }
+  if(e.argv&&!e.terminal){
+    var cmd,args;
+    if(_has("setsid")){cmd="setsid";args=e.argv.slice()}else{cmd=e.argv[0];args=e.argv.slice(1)}
+    globalThis.__cdbDiag("[claude-cu] openApp: launching argv "+JSON.stringify([cmd].concat(args))+(cwd?" cwd="+cwd:""));
+    if(cwdBad)reasons.push("working directory "+e.path+" not usable");
+    else if(!_execResolvable(e.argv[0],cwd,true))reasons.push(e.argv[0]+": command not found");
+    else{
+      var r=await _spawnWait(cmd,args,SO,"direct");
+      if(r.ok)return{via:"direct"};
+      reasons.push(r.reason);
+    }
+  }else reasons.push(e.terminal?"Terminal=true":e.malformed?"malformed Exec":"no Exec");
+  globalThis.__cdbDiag("[claude-cu] openApp: "+e.name+" ("+reasons[0]+") - trying desktop launcher tools");
+  var tiers=[];
+  if(_has("gio"))tiers.push(["gio",["launch",e.file],"tool"]);
+  if(_has("gtk-launch"))tiers.push(["gtk-launch",[e.dfn],"tool"]);
+  var kio=_has("kioclient6")?"kioclient6":_has("kioclient5")?"kioclient5":"";
+  if(kio)tiers.push([kio,["exec",e.file],"tool"]);
+  if(_has("exo-open"))tiers.push(["exo-open",[e.file],"tool"]);
+  if(e.terminal&&e.argv){
+    if(_has("xdg-terminal-exec"))tiers.push(["xdg-terminal-exec",e.argv.slice(),"term"]);
+    if(_has("x-terminal-emulator"))tiers.push(["x-terminal-emulator",["-e"].concat(e.argv),"term"]);
+    // $TERMINAL may carry arguments ("kitty --single-instance"): split on
+    // whitespace into argv (no shell, no quote handling).
+    var tt=(process.env.TERMINAL||"").trim();
+    if(tt){
+      var tp=tt.split(/\s+/);
+      if(_execResolvable(tp[0],null,true))tiers.push([tp[0],tp.slice(1).concat(["-e"],e.argv),"term"]);
+      else{
+        var tm="$TERMINAL ("+tt+"): "+tp[0]+" not found";
+        globalThis.__cdbDiag("[claude-cu] openApp: "+tm);
+        reasons.push(tm);
+      }
+    }
+  }
+  if(!tiers.length)reasons.push("no desktop launcher tool found (gio, gtk-launch, kioclient, exo-open)");
+  for(var t=0;t<tiers.length;t++){
+    var tc=tiers[t],to={detached:true,stdio:"ignore"};
+    if(tc[2]==="term"&&cwd)to.cwd=cwd;
+    globalThis.__cdbDiag("[claude-cu] openApp: launching argv "+JSON.stringify([tc[0]].concat(tc[1])));
+    var tr=await _spawnWait(tc[0],tc[1],to,tc[2]==="term"?"direct":"tool");
+    if(tr.ok)return{via:tc[0]};
+    reasons.push(tr.reason);
+  }
+  throw new Error("Could not launch "+label+": "+reasons.join("; "));
 }
 function _desktopId(){return(process.env.XDG_CURRENT_DESKTOP||"").toLowerCase()}
 var _ydotoolOk=null;
@@ -685,16 +911,96 @@ async function _x11MonForRegion(x,y){
   var pg=pick.geometry||{x:0,y:0};
   return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y};
 }
+// The bridges' frame-size rule (compute_target_dims in x11/wlroots/gnome/kwin
+// bridges): long edge <= 1568 px, total <= 1_150_000 px, keep the aspect ratio,
+// never upscale, round each side. The desktopCapturer tier applies the same
+// rule, so a screenshot has one size whichever tier captured it.
+var CU_MAX_LONG_EDGE=1568,CU_MAX_PIXELS=1150000;
+function _cuTargetDims(w,h){
+  var pw=Math.max(1,w),ph=Math.max(1,h),s=Math.min(1,CU_MAX_LONG_EDGE/Math.max(pw,ph),Math.sqrt(CU_MAX_PIXELS/(pw*ph)));
+  return{width:Math.max(1,Math.round(pw*s)),height:Math.max(1,Math.round(ph*s))};
+}
+// True when a thumbnail of size sz is what Chromium makes of monitor m's frame:
+// it fits the frame inside the requested box keeping the aspect ratio.
+function _dcAspectFits(sz,m){
+  var k=Math.min(sz.width/m.pw,sz.height/m.ph);
+  return Math.abs(Math.round(m.pw*k)-sz.width)<=1&&Math.abs(Math.round(m.ph*k)-sz.height)<=1;
+}
+var _dcAssumeLogged=!1;
+// Electron desktopCapturer last resort (issue #298). Every session type ends
+// here when its own tiers fail. Chromium fits each screen's frame inside
+// thumbnailSize keeping the aspect ratio, so the thumbnail is requested at the
+// full physical size of the monitor that holds the region and the crop is made
+// display-relative, scaled by the size Chromium actually returned. The source is
+// the one whose display_id names that monitor. Wayland portal sources often
+// carry no display_id (and only the screen the user picked), so a source whose
+// thumbnail aspect fits exactly one monitor counts as that monitor; failing
+// that, the source is taken to show the primary. A source that shows another
+// monitor fails the tier instead of returning the wrong screen.
+// lx/ly/lw/lh: the logical (DIP) region; xr: the X11 root-pixel rect from
+// _x11PxRect, or null. Returns {png, imgW, imgH, via}.
+async function _desktopCapturerRegion(lx,ly,lw,lh,displayIdx,xr){
+  var mons=_getMonitors(),ds=[],i,j,mon=null;
+  try{ds=_electron.screen.getAllDisplays()||[]}catch(e){}
+  if(xr&&typeof xr.i==="number")mon=mons[xr.i]||null;
+  for(i=0;!mon&&typeof displayIdx==="number"&&i<mons.length;i++){if(mons[i].displayId===displayIdx)mon=mons[i]}
+  if(!mon){var _pm=_findMonByPoint(lx,ly);for(i=0;!mon&&_pm&&i<mons.length;i++){if(mons[i].displayId===_pm.displayId)mon=mons[i]}if(!mon)mon=_pm||mons[0]}
+  var phys=mons.map(function(m){var s=m.scaleFactor||1;return{m:m,pw:Math.max(1,Math.round(m.width*s)),ph:Math.max(1,Math.round(m.height*s))}});
+  var tgt=null;for(i=0;i<phys.length;i++){if(phys[i].m===mon)tgt=phys[i]}
+  if(!tgt){var s0=mon.scaleFactor||1;tgt={m:mon,pw:Math.max(1,Math.round(mon.width*s0)),ph:Math.max(1,Math.round(mon.height*s0))}}
+  // The region in the monitor's own physical pixels.
+  var rx,ry,rw,rh;
+  if(xr){rx=xr.x-xr.ox;ry=xr.y-xr.oy;rw=xr.w;rh=xr.h}
+  else{var sf=mon.scaleFactor||1;rx=Math.round((lx-mon.originX)*sf);ry=Math.round((ly-mon.originY)*sf);rw=Math.round(lw*sf);rh=Math.round(lh*sf)}
+  var sources=await _electron.desktopCapturer.getSources({types:["screen"],thumbnailSize:{width:tgt.pw,height:tgt.ph}});
+  if(!sources||!sources.length)throw new Error("no screen sources");
+  var tid=ds[mon.displayId]&&ds[mon.displayId].id!=null?String(ds[mon.displayId].id):"",known={};
+  for(i=0;i<ds.length;i++){if(ds[i]&&ds[i].id!=null)known[String(ds[i].id)]=1}
+  function _thumbOk(s){return s&&s.thumbnail&&!s.thumbnail.isEmpty()}
+  function _size(img,dw,dh){var z=img&&typeof img.getSize==="function"?img.getSize():null;return z&&z.width>0&&z.height>0?{width:z.width,height:z.height}:{width:dw,height:dh}}
+  var src=null,via="";
+  for(i=0;!src&&tid&&i<sources.length;i++){if(_thumbOk(sources[i])&&String(sources[i].display_id||"")===tid){src=sources[i];via="display_id"}}
+  if(!src){
+    // Sources whose display_id names another monitor show that monitor.
+    var rest=[],fits=[];
+    for(i=0;i<sources.length;i++){var sd=String(sources[i]&&sources[i].display_id||"");if(_thumbOk(sources[i])&&!(sd&&known[sd]))rest.push(sources[i])}
+    for(i=0;i<rest.length;i++){
+      var sz=_size(rest[i].thumbnail,tgt.pw,tgt.ph),hit=[];
+      for(j=0;j<phys.length;j++){if(_dcAspectFits(sz,phys[j]))hit.push(phys[j].m)}
+      fits.push(hit);
+      if(!src&&hit.length===1&&hit[0]===mon){src=rest[i];via="aspect match"}
+    }
+    if(!src){
+      // No source identifies the monitor: take the first one that is not
+      // identified as another monitor to show the primary.
+      var prim=null;for(i=0;i<mons.length;i++){if(mons[i].isPrimary){prim=mons[i];break}}
+      if(!prim)prim=mons[0];
+      for(i=0;!src&&i<rest.length;i++){if(fits[i].length!==1){src=rest[i];via="assumed primary"}}
+      if(!src)throw new Error("no screen source shows "+mon.label+" ("+sources.length+" source(s), none matches by display_id or aspect)");
+      if(!_dcAssumeLogged){_dcAssumeLogged=!0;globalThis.__cdbDiag("[claude-cu] desktopCapturer: no screen source names "+mon.label+" by display_id or aspect ("+sources.length+" source(s)) - taking it to show the primary display "+prim.label)}
+      if(prim!==mon)throw new Error("the only usable screen source shows the primary display "+prim.label+", not "+mon.label);
+    }
+  }
+  var img=src.thumbnail,isz=_size(img,tgt.pw,tgt.ph),kx=isz.width/tgt.pw,ky=isz.height/tgt.ph;
+  var cx=Math.max(0,Math.round(rx*kx)),cy=Math.max(0,Math.round(ry*ky));
+  var cx2=Math.min(isz.width,Math.round((rx+rw)*kx)),cy2=Math.min(isz.height,Math.round((ry+rh)*ky));
+  if(cx2<=cx||cy2<=cy)throw new Error("region "+rx+","+ry+" "+rw+"x"+rh+" is outside the "+isz.width+"x"+isz.height+" capture of "+mon.label);
+  var out=img.crop({x:cx,y:cy,width:cx2-cx,height:cy2-cy}),osz=_size(out,cx2-cx,cy2-cy),t=_cuTargetDims(osz.width,osz.height);
+  if(t.width!==osz.width||t.height!==osz.height){out=out.resize({width:t.width,height:t.height,quality:"best"});osz=_size(out,t.width,t.height)}
+  return{png:out.toPNG(),imgW:osz.width,imgH:osz.height,via:via};
+}
 // Returns {base64, imgW, imgH, mimeType} where imgW/imgH are the EMITTED image's
 // pixel dimensions (post-downscale) and mimeType is the produced format. Most
 // tiers capture the region at native resolution (no downscale) and produce PNG,
 // so imgW/imgH == the captured region size (w,h after scaleFactor) and
-// mimeType=="image/png". The x11-bridge tier downscales (long edge <= 1568,
-// total <= 1_150_000 px) and produces JPEG, so it overrides imgW/imgH with the
-// bridge's returned width/height and mimeType with "image/jpeg". The handler
+// mimeType=="image/png". The bridge tiers downscale (long edge <= 1568,
+// total <= 1_150_000 px) and produce JPEG, so they override imgW/imgH with the
+// bridge's returned width/height and mimeType with "image/jpeg". The
+// desktopCapturer tier downscales by the same rule and emits PNG. The handler
 // uses imgW/imgH to map model image-pixel coordinates back to root pixels.
 async function _captureRegion(x,y,w,h,sf,displayIdx){
   if(!sf){var _m=_findMonByPoint(x,y);sf=_m?_m.scaleFactor:1}
+  var _lx0=x,_ly0=y,_lw0=w,_lh0=h;
   // X11: per-display DIP -> root-pixel transform shared with the pointer paths
   // (_x11PxRect); Wayland keeps the plain scale, which its bridge undoes below.
   var _xr=_x11PxRect(x,y,w,h,displayIdx);
@@ -777,7 +1083,9 @@ async function _captureRegion(x,y,w,h,sf,displayIdx){
       globalThis.__cdbDiag("[claude-cu] no x11-bridge on an X11 session: "+_bridgeWhy("x11-bridge","X11_BRIDGE_BIN"));
     }
   }
-  try{var _sources=await _electron.desktopCapturer.getSources({types:["screen"],thumbnailSize:{width:w+x,height:h+y}});if(_sources&&_sources.length>0){var _img=_sources[0].thumbnail;if(_img&&!_img.isEmpty()){var _cropped=_img.crop({x:x,y:y,width:w,height:h});_fs.writeFileSync(tmp,_cropped.toPNG());globalThis.__cdbDiag("[claude-cu] screenshot: captured via desktopCapturer (Electron fallback)");return _nativePng(_readClean(tmp))}}}catch(dce){globalThis.__cdbDiag("[claude-cu] desktopCapturer fallback failed: "+dce.message)}
+  // Electron desktopCapturer last resort: display-relative crop, downscaled by
+  // the bridges' rule (see _desktopCapturerRegion).
+  try{var _dc=await _desktopCapturerRegion(_lx0,_ly0,_lw0,_lh0,displayIdx,_xr);globalThis.__cdbDiag("[claude-cu] screenshot: captured via desktopCapturer (Electron fallback, source by "+_dc.via+", "+_dc.imgW+"x"+_dc.imgH+")");return{base64:_dc.png.toString("base64"),imgW:_dc.imgW,imgH:_dc.imgH,mimeType:"image/png"}}catch(dce){globalThis.__cdbDiag("[claude-cu] desktopCapturer fallback failed: "+(dce&&dce.message||dce))}
   // Name the cause when it is a bridge that is missing or cannot run; when the
   // bridge is there, the per-tier failures are already in claude-patches.log.
   var _noX11=!_x11BridgeBin()&&(!_wayland||(globalThis.__cuBridgeFail&&globalThis.__cuBridgeFail["x11-bridge"]));
@@ -902,7 +1210,7 @@ function _x11PxDisplays(){
       _x11DiagOnce("noorigin:"+idx,"x11 display "+idx+" has no nativeOrigin - pixel origin "+ox+","+oy+(best?" from the RandR monitor list":" = origin * scale"));
     }
     if(sf!==1)_x11DiagOnce("map:"+idx+":"+b.x+","+b.y+","+b.width+"x"+b.height+"@"+sf+">"+ox+","+oy,"x11 HiDPI: display "+idx+" DIP "+b.x+","+b.y+" "+b.width+"x"+b.height+" scale "+sf+" -> root px origin "+ox+","+oy);
-    return{b:b,sf:sf,ox:ox,oy:oy};
+    return{b:b,sf:sf,ox:ox,oy:oy,i:idx};
   });
 }
 function _x11Contains(m,x,y){var b=m.b;return x>=b.x&&x<b.x+b.width&&y>=b.y&&y<b.y+b.height}
@@ -940,7 +1248,9 @@ function _x11PxRect(x,y,w,h,displayIdx){
   for(var i=0;!m&&i<list.length;i++){if(list[i].b.x===rx&&list[i].b.y===ry)m=list[i]}
   if(!m)m=_x11PxDisplayFor(list,rx,ry);
   var tl=_x11MapVia(m,rx,ry),br=_x11MapVia(m,rx+Math.round(w),ry+Math.round(h));
-  return{x:tl[0],y:tl[1],w:br[0]-tl[0],h:br[1]-tl[1]};
+  // i/ox/oy: the display used and its root-pixel origin (desktopCapturer
+  // crops display-relative).
+  return{x:tl[0],y:tl[1],w:br[0]-tl[0],h:br[1]-tl[1],i:m.i,ox:m.ox,oy:m.oy};
 }
 var _inputLogDone={mouse:false,click:false,key:false,type:false,scroll:false,drag:false,window:false,app:false};
 function _logFirstUse(op,backend){if(!_inputLogDone[op]){_inputLogDone[op]=true;globalThis.__cdbDiag("[claude-cu] "+op+": using "+backend)}}
@@ -1064,37 +1374,20 @@ globalThis.__linuxExecutor={
     var seen={};
     function _add(bid,dname,p){var k=bid+"|"+dname.toLowerCase();if(!seen[k]){seen[k]=1;apps.push({bundleId:bid,displayName:dname,path:p})}}
     try{
-      var dirs=_xdgAppDirs(),seenIds={};
-      for(var d=0;d<dirs.length;d++){
-        try{
-          var files=_fs.readdirSync(dirs[d]);
-          for(var i=0;i<files.length;i++){
-            if(files[i].indexOf(".desktop")===-1||seenIds[files[i]])continue;
-            seenIds[files[i]]=1;
-            try{
-              var fp=_path.join(dirs[d],files[i]);
-              var content=_fs.readFileSync(fp,"utf-8");
-              var nameMatch=content.match(/^Name=(.+)$/m);
-              var execMatch=content.match(/^Exec=(\S+)/m);
-              var iconMatch=content.match(/^Icon=(.+)$/m);
-              if(nameMatch&&execMatch){
-                var fullName=nameMatch[1].trim();
-                var execName=execMatch[1].replace(/%.*/,"").trim();
-                var baseName=_path.basename(execName);
-                _add(baseName,fullName,fp);
-                var parts=fullName.split(/\s+/);
-                if(parts.length>1){_add(baseName,parts[0],fp)}
-                _add(baseName,baseName,fp);
-                if(iconMatch){
-                  var icon=iconMatch[1].trim();
-                  if(icon.indexOf(".")!==-1){_add(icon,fullName,fp);if(parts.length>1){_add(icon,parts[0],fp)}}
-                }
-                var dfn=files[i].replace(/\.desktop$/,"");
-                if(dfn!==baseName){_add(dfn,fullName,fp)}
-              }
-            }catch(fe){}
-          }
-        }catch(de){}
+      var ents=_readDesktopEntries(_xdgAppDirs());
+      for(var i=0;i<ents.length;i++){
+        var en=ents[i],fp=en.file,fullName=en.name,baseName=en.base;
+        var parts=fullName.split(/\s+/);
+        // A wrapper stand-in (the desktop-file id of an `sh -c` entry) is the
+        // only way a wrapper name could get here; it is never an alias.
+        if(!_WRAPPER_BINS[baseName]){
+          _add(baseName,fullName,fp);
+          if(parts.length>1){_add(baseName,parts[0],fp)}
+          _add(baseName,baseName,fp);
+        }
+        var icon=en.icon;
+        if(icon&&icon.indexOf(".")!==-1){_add(icon,fullName,fp);if(parts.length>1){_add(icon,parts[0],fp)}}
+        if(en.dfn!==baseName){_add(en.dfn,fullName,fp)}
       }
     }catch(e){}
     return apps;
@@ -1172,34 +1465,19 @@ globalThis.__linuxExecutor={
   async getAppIcon(appPath){return null},
   async openApp(name){
     var _appDirs=_xdgAppDirs();
-    // Parse all .desktop entries into {name, dfn, exec} once so we can both
-    // resolve the launch command and, on failure, suggest close matches.
-    function _allEntries(){
-      var out=[],seenIds={};
-      for(var d=0;d<_appDirs.length;d++){
-        try{
-          var files=_fs.readdirSync(_appDirs[d]);
-          for(var i=0;i<files.length;i++){
-            if(files[i].indexOf(".desktop")===-1||seenIds[files[i]])continue;
-            seenIds[files[i]]=1;
-            try{
-              var content=_fs.readFileSync(_path.join(_appDirs[d],files[i]),"utf-8");
-              var nameMatch=content.match(/^Name=(.+)$/m);
-              var execMatch=content.match(/^Exec=(\S+)/m);
-              if(nameMatch&&execMatch){
-                out.push({name:nameMatch[1].trim(),dfn:files[i].replace(/\.desktop$/,""),exec:execMatch[1].replace(/%.*/,"").trim()});
-              }
-            }catch(fe){}
-          }
-        }catch(de){}
-      }
-      return out;
-    }
+    // Parse all .desktop entries once (shared parser: [Desktop Entry] group,
+    // full Exec argv, TryExec filter) so we can both resolve the launch entry
+    // and, on failure, suggest close matches.
+    function _allEntries(){return _readDesktopEntries(_appDirs)}
+    // Two passes so a name/desktop-id match always beats an exec-basename match
+    // ("brave" must not resolve to a Brave web-app entry whose argv0 is brave).
     function _resolveApp(n,entries){
-      var nl=n.toLowerCase();
-      for(var i=0;i<entries.length;i++){
-        var e=entries[i];
-        if(e.name.toLowerCase()===nl||e.dfn.toLowerCase()===nl||_path.basename(e.exec).toLowerCase()===nl)return e.exec;
+      var nl=n.toLowerCase(),i;
+      for(i=0;i<entries.length;i++){
+        if(entries[i].name.toLowerCase()===nl||entries[i].dfn.toLowerCase()===nl)return entries[i];
+      }
+      for(i=0;i<entries.length;i++){
+        if(entries[i].base.toLowerCase()===nl)return entries[i];
       }
       return null;
     }
@@ -1301,13 +1579,9 @@ globalThis.__linuxExecutor={
       // window, so report the neutral "opened" (handler -> "Opened <name>").
       return{action:"opened",app:name};
     }
-    try{
-      globalThis.__cdbDiag("[claude-cu] openApp: launching via setsid "+resolved);
-      _launchDetached([resolved]);
-    }catch(e){
-      try{globalThis.__cdbDiag("[claude-cu] openApp: fallback to xdg-open "+name);_launchDetached(["xdg-open",name])}
-      catch(e2){throw new Error("Could not open "+name+" (resolved to "+resolved+")")}
-    }
+    // Throws a clear error when no launch tier works (no xdg-open-by-name
+    // fallback: it never launched an app by name).
+    await _launchEntry(resolved,name);
     // 3) On the bridge path, poll briefly for a matching new window and activate
     // it. Slow-starting apps that never show a window within the budget are NOT
     // an error — return launch_attempted so the model knows to screenshot.

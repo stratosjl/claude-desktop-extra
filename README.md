@@ -96,7 +96,7 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). Cowork packages come in as `Recommends`; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_3.6556.2-5_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_3.6556.2-6_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
@@ -111,7 +111,7 @@ sudo dnf install claude-desktop-extra
 
 Cowork packages come in as weak deps; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-3.6556.2-5.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-3.6556.2-6.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>

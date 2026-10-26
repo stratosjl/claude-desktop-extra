@@ -56,12 +56,19 @@ function desktop(dir, id, name, exec) {
 }
 desktop(DATA_HOME, "mine", "Mine App", "mine");
 desktop(DATA_HOME, "dup", "User Dup", "userdup");
-desktop(NIX, "nixapp", "Nix App", "/nix/store/abc-nixapp/bin/nixapp %U");
+const NIXBIN = path.join(TMP, "nix", "store", "abc-nixapp", "bin", "nixapp");
+desktop(NIX, "nixapp", "Nix App", NIXBIN + " %U");
 desktop(NIX, "dup", "System Dup", "sysdup");
 desktop(LOCAL, "localapp", "Local App", "localapp");
 desktop(path.join(HOME, ".local", "share", "flatpak", "exports", "share"), "org.flat.App", "Flat App", "flatpak run org.flat.App");
 mkdirSync(BIN);
 writeFileSync(path.join(BIN, "xdg-open"), "#!/bin/sh\nexit 0\n"); chmodSync(path.join(BIN, "xdg-open"), 0o755);
+// openApp checks that the Exec binary resolves before it spawns, so the launch
+// targets must exist and be executable.
+mkdirSync(path.dirname(NIXBIN), { recursive: true });
+for (const f of [NIXBIN, path.join(BIN, "userdup"), path.join(BIN, "sysdup")]) {
+  writeFileSync(f, "#!/bin/sh\nexit 0\n"); chmodSync(f, 0o755);
+}
 writeFileSync(path.join(BIN, "spectacle"), "not executable\n"); chmodSync(path.join(BIN, "spectacle"), 0o644);
 
 function load(env) {
@@ -133,7 +140,7 @@ async function testXdgDirs() {
     r.calls.spawn.length = 0;
     const res = await r.ex.openApp("Nix App");
     ok(res && res.action === "opened", "openApp resolves an XDG_DATA_DIRS app: " + JSON.stringify(res));
-    ok(r.calls.spawn.some((c) => c.includes("/nix/store/abc-nixapp/bin/nixapp")),
+    ok(r.calls.spawn.some((c) => c.includes(NIXBIN)),
        "and launches its Exec: " + JSON.stringify(r.calls.spawn));
     r.calls.spawn.length = 0;
     await r.ex.openApp("dup");
