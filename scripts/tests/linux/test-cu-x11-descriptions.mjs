@@ -30,7 +30,7 @@
 // the orchestrator does, run the compiled patch binary on it (twice), splice the
 // patched preset, selector and request_access prefix out of the result and
 // evaluate them with process.platform / XDG_SESSION_TYPE controlled. The full
-// patch cannot run on a partial fixture (37 sub-patches, executor injection at
+// patch cannot run on a partial fixture (38 sub-patches, executor injection at
 // app ready), which is why the real bundle is used. Those sections SKIP when the
 // binary or the extract is missing - the build job is the authoritative gate.
 //
@@ -61,7 +61,7 @@ const BUILD_DIR = join(
   ".vite",
   "build"
 );
-const EXPECTED_PATCHES = 37;
+const EXPECTED_PATCHES = 38;
 
 let pass = 0;
 const failures = [];

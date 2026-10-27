@@ -9,7 +9,10 @@
 # embeds them via staticRead at compile time; Python reads them at runtime.
 # No codegen — the .js files are the single source of truth.
 #
-# All 37 sub-patches use std/nre (PCRE) because many require backreferences.
+# All 38 sub-patches use std/nre (PCRE) because many require backreferences.
+# Sub-patch 4e hooks main's releaseRemoteCuLock IPC (claude.ai's task-end
+# event: running->idle, Stop, archive, delete) and hands the id, source and
+# the CU lock's current holder to the Linux executor's __cuTaskBoundary.
 #
 # Idempotency is a MARKER SET (endStateMarkers below): one positive end-state
 # pattern per sub-patch, each with its exact expected count. All present =
@@ -241,6 +244,10 @@ proc endStateMarkers(): seq[EndStateMarker] =
       ",process.platform===\"linux\"&&globalThis.__linuxExecutor?.__setLockHeld?.(!1).catch?.(",
       2,
     ),
+    rx(
+      "4e task boundary",
+      """releaseRemoteCuLock:\(([\w$]+),([\w$]+)\)=>\{try\{process\.platform==="linux"&&globalThis\.__linuxExecutor\?\.__cuTaskBoundary\?\.\(\1\?\?void 0,\2==="stop_click"\?"stop_click":"renderer",exports\.[\w$]+\.currentHolder\)\?\.catch\?\.\(""",
+    ),
     lit(
       "5 ensureOsPermissions",
       "ensureOsPermissions:process.platform===\"linux\"?async()=>({granted:!0}):",
@@ -368,7 +375,7 @@ proc apply*(input: string): string =
   let original = input
   var patchesApplied = 0
   var changes = 0
-  const EXPECTED_PATCHES = 37
+  const EXPECTED_PATCHES = 38
 
   let gateSet = cuPlatformSetName(content)
   if gateSet == "":
@@ -638,6 +645,92 @@ proc apply*(input: string): string =
       inc patchesApplied
     else:
       echo &"  [FAIL] cu lock release pattern: {n} matches, expected 2 (releaseExclusive + release)"
+
+  # ── Patch 4e: renderer task boundary → __cuTaskBoundary(id, source, holder) ──
+  # claude.ai calls main's `releaseRemoteCuLock(id, source)` IPC on a cloud
+  # session's running->idle edge, on Stop ("stop_click"), archive and delete
+  # (3.6556.2: `releaseRemoteCuLock:(e,t)=>{pBi(e??void 0,t==="stop_click"?
+  # "stop_click":"renderer")}`). Upstream ignores it when the id differs from the
+  # lock holder byte for byte, although one session has two ids (session_X /
+  # cse_X). Before upstream's call we hand the same id and source, plus the
+  # lock's current holder, to the Linux executor, which ends its portal session
+  # when the id and holder name the same session. Call only: the return value is
+  # unused, a throw or a rejected promise is logged and swallowed, upstream's
+  # call still runs, and off Linux nothing is evaluated.
+  #
+  # The holder is read through the lock module's own export getter
+  # (`exports.<key>` -> `get:function(){return <lock>}`), found in the SAME chunk
+  # part as the handler: each chunk is its own CommonJS module at run time, and
+  # a mangled local can never be named `exports`, so the reference cannot be
+  # shadowed at the handler site. The lock is the `<name>=new class extends
+  # ...{...get currentHolder(){return this.exclusiveHolder}` instance that
+  # Patches 4b/4b.2 hook (3.6556.2: `aJ`, exported as `ZC`).
+  block:
+    let handlerPat =
+      re"""(releaseRemoteCuLock:\(([\w$]+),([\w$]+)\)=>\{)([\w$]+\(\2\?\?void 0,\3===(["`])stop_click\5\?\5stop_click\5:\5renderer\5\)\})"""
+    let handlerHits = countMatches(content, handlerPat)
+    if handlerHits != 1:
+      echo &"  [FAIL] 4e releaseRemoteCuLock handler: {handlerHits} matches, expected 1"
+    else:
+      let hm = content.find(handlerPat).get()
+      let at = hm.matchBounds.a
+      # The chunk part the handler lives in (the whole file when not staged).
+      const SPLIT = "\n/*__CDB_SPLIT__"
+      let prevSplit = content.rfind(SPLIT, last = at)
+      let partStart = (if prevSplit == -1: 0 else: prevSplit)
+      var partEnd = content.find(SPLIT, start = at)
+      if partEnd == -1:
+        partEnd = content.len
+      let part = content[partStart ..< partEnd]
+      # A class instance whose body (up to the next `=new class `) has the
+      # holder getter. Two steps, not one tempered regex: a lazy scan over a
+      # multi-MB line exhausts PCRE's JIT stack.
+      let lockPat = re"""(?<![\w$.])([\w$]+)=new class extends [\w$]+(?:\.[\w$]+)*\{"""
+      const HOLDER_GETTER = "get currentHolder(){return this.exclusiveHolder}"
+      var lockNames: seq[string] = @[]
+      for m in part.findIter(lockPat):
+        let bodyStart = m.matchBounds.b + 1
+        var bodyEnd = part.find("=new class ", start = bodyStart)
+        if bodyEnd == -1:
+          bodyEnd = part.len
+        let getterAt = part.find(HOLDER_GETTER, start = bodyStart)
+        if getterAt != -1 and getterAt < bodyEnd:
+          lockNames.add m.captures[0]
+      if lockNames.len != 1:
+        echo &"  [FAIL] 4e CU lock instance in the handler's chunk: {lockNames.len} matches, expected 1"
+      else:
+        let lockName = lockNames[0]
+        let exportPat = re(
+          """Object\.defineProperty\(exports,(["`])([A-Za-z_$][\w$]*)\1,\{enumerable:!0,get:function\(\)\{return """ &
+            escapeRe(lockName) & """\}\}\)"""
+        )
+        var exportKeys: seq[string] = @[]
+        for m in part.findIter(exportPat):
+          exportKeys.add m.captures[1]
+        if exportKeys.len != 1:
+          echo &"  [FAIL] 4e export getter for lock '{lockName}': {exportKeys.len} matches, expected 1"
+        else:
+          let exportKey = exportKeys[0]
+          let n = replaceFirst(
+            content,
+            handlerPat,
+            proc(m: RegexMatch): string =
+              let idParam = m.captures[1]
+              let srcParam = m.captures[2]
+              m.captures[0] & "try{process.platform===\"linux\"&&" &
+                "globalThis.__linuxExecutor?.__cuTaskBoundary?.(" & idParam & "??void 0," &
+                srcParam & "===\"stop_click\"?\"stop_click\":\"renderer\",exports." &
+                exportKey &
+                ".currentHolder)?.catch?.(r=>(globalThis.__cdbDiag||console.warn)(\"[linux-executor] task boundary hook failed\",r))" &
+                "}catch(r){(globalThis.__cdbDiag||console.warn)(\"[linux-executor] task boundary hook failed\",r)}" &
+                m.captures[3],
+          )
+          if n == 1:
+            echo &"  [OK] 4e task boundary: releaseRemoteCuLock hands id, source and holder (exports.{exportKey} = {lockName}) to the Linux executor (1 match)"
+            inc changes, n
+            inc patchesApplied
+          else:
+            echo "  [FAIL] 4e releaseRemoteCuLock handler: replacement did not apply"
 
   # ── Patch 5: ensureOsPermissions → skip TCC on Linux ───────────────────
   block:

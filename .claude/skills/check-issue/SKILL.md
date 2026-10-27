@@ -53,7 +53,12 @@ Each brief carries:
 **Reproduce without the user's running app.** The user's Claude is in use: never signal its processes, and identify yours by your own `--user-data-dir`.
 - **Renderer, main-process or Electron behaviour:** run on a private Xvfb display with `env -i` and a throwaway HOME, XDG_RUNTIME_DIR, CLAUDE_CONFIG_DIR and `--user-data-dir`. Use the installed binary or a scratch patched tree. A hung renderer is simulated with `SIGSTOP` on the main renderer.
 - **Wayland, wlroots or fractional scale:** use headless sway per `/test-native`, and run the bridge CLI directly against it. The Wayland socket path must stay under 108 bytes, so use a short `mktemp -d /tmp/xx.XXXX` runtime dir rather than the scratchpad.
-- **VMs:** allowed, but never start Cowork inside a VM.
+- **GNOME portal (gnome-portal-bridge) without a VM:** headless nested GNOME on the host (`dbus-run-session -- gnome-shell --wayland --no-x11 --devkit --virtual-monitor WxH`, private XDG_RUNTIME_DIR, own xdg-desktop-portal + pipewire), with the consent dialog and "Stop sharing" driven over accessibility/Shell.Eval. Good for bridge-level session tests; it cannot host a logged-in Claude.
+- **VMs:** allowed, but never start Cowork inside a VM. Turn off the guest's idle lock before handing a VM to a worker: auto mode rightly refuses to get past a lock screen, so a locked VM stalls the run.
+
+**Session types.** Upstream's Computer Use lock lives differently per session type: the Code tab and local Cowork release it after every turn, cloud Cowork only after an idle sweep or Stop. Anything of ours tied to the lock (bridge sessions, latches) must be checked against each type, and against the reporter's type from their first comment.
+
+**Verify before presenting.** Spot-check a worker's key upstream claim in the pristine bundle yourself before calling it the root cause; the maintainer will ask whether it was audited, and whether there is an event to hook instead of a timer.
 
 **Fallback paths.** When a backend has a fallback path, check which path the reporter's data came from before blaming the primary one. In #298 the bridge was correct and the Electron fallback was not.
 
@@ -131,7 +136,7 @@ Use the `/comment` voice for every comment:
 - no blame on our patches
 - no internals and no speculation
 
-**Asking for more data.** Give one action plus one copy-paste command, and end with "empty output is fine too" when that is true. Never ask them to look for strings themselves. Never explain what each line would mean. `claude-desktop --diagnose` is the default collector. Use a targeted `grep` only when the evidence is not in `--diagnose`, which does not include `claude-patches.log`.
+**Asking for more data.** Give one action plus one copy-paste command, and end with "empty output is fine too" when that is true. Never ask them to look for strings themselves. Never explain what each line would mean. `claude-desktop --diagnose` is the default collector, but never ask for it again when the thread already has one. Use a targeted `grep` only when the evidence is not in `--diagnose`, which does not include `claude-patches.log`.
 
 **After posting:**
 - Close the fixed issues with `--reason completed`.

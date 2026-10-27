@@ -4,6 +4,11 @@ All notable changes to the claude-desktop-extra packages will be documented in t
 
 ## 2026-10-26
 
+### Computer Use: the screen-sharing session ends with the task (#293)
+
+- **On GNOME and KDE Wayland, Computer Use's screen-sharing session now ends when a task ends** (including cloud Cowork tasks) **or after 2 minutes without Computer Use actions**, so the desktop's sharing indicator no longer stays up. The next action shares again without a dialog once the selection is remembered.
+- **After "Stop sharing" in the desktop indicator, Computer Use becomes available again when the task ends or after 2 minutes**, instead of staying blocked until the app restarts. Covered by the new `test-cu-kwin-idle.mjs` and `test-cu-task-boundary-hook.mjs`.
+
 ### Computer Use: `open_application` starts Flatpak apps, Chromium web apps and `env`-wrapped launchers (#297)
 
 - **`open_application` now runs the launcher's whole `Exec` line**, on wlroots, GNOME and X11 sessions (KDE Wayland sessions use `kwin-portal-bridge`'s own launcher and were not affected). Until now it started only the bare binary, so a Flatpak app, a Chromium web app or a launcher written as `env VAR=1 app` opened nothing. The line is parsed as the Desktop Entry spec defines it (field codes, quoting, `Path=`, `TryExec`, a leading BOM, GIO's lenient backslash handling) and run as an argv array, with no shell.

@@ -61,12 +61,40 @@ let exitHookInstalled = false
 // session-start that failed or timed out can still leave a daemon waiting on
 // its consent dialog, which only a session-end removes.
 let bridgeDaemonMayExist = false
-// The user stopped screen sharing (bridge exit 5) during the current CU lock.
-// Every later bridge action in that lock fails fast with
-// STOPPED_BY_USER_MESSAGE and no session is started again; cleared when the
-// lock is released (after its session-end, which removes the bridge's
-// stopped-by-user marker) or a new lock starts.
+// The user stopped screen sharing (bridge exit 5). Every later bridge action
+// fails fast with STOPPED_BY_USER_MESSAGE and no session is started again
+// until the latch clears: on a task boundary (__cuTaskBoundary), after
+// CU_PORTAL_IDLE_MS without a bridge command, when the lock is released, or
+// when a new lock starts. The session-end sent on the way removes the
+// bridge's stopped-by-user marker.
 let stoppedByUser = false
+// The bridge session ends after this long without a bridge input/capture
+// command, with the lock still held (upstream can hold the CU lock across
+// tasks for up to 12 min). The next command starts a new session (dialog-free
+// with the portal's restore token). The same timer lifts the stop latch.
+const CU_PORTAL_IDLE_MS = 120000
+let idleTimer = null
+// The idle end never runs while one of these is true; it re-arms instead.
+let portalCommandsInFlight = 0
+let sessionStartInFlight = false
+// left-mouse-down without a left-mouse-up attempt. hold-key is a single bridge
+// command for its whole duration, so portalCommandsInFlight covers it.
+let mouseButtonHeld = false
+// A held button defers the idle end once: a second consecutive expiry with no
+// command in between ends the session anyway (maintainer ruling 2026-10-26).
+let idleHeldDeferred = false
+// set-overlay-display is daemon state: a session started after an idle or
+// task-boundary end (or a vanished daemon) has lost it. The executor installs
+// the re-apply (it knows the last display); a lock acquire sets it itself.
+let overlayNeedsReapply = false
+let reapplySessionOverlay = null
+// Bridge commands that run in the session daemon: they need the session, count
+// as activity for the idle timer, and block the idle end while in flight
+// (teach-wait-event blocks until the user acts in the overlay).
+const KWIN_SESSION_COMMANDS = new Set([
+  ...KWIN_PORTAL_COMMANDS,
+  'teach-step', 'teach-working', 'teach-hide', 'teach-display', 'teach-wait-event',
+])
 const legacyDisplayIdToElectronDisplayId = new Map()
 
 const SYNTHETIC_INSTALLED_APPS = [
@@ -171,12 +199,13 @@ const BRIDGE_EXIT_STOPPED_BY_USER = 5
 
 // What the model reads after the user stopped screen sharing. Twin:
 // _CU_STOPPED_BY_USER_MSG in js/cu_linux_executor.js.
-// It cannot promise more than "the next session": upstream keeps the CU lock
-// across turns while a guided tour (teach mode) runs, so the latch holds until
-// the tour ends or the user clicks Stop in Claude. Teach mode ending is NOT a
+// Upstream can keep the CU lock across tasks (cloud Cowork, guided tours), so
+// the latch does not wait for the lock: it lifts on the task boundary or after
+// CU_PORTAL_IDLE_MS without Computer Use actions (refused actions do not count,
+// so a retrying model cannot keep the block alive). Teach mode ending is NOT a
 // clear signal here: a stop during a tour fails the step, which itself ends
 // teach mode, and restarting there would re-share the screen behind the user.
-export const STOPPED_BY_USER_MESSAGE = "Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use resumes with the next Computer Use session - in a guided tour, after the tour ends or the user clicks Stop in Claude."
+export const STOPPED_BY_USER_MESSAGE = "Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use can share the screen again once the task ends or after about 2 minutes without Computer Use actions."
 
 function stoppedByUserError() {
   const error = new Error(STOPPED_BY_USER_MESSAGE)
@@ -211,7 +240,24 @@ export function notSharedText(message, isNotShared = false) {
   return null
 }
 
+// Session commands are tracked for the idle timer: in flight they block the
+// idle end, and their completion (success or failure) re-arms it. Commands the
+// stop latch refuses never get here (ensureBridgeSession throws first), so
+// they do not count as activity.
 async function execBridge(command, args, opts = {}) {
+  if (!KWIN_SESSION_COMMANDS.has(command)) return execBridgeOnce(command, args, opts)
+  portalCommandsInFlight += 1
+  try {
+    const stdout = await execBridgeOnce(command, args, opts)
+    if (command === 'left-mouse-down') mouseButtonHeld = true
+    return stdout
+  } finally {
+    portalCommandsInFlight -= 1
+    touchIdleTimer()
+  }
+}
+
+async function execBridgeOnce(command, args, opts = {}) {
   const spec = buildBridgeCommand(command, args)
   const timeout = opts.timeoutMs ?? bridgeTimeoutMs(command)
   debugLog(`exec ${command}`, { args: spec.args, timeout })
@@ -250,9 +296,10 @@ async function execBridge(command, args, opts = {}) {
     // back for a command it already got an answer to).
     const exitCode = typeof error?.code === 'number' ? error.code : null
     // The user stopped screen sharing: the daemon is gone on purpose. Latch it
-    // for this lock (ensureBridgeSession then fails fast and never starts a
-    // new session) and keep sessionReadyPromise, so the lock release still
-    // sends session-end, which clears the bridge's stopped-by-user marker.
+    // (ensureBridgeSession then fails fast and never starts a new session) and
+    // keep sessionReadyPromise, so the task boundary, the idle end or the lock
+    // release still sends session-end, which clears the bridge's
+    // stopped-by-user marker.
     // session-start counts too: it exits 5 when the new daemon was closed
     // before it became ready (bridgeDaemonMayExist keeps the release's
     // session-end even though ensureBridgeSession drops the failed start).
@@ -263,7 +310,12 @@ async function execBridge(command, args, opts = {}) {
       if (bridgeSessionActive && !sessionStopPromise && !stoppedByUser) {
         stoppedByUser = true
         bridgeDaemonMayExist = true
-        globalThis.__cdbDiag(`[linux-executor] screen sharing was stopped (${command}); no new session until this Computer Use lock ends`)
+        globalThis.__cdbDiag(`[linux-executor] screen sharing was stopped (${command}); no new session until the task ends or ${CU_PORTAL_IDLE_MS / 1000} s without Computer Use actions`)
+        // The daemon is gone, and any held button with it. The idle countdown
+        // starts at the stop (session-start is not a tracked command, so its
+        // exit 5 would otherwise latch with no timer armed).
+        mouseButtonHeld = false
+        touchIdleTimer()
       }
       throw stoppedByUserError()
     }
@@ -276,6 +328,10 @@ async function execBridge(command, args, opts = {}) {
       && !sessionStopPromise
     ) {
       sessionReadyPromise = null
+      mouseButtonHeld = false
+      // No daemon left to end: the idle timer must not send session-end.
+      bridgeDaemonMayExist = false
+      overlayNeedsReapply = true
       globalThis.__cdbDiag('[linux-executor] session daemon is gone (screen sharing reset?); the next command starts a new session')
       throw new Error(`[kwin-portal-bridge] ${command} failed: ${detail} - the screen-sharing session was ended; retry the action to start a new one (the screen-sharing dialog may appear)`)
     }
@@ -309,18 +365,147 @@ async function ensureBridgeSession() {
   if (stoppedByUser) {
     throw stoppedByUserError()
   }
+  // An idle or task-boundary end is in flight with the lock still held: start
+  // the next session after it, never next to it (its session-end would take
+  // the new daemon down).
+  if (!sessionReadyPromise && sessionStopPromise) {
+    await sessionStopPromise.catch(() => {})
+    return ensureBridgeSession()
+  }
   if (!sessionReadyPromise) {
     debugLog('starting bridge session')
-    sessionReadyPromise = (async () => {
+    sessionStartInFlight = true
+    const startPromise = (async () => {
       bridgeDaemonMayExist = true
       await execBridge('session-start', [], { allowAlreadyActive: true })
     })().catch(error => {
-      sessionReadyPromise = null
+      if (sessionReadyPromise === startPromise) sessionReadyPromise = null
       globalThis.__cdbDiag('[linux-executor] bridge session startup failed', error)
       throw error
+    }).finally(() => {
+      sessionStartInFlight = false
+    })
+    sessionReadyPromise = startPromise
+  }
+  await sessionReadyPromise
+  // The command that asked runs next; count from here so the timer cannot
+  // fire in the gap (e.g. screenshot's untracked `screens` lookup).
+  touchIdleTimer()
+  if (overlayNeedsReapply && reapplySessionOverlay) {
+    overlayNeedsReapply = false
+    // Best effort, not awaited: it never fails or delays the command.
+    Promise.resolve().then(reapplySessionOverlay).catch(error => {
+      globalThis.__cdbDiag('[linux-executor] failed to re-apply the session overlay display after a restart', error)
     })
   }
-  return sessionReadyPromise
+}
+
+function clearIdleTimer() {
+  if (idleTimer) {
+    clearTimeout(idleTimer)
+    idleTimer = null
+  }
+}
+
+// (Re)starts the idle countdown. It only runs while the lock is held; it never
+// keeps the process alive.
+function armIdleTimer() {
+  clearIdleTimer()
+  if (!bridgeSessionActive) return
+  idleTimer = setTimeout(onIdleTimer, CU_PORTAL_IDLE_MS)
+  idleTimer.unref?.()
+}
+
+// A Computer Use action happened: restart the countdown and the held-button
+// deferral.
+function touchIdleTimer() {
+  idleHeldDeferred = false
+  armIdleTimer()
+}
+
+function bridgeSessionMayBeUp() {
+  return !!sessionReadyPromise || bridgeDaemonMayExist || stoppedByUser
+}
+
+function onIdleTimer() {
+  idleTimer = null
+  if (!bridgeSessionActive || !bridgeSessionMayBeUp()) return
+  // With the stop latch set the daemon is gone: an in-flight command or a held
+  // button no longer has a session to protect.
+  const guarded = !stoppedByUser
+  if (sessionStartInFlight || sessionStopPromise || (guarded && portalCommandsInFlight > 0)) {
+    debugLog('idle timer re-armed', {
+      sessionStartInFlight,
+      sessionStopInFlight: !!sessionStopPromise,
+      portalCommandsInFlight,
+    })
+    armIdleTimer()
+    return
+  }
+  if (guarded && mouseButtonHeld) {
+    if (!idleHeldDeferred) {
+      idleHeldDeferred = true
+      debugLog('idle timer re-armed once; a mouse button is held')
+      armIdleTimer()
+      return
+    }
+    globalThis.__cdbDiag(`[linux-executor] a mouse button has been held for ${2 * CU_PORTAL_IDLE_MS / 1000} s without Computer Use actions; ending the bridge session anyway`)
+  }
+  globalThis.__cdbDiag(`[linux-executor] idle for ${CU_PORTAL_IDLE_MS / 1000} s, ending the bridge session`)
+  endBridgeSessionKeepLock('idle')
+}
+
+function clearStoppedByUser(reason) {
+  if (!stoppedByUser) return
+  stoppedByUser = false
+  globalThis.__cdbDiag(`[linux-executor] stopped-by-user latch cleared (${reason})`)
+}
+
+// Ends the bridge session (and lifts the stop latch) WITHOUT touching the lock:
+// bridgeSessionActive stays as it is, so the next command starts a new session
+// through ensureBridgeSession. Used by the idle timer and the task boundary.
+// Never rejects.
+function endBridgeSessionKeepLock(reason) {
+  clearIdleTimer()
+  overlayNeedsReapply = true
+  // The daemon goes away with the session, and the button with it.
+  mouseButtonHeld = false
+  if (sessionStopPromise) {
+    // A session-end is already running (lock release, idle end): join it.
+    return sessionStopPromise.catch(() => {}).then(() => clearStoppedByUser(reason))
+  }
+  if (!sessionReadyPromise && !bridgeDaemonMayExist) {
+    clearStoppedByUser(reason)
+    return Promise.resolve()
+  }
+  const readyPromise = sessionReadyPromise
+  sessionReadyPromise = null
+  const stopPromise = (async () => {
+    try {
+      // A start in flight finishes first (task boundary only: the idle end
+      // re-arms instead), then gets ended. The command that triggered that
+      // start may then run against the ended session and fail; its retry
+      // starts a new one. Accepted: the task it belonged to is over.
+      if (readyPromise) await readyPromise
+    } catch {}
+    debugLog('ending bridge session', { reason })
+    await execBridge('session-end', [])
+    bridgeDaemonMayExist = false
+  })().catch(error => {
+    globalThis.__cdbDiag(`[linux-executor] bridge session end (${reason}) failed`, error)
+  }).finally(() => {
+    if (sessionStopPromise === stopPromise) sessionStopPromise = null
+    // A session-start after this removes the bridge's marker in any case.
+    clearStoppedByUser(reason)
+  })
+  sessionStopPromise = stopPromise
+  return stopPromise
+}
+
+// Task-boundary ids: upstream names one session `session_<id>` in one place
+// and `cse_<id>` in another, and one caller lowercases it.
+function cuSessionKey(id) {
+  return String(id).replace(/^(?:session_|cse_)/i, '').toLowerCase()
 }
 
 function installExitHook() {
@@ -345,6 +530,9 @@ function installExitHook() {
 async function startBridgeSession() {
   installExitHook()
   bridgeSessionActive = true
+  clearIdleTimer()
+  // __setLockHeld(true) sets the overlay display itself after the start.
+  overlayNeedsReapply = false
   // A new lock is a new task: a stop from the previous one no longer applies
   // (this session-start removes the bridge's stopped-by-user marker).
   if (stoppedByUser) {
@@ -355,10 +543,15 @@ async function startBridgeSession() {
     await sessionStopPromise
   }
   await ensureBridgeSession()
+  // The lock may have found its session already up (no session-start ran):
+  // count from the acquire either way.
+  touchIdleTimer()
 }
 
 async function stopBridgeSession() {
   bridgeSessionActive = false
+  clearIdleTimer()
+  mouseButtonHeld = false
   if (sessionStopPromise) {
     return sessionStopPromise
   }
@@ -928,6 +1121,10 @@ export function createRustLinuxBackend() {
     },
 
     async mouseUp() {
+      // Released on the attempt, success or failure, even when the stop latch
+      // refuses it before the bridge runs: a stale flag must not hold the
+      // session up (the next session starts with no button held).
+      mouseButtonHeld = false
       await ensureBridgeSession()
       debugLog('mouseUp')
       await execBridgeJson('left-mouse-up', [])
@@ -1195,6 +1392,10 @@ export function createLinuxExecutor(opts = {}) {
     // available signal for "the screen the agent is working on".
     lastDisplayId: null,
   }
+
+  reapplySessionOverlay = () => backend.setSessionOverlayDisplay(
+    sessionOverlayState.lastDisplayId ?? undefined,
+  ).then(recordSessionOverlayDisplay)
 
   function recordSessionOverlayDisplay(applied) {
     if (typeof applied === 'number') {
@@ -1516,6 +1717,29 @@ export function createLinuxExecutor(opts = {}) {
           await restoreClaudeWindow()
         }
         await stopBridgeSession()
+      }
+    },
+
+    // Upstream's releaseRemoteCuLock IPC (patch in fix_computer_use_linux.nim):
+    // a cloud session went idle, Stop was clicked, or the session was archived
+    // or deleted. id = the session it names, holder = upstream's current lock
+    // holder. Ends the bridge session and lifts the stop latch, like the idle
+    // timer; upstream's lock is not touched (the next command starts a new
+    // session). Safe at any time; never rejects.
+    async __cuTaskBoundary(id, source, holder) {
+      try {
+        if (id != null && holder != null && cuSessionKey(id) !== cuSessionKey(holder)) {
+          globalThis.__cdbDiag(`[linux-executor] task boundary (${source}): ignored, ${id} is not the Computer Use lock holder ${holder}`)
+          return
+        }
+        if (!bridgeSessionMayBeUp() && !sessionStopPromise) {
+          debugLog('task boundary: no bridge session to end', { source })
+          return
+        }
+        globalThis.__cdbDiag(`[linux-executor] task boundary (${source}): ending the bridge session`)
+        await endBridgeSessionKeepLock(`task boundary (${source})`)
+      } catch (error) {
+        globalThis.__cdbDiag('[linux-executor] task boundary failed', error)
       }
     },
 

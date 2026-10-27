@@ -337,11 +337,12 @@ async function _x11BridgeScreens(){
 // bridges below contract 1.
 var _BRIDGE_EXIT_NOT_SHARED=3,_BRIDGE_EXIT_NO_SESSION=4,_BRIDGE_EXIT_STOPPED_BY_USER=5;
 // What the model reads after the user stopped screen sharing. Twin:
-// STOPPED_BY_USER_MESSAGE in js/executor_linux.js.
-// It cannot promise more than "the next session": upstream keeps the CU lock
-// across turns while a guided tour (teach mode) runs, so the latch holds until
-// the tour ends or the user clicks Stop in Claude.
-var _CU_STOPPED_BY_USER_MSG="Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use resumes with the next Computer Use session - in a guided tour, after the tour ends or the user clicks Stop in Claude.";
+// STOPPED_BY_USER_MESSAGE in js/executor_linux.js (identical text).
+// The block lifts when the task ends (__cuTaskBoundary, or the lock release)
+// or after CU_PORTAL_IDLE_MS without Computer Use actions - not "with the next
+// session": upstream can hold the CU lock across many turns (cloud Cowork, a
+// guided tour). The model still must not retry on its own; the user decides.
+var _CU_STOPPED_BY_USER_MSG="Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use can share the screen again once the task ends or after about 2 minutes without Computer Use actions.";
 // Exit status of a failed execFileSync (.status) or execFile (.code; a string
 // such as "ENOENT" when the spawn itself failed).
 function _bridgeExitCode(e){if(!e)return null;if(typeof e.status==="number")return e.status;if(typeof e.code==="number")return e.code;return null}
@@ -436,6 +437,12 @@ var GNOME_SESSION_START_MS=125000;
 // and portal commands fail fast (and legibly) until it lapses. A fresh CU lock
 // clears it - a new user gesture deserves a real retry, consent dialog included.
 var GNOME_PORTAL_COOLDOWN_MS=60000;
+// Idle teardown (issue #293): the portal session - and with it the desktop's
+// "screen is being shared" indicator - ends this long after the last portal
+// command, and a stop-sharing latch lifts after the same idle time. The lock
+// alone cannot scope it: upstream holds the remote CU lock across turns (cloud
+// Cowork releases it only after a 12 min idle sweep). See _gnomeIdleArm.
+var CU_PORTAL_IDLE_MS=120000;
 var _gnomePortalDownUntil=0;
 function _gnomePortalDown(){return Date.now()<_gnomePortalDownUntil}
 function _gnomePortalMarkDown(why){
@@ -494,12 +501,15 @@ function _gnomeDaemonGone(){
 }
 // USER STOPPED SCREEN SHARING (bridge exit 5). The user clicked "Stop sharing"
 // in the desktop's screen-sharing indicator; the daemon wrote the
-// stopped-by-user marker and exited. That is a decision, not a fault: for the
-// rest of the current Computer Use lock no session is started (no
-// _gnomeSessionLost / _gnomeRestartAfterReset recovery, no sync backstop, no
-// lazy start), and every portal command fails fast with _CU_STOPPED_BY_USER_MSG
-// without spawning the bridge. The latch is cleared when the lock is released
-// (after its session-end, which also removes the marker) or a new lock starts.
+// stopped-by-user marker and exited. That is a decision, not a fault: while
+// latched no session is started (no _gnomeSessionLost /
+// _gnomeRestartAfterReset recovery, no sync backstop, no lazy start), and every
+// portal command fails fast with _CU_STOPPED_BY_USER_MSG without spawning the
+// bridge. The latch is cleared after a session-end (which also removes the
+// marker) on lock release, task end (__cuTaskBoundary) or CU_PORTAL_IDLE_MS
+// without a real portal command (_gnomeIdleFire), and when a new lock starts.
+// Commands refused by the latch never re-arm the idle timer: a model that keeps
+// retrying must not keep the block alive.
 var _gnomeStoppedByUser=!1;
 // Same runtime-dir rules as _gnomeDaemonGone: an undeterminable dir answers no.
 function _gnomeStoppedMarker(){
@@ -511,12 +521,13 @@ function _gnomeStoppedMarker(){
   }catch(e){return !1}
 }
 function _gnomeStoppedError(){var err=new Error(_CU_STOPPED_BY_USER_MSG);err.__cdbSurface=!0;err.__cdbStoppedByUser=!0;return err}
-// Set the latch. _gnomeDaemonMayExist stays set so the lock release still
-// sends session-end (which removes the marker).
+// Set the latch. _gnomeDaemonMayExist stays set so the end that clears it still
+// sends session-end (which removes the marker). The idle timer counts from here.
 function _gnomeLatchStopped(why){
   if(_gnomeStoppedByUser)return;
-  _gnomeStoppedByUser=!0;_gnomeSessionActive=!1;_gnomeDaemonMayExist=!0;_wlScreensInvalidate();
-  globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: screen sharing was stopped ("+why+"); no new session until this Computer Use lock ends");
+  _gnomeStoppedByUser=!0;_gnomeSessionActive=!1;_gnomeDaemonMayExist=!0;_gnomeMouseHeld=!1;_wlScreensInvalidate();
+  globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: screen sharing was stopped ("+why+"); no new session until the task ends or "+Math.round(CU_PORTAL_IDLE_MS/1000)+" s pass without Computer Use actions");
+  _gnomeIdleArm();
 }
 // A portal COMMAND answered exit 5: latch and return the error for the model.
 // Not while a start or an end is in flight: those own the flags (a marker left
@@ -543,7 +554,7 @@ function _gnomeStoppedCheck(){
 // end is in flight: those own the flags. Returns whether it cleared anything.
 function _gnomeSessionLost(why){
   if(!_gnomeSessionActive||_gnomeSessionStarting||_gnomeSessionEnding)return !1;
-  _gnomeSessionActive=!1;_gnomeDaemonMayExist=!1;_wlScreensInvalidate();
+  _gnomeSessionActive=!1;_gnomeDaemonMayExist=!1;_gnomeMouseHeld=!1;_wlScreensInvalidate();
   globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session daemon is gone ("+why+"; screen sharing reset?); starting a new session");
   return !0;
 }
@@ -556,6 +567,64 @@ function _gnomeRestartAfterReset(){
   err.__cdbSurface=!0;
   return err;
 }
+// ── Idle teardown (CU_PORTAL_IDLE_MS) ──
+// One unref'd timer, re-armed when a real portal command settles (the bridge
+// was spawned for it), when a session comes up and when the stop latch is set.
+// Commands refused before the spawn (latch, cooldown) do not touch it. On
+// expiry it ends the portal session, or lifts the stop latch, through
+// _gnomeSessionEnd - the lock is left alone, and the next portal command
+// starts a session again through the lazy (async) or sync-backstop path.
+// It never ends what is in use: a start, an end or a portal command in flight,
+// or a mouse button held by left_mouse_down without its left_mouse_up, re-arm
+// it instead. The held button defers it ONCE: a second expiry with no portal
+// command in between ends the session anyway (a model that holds a button for
+// 4 min without any action has abandoned it). Any left_mouse_up attempt clears
+// the flag, whatever the bridge answers. hold_key needs no flag here: on GNOME it is ONE `hold-key
+// --duration-ms` command that releases the key itself, so it is a command in
+// flight for as long as the key is down. Lock release / a new lock / a task
+// boundary cancel it (_gnomeSessionEnd, __setLockHeld).
+// _gnomeQueriesInFlight: portal-free bridge calls (`screens`) in flight. A
+// capture enumerates monitors before its zoom; the session must not end in
+// between, but a query alone never re-arms the timer (it is not a CU action).
+var _gnomeIdleTimer=null,_gnomeCmdsInFlight=0,_gnomeQueriesInFlight=0,_gnomeMouseHeld=!1,_gnomeHeldDeferred=!1;
+function _gnomeIdleCancel(){if(_gnomeIdleTimer){clearTimeout(_gnomeIdleTimer);_gnomeIdleTimer=null}}
+function _gnomeIdleArm(){
+  _gnomeIdleCancel();
+  _gnomeIdleTimer=setTimeout(_gnomeIdleFire,CU_PORTAL_IDLE_MS);
+  if(_gnomeIdleTimer&&typeof _gnomeIdleTimer.unref==="function")_gnomeIdleTimer.unref();
+}
+function _gnomeIdleFire(){
+  _gnomeIdleTimer=null;
+  // These finish by themselves: defer as often as needed. While the stop latch
+  // is set the daemon is gone: no command or held button keeps anything alive,
+  // only a start or an end owns the flags.
+  var latched=_gnomeStoppedByUser;
+  var busy=_gnomeSessionStarting?"a session-start":_gnomeSessionEnding?"a session-end":latched?null:_gnomeCmdsInFlight>0?"a portal command":_gnomeQueriesInFlight>0?"a bridge query":null;
+  if(busy){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: idle timer deferred, "+busy+" is in progress");_gnomeIdleArm();return}
+  var secs=Math.round(CU_PORTAL_IDLE_MS/1000);
+  if(_gnomeMouseHeld&&!latched){
+    if(!_gnomeHeldDeferred){_gnomeHeldDeferred=!0;globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: idle timer deferred, a held mouse button is in progress");_gnomeIdleArm();return}
+    globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: a mouse button has been held for "+(2*secs)+" s without a Computer Use action, ending the portal session anyway");
+    _gnomeMouseHeld=!1;
+  }
+  if(_gnomeStoppedByUser)globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: idle for "+secs+" s after screen sharing was stopped, lifting the block");
+  else if(_gnomeSessionActive||_gnomeDaemonMayExist)globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: idle for "+secs+" s, ending the portal session");
+  else return;
+  _gnomeSessionEnd("idle").catch(function(){});
+}
+// Bracket the bridge spawn of a portal command (not the ensure before it: a
+// start in flight is _gnomeSessionStarting, and the sync one blocks anyway).
+// A command that passed its session checks re-arms the timer as it spawns.
+function _gnomeCmdBegin(){_gnomeCmdsInFlight++;_gnomeIdleArm()}
+function _gnomeCmdEnd(sub,ok){
+  _gnomeCmdsInFlight--;
+  if(ok&&sub==="left-mouse-down")_gnomeMouseHeld=!0;
+  _gnomeHeldDeferred=!1;
+  _gnomeIdleArm();
+}
+// Any left_mouse_up attempt releases the hold as far as the idle timer is
+// concerned, even one refused or failed before the bridge answers.
+function _gnomeCmdSeen(sub){if(sub==="left-mouse-up")_gnomeMouseHeld=!1}
 var _gnomePortalCmds={"zoom":1,"screenshot":1,"pointer-move":1,"pointer-click":1,"pointer-scroll":1,"pointer-drag":1,"left-mouse-down":1,"left-mouse-up":1,"key-sequence":1,"type":1,"hold-key":1};
 function _wlBridgeCall(args){
   var b=_wlBridge();if(!b)throw new Error("no covered Wayland bridge available");
@@ -563,6 +632,7 @@ function _wlBridgeCall(args){
   // A portal command with no portal session behind it can only fail. Running it
   // anyway costs another full blocking timeout, so refuse while latched down.
   if(portalCmd){
+    _gnomeCmdSeen(args[0]);
     if(_gnomeStoppedCheck())throw _gnomeStoppedError();
     if(_gnomeSessionActive&&_gnomeDaemonGone()&&_gnomeSessionLost("no session daemon"))throw _gnomeRestartAfterReset();
     if(!_gnomeSessionActive&&_gnomePortalDown())throw _gnomePortalDownError();
@@ -579,12 +649,15 @@ function _wlBridgeCall(args){
   // enumeration gets the standard bridge timeout so a stuck D-Bus call can
   // never block the main process for the full portal budget.
   var t=b.name==="gnome-portal-bridge"&&!portalCmd?15000:b.timeout;
-  try{return _bridge(b.bin,args,t)}
+  var ok=!1;
+  if(portalCmd)_gnomeCmdBegin();
+  try{var r=_bridge(b.bin,args,t);ok=!0;return r}
   catch(e){
     if(portalCmd&&e&&e.__cdbStoppedByUser)throw _gnomeMarkStopped("bridge exit 5");
     if(portalCmd&&e&&e.__cdbNoSession&&_gnomeSessionLost("bridge exit 4"))throw _gnomeRestartAfterReset();
     throw e;
   }
+  finally{if(portalCmd)_gnomeCmdEnd(args[0],ok)}
 }
 // ASYNC twin of _wlBridgeCall, used by the screenshot path (issue #232). Same
 // portal rules, but it AWAITS the async session ensure instead of running the
@@ -596,6 +669,7 @@ async function _wlBridgeCallAsync(args,timeoutOverrideMs){
     // This path can await the consent dialog, so a vanished daemon is simply
     // replaced here (one dialog, full budget) instead of failing the call -
     // unless the user stopped sharing, which is never undone behind their back.
+    _gnomeCmdSeen(args[0]);
     if(_gnomeStoppedCheck())throw _gnomeStoppedError();
     if(_gnomeSessionActive&&_gnomeDaemonGone())_gnomeSessionLost("no session daemon");
     if(!_gnomeSessionActive&&_gnomePortalDown())throw _gnomePortalDownError();
@@ -604,20 +678,26 @@ async function _wlBridgeCallAsync(args,timeoutOverrideMs){
     if(!_gnomeSessionActive)throw _gnomePortalDownError();
   }
   var t=timeoutOverrideMs||(b.name==="gnome-portal-bridge"&&!portalCmd?15000:b.timeout);
-  try{return await _execFileAsync(b.name,b.bin,args,t)}
+  var ok=!1,query=b.name==="gnome-portal-bridge"&&!portalCmd;
+  if(portalCmd)_gnomeCmdBegin();
+  if(query)_gnomeQueriesInFlight++;
+  try{var r=await _execFileAsync(b.name,b.bin,args,t);ok=!0;return r}
   catch(e){
     if(portalCmd&&e&&e.__cdbStoppedByUser)throw _gnomeMarkStopped("bridge exit 5");
     if(portalCmd&&e&&e.__cdbNoSession&&_gnomeSessionLost("bridge exit 4"))throw _gnomeRestartAfterReset();
     throw e;
   }
+  finally{if(portalCmd)_gnomeCmdEnd(args[0],ok);if(query)_gnomeQueriesInFlight--}
 }
 // Synchronous session-start backstop for the per-call input/capture path: these
 // callers run the bridge synchronously and need the portal session up FIRST.
 // In normal operation the CU lock hook (__setLockHeld → _gnomeEnsureSession,
 // async) has already brought the session up, so this is a no-op. It only does
 // the blocking session-start if a portal command runs without the lock hook
-// having fired — and by then a consent dialog is expected UX anyway (the user
-// invoked Computer Use).
+// having fired, or after an idle / task-boundary end with the lock still held -
+// and by then a consent dialog is expected UX anyway (the user invoked
+// Computer Use). A dialog that outlasts GNOME_SYNC_START_MS throws a surfaced
+// "approve, then retry" error and continues in the background (see the catch).
 function _gnomeEnsureSessionSync(){
   // A teardown in flight owns the session: do not race a second blocking
   // session-start (and a second consent dialog) into it. This path cannot await,
@@ -630,12 +710,44 @@ function _gnomeEnsureSessionSync(){
   var bin=_gnomeBridgeBin();if(!bin)return !1;
   if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive||_gnomeDaemonMayExist){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
   _gnomeDaemonMayExist=!0;
-  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
+  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
   catch(e){
-    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
     // Closed before it became ready: a stop, not a fault - latch, no cooldown, no retry.
     if(e&&e.__cdbStoppedByUser){_gnomeLatchStopped("sync backstop session-start exit 5");return !1}
+    // No restore token (the user left "Remember this selection" unticked, or
+    // GNOME < 46): the start after an idle or task-boundary end raises the
+    // consent dialog, and 8 s is not enough to answer it. The daemon is still
+    // parked on that dialog, so this is not a portal fault: no cooldown. Hand
+    // it to the async start (full GNOME_SESSION_START_MS; the bridge's second
+    // session-start waits on the daemon already coming up, no second dialog)
+    // and tell the model to have the user approve, then retry.
+    if(_gnomeSyncStartPending(e)){
+      globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start did not finish within "+Math.round(GNOME_SYNC_START_MS/1000)+" s (sync backstop; consent dialog open?) - continuing it in the background");
+      try{var p=_gnomeEnsureSession();if(p&&typeof p.catch==="function")p.catch(function(){})}catch(ke){}
+      var err=new Error("Screen sharing is waiting for approval. Ask the user to approve the screen-sharing dialog, then retry the action.");
+      err.__cdbSurface=!0;
+      throw err;
+    }
     globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start failed (sync backstop): "+(e.message||e));_gnomePortalMarkDown("sync backstop session-start failed");return !1}
+}
+// A failed sync session-start whose daemon may still be waiting on the consent
+// dialog: the call hit its timeout (the bridge CLI was killed; the daemon runs
+// in its own session and survives it), or the daemon's pidfile names a live
+// process. A bridge that failed on its own with no daemon left is a genuine
+// portal failure (cooldown, as before). Same runtime-dir rules as
+// _gnomeDaemonGone.
+function _gnomeSyncStartPending(e){
+  if(e&&(e.code==="ETIMEDOUT"||e.killed===!0||(e.signal&&e.status==null)))return !0;
+  try{
+    var d=process.env.XDG_RUNTIME_DIR;
+    if(d!==undefined&&(d===""||!_path.isAbsolute(d)))return !1;
+    var pidFile=_bridgeRuntimeFile("gnome-portal-bridge","session.pid");
+    if(pidFile===null||!_fs.existsSync(pidFile))return !1;
+    var pid=parseInt(String(_fs.readFileSync(pidFile,"utf8")).trim(),10);
+    if(!(pid>1))return !1;
+    try{process.kill(pid,0);return !0}catch(ke){return ke&&ke.code==="EPERM"}
+  }catch(fe){return !1}
 }
 // Bridge-side monitor list (snake_case screens) for the active Wayland bridge.
 // Mirrors _x11BridgeScreens; used to map a global-logical region to a monitor
@@ -765,9 +877,11 @@ async function _gnomeSharedDefaultDisplayId(){
 // tool-use lock (one consent dialog; restore-token dialog-free on GNOME 46+).
 // Driven by the CU lock via __setLockHeld (wired from Patches 4b/4b.2 in
 // fix_computer_use_linux.nim, which call __linuxExecutor.__setLockHeld in BOTH
-// kwin and regular mode). If the lock hook never fires we lazy-start on the
-// first PORTAL command (input/capture — see _gnomePortalCmds; never for
-// enumeration) and stop on process exit as a backstop.
+// kwin and regular mode), ended early by the task boundary (__cuTaskBoundary)
+// and by CU_PORTAL_IDLE_MS without a portal command (_gnomeIdleFire). If no
+// session is up we lazy-start on the next PORTAL command (input/capture - see
+// _gnomePortalCmds; never for enumeration) and stop on process exit as a
+// backstop.
 var _gnomeSessionActive=!1,_gnomeExitHooked=!1,_gnomeSessionStarting=null,_gnomeSessionEnding=null,_gnomeSessionWanted=!1;
 // True from the moment a session-start is spawned until a session-end succeeds.
 // A start that failed or timed out can still leave the bridge daemon parked on
@@ -782,9 +896,9 @@ function _gnomeAlreadyActive(e){return /already active/i.test(String(e&&(e.messa
 async function _gnomeSessionStart(){
   var bin=_gnomeBridgeBin();if(!bin)return;
   _gnomeDaemonMayExist=!0;
-  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
+  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
   catch(e){
-    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
     // The new daemon was closed before it became ready (the user stopped
     // sharing, or the desktop ended the session): latch for this lock instead
     // of the cooldown, so nothing starts it again until the lock ends.
@@ -804,7 +918,9 @@ async function _gnomeSessionStart(){
 // start a SECOND session - a blocking session-start on the main process plus a
 // second consent dialog - which this teardown would then rip out from under the
 // command that asked for it.
-async function _gnomeSessionEnd(){
+// why names the trigger in the latch-cleared line: "lock released" (default),
+// "idle" (_gnomeIdleFire) or "task boundary" (__cuTaskBoundary).
+async function _gnomeSessionEnd(why){
   // Record the INTENT first, before any early return: a release that lands while
   // a start is only QUEUED behind an earlier teardown must still cancel it. The
   // queued continuation consults this flag, which is how executor_linux.js's
@@ -813,6 +929,9 @@ async function _gnomeSessionEnd(){
   // UP and no lock held: a live RemoteDesktop/ScreenCast session while the user
   // believes Computer Use is idle.
   _gnomeSessionWanted=!1;
+  // Every end cancels the idle timer and drops a held button (the daemon that
+  // pressed it goes away); the next session arms the timer afresh.
+  _gnomeIdleCancel();_gnomeMouseHeld=!1;_gnomeHeldDeferred=!1;
   if(_gnomeSessionEnding)return _gnomeSessionEnding;
   var bin=_gnomeBridgeBin();
   // Snapshot BEFORE clearing: the skip below has to ask whether a session was up
@@ -843,8 +962,11 @@ async function _gnomeSessionEnd(){
     _gnomeSessionActive=!1;
     try{await _bridgeAsync(bin,["session-end"],15000);_gnomeDaemonMayExist=!1}catch(e){}
     _gnomeSessionActive=!1;
-    // The lock that saw the user stop sharing is over.
-    _gnomeStoppedClear("lock released");
+    // A start that resolved while we waited armed the timer; nothing is up now.
+    _gnomeIdleCancel();
+    // The stop the user made applies no longer: the lock or the task is over,
+    // or the idle time passed.
+    _gnomeStoppedClear(why||"lock released");
     globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session ended");
   })().then(function(){_gnomeSessionEnding=null},function(){_gnomeSessionEnding=null});
   return _gnomeSessionEnding;
@@ -871,9 +993,10 @@ function _gnomeEnsureSession(){
   }
   if(_gnomeSessionActive)return Promise.resolve();
   if(_gnomeSessionStarting)return _gnomeSessionStarting;
-  // The user stopped sharing during this lock: nothing starts a session again
-  // before the lock ends (a new lock clears the latch in __setLockHeld first).
-  if(_gnomeStoppedByUser){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start skipped: the user stopped screen sharing during this lock");return Promise.resolve()}
+  // The user stopped sharing: nothing starts a session again until the latch
+  // is cleared (lock or task end, idle expiry; a new lock clears it in
+  // __setLockHeld first).
+  if(_gnomeStoppedByUser){globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session-start skipped: the user stopped screen sharing");return Promise.resolve()}
   // A fresh lock is a fresh user gesture: give the portal a real retry (consent
   // dialog and all) rather than inheriting the previous session's cooldown.
   _gnomePortalClearDown();
@@ -1333,8 +1456,28 @@ globalThis.__linuxExecutor={
   async __setLockHeld(held){
     if(!_isGnomeCovered()||!_gnomeBridgeBin())return;
     // A new lock is a new task: a stop the user made during the previous one
-    // no longer applies (its session-start removes the bridge's marker).
-    if(held){_gnomeStoppedClear("new lock");await _gnomeEnsureSession()}else await _gnomeSessionEnd();
+    // no longer applies (its session-start removes the bridge's marker). Both
+    // transitions cancel the idle timer; a session that is up for the new lock
+    // counts its idle time from here.
+    _gnomeIdleCancel();
+    if(held){_gnomeStoppedClear("new lock");await _gnomeEnsureSession();if(_gnomeSessionActive&&!_gnomeIdleTimer)_gnomeIdleArm()}else await _gnomeSessionEnd();
+  },
+  // Task-end event: upstream's renderer IPC releaseRemoteCuLock (a cloud
+  // session's running->idle edge, Stop, archive, delete), forwarded by
+  // fix_computer_use_linux.nim with upstream's current lock holder. Safe to
+  // call any time and from any platform (no-op off the GNOME portal path);
+  // never touches upstream's lock. Acts when either id is missing or both name
+  // the same session - one session has two ids (session_X / cse_X) and one
+  // caller lowercases, so they are compared without that prefix and case.
+  // Then it does what the idle expiry does: end the portal session and lift a
+  // stop-sharing latch. Nothing up: silent, it fires on every turn end.
+  async __cuTaskBoundary(id,source,holder){
+    if(!_isGnomeCovered()||!_gnomeBridgeBin())return;
+    if(!_gnomeSessionActive&&!_gnomeSessionStarting&&!_gnomeDaemonMayExist&&!_gnomeStoppedByUser)return;
+    function key(v){return String(v).toLowerCase().replace(/^(?:session_|cse_)/,"")}
+    if(id!=null&&holder!=null&&key(id)!==key(holder)){globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): ignored, it names another session than the Computer Use lock holder");return}
+    globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): ending the portal session");
+    await _gnomeSessionEnd("task boundary");
   },
   async listDisplays(){return _getMonitors()},
   // Display index a capture with no display selected should use, or null for

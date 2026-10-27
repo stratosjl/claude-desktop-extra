@@ -1,0 +1,393 @@
+#!/usr/bin/env node
+// Computer Use on Linux: claude.ai's task-end event reaches the Linux executor.
+//
+// WHY THIS EXISTS
+// ---------------
+// The claude.ai renderer calls main's `releaseRemoteCuLock(id, source)` IPC on a
+// cloud session's running->idle edge, on Stop ("stop_click"), on archive and on
+// delete (3.6556.2: `releaseRemoteCuLock:(e,t)=>{pBi(e??void 0,t==="stop_click"?
+// "stop_click":"renderer")}`). Upstream ignores it when the id differs from the
+// CU lock's holder byte for byte, although one session has two ids (session_X /
+// cse_X), so the Linux portal session stayed up after the task ended (#293).
+//
+// Sub-patch 4e of fix_computer_use_linux.nim injects, before upstream's call:
+//   try{process.platform==="linux"&&globalThis.__linuxExecutor?.__cuTaskBoundary
+//     ?.(<id>??void 0,<source>,exports.<lockKey>.currentHolder)?.catch?.(log)}
+//   catch(r){log}
+// where exports.<lockKey> is the lock module's own export getter for upstream's
+// CU lock instance (`aJ`, exported as `ZC` in 3.6556.2), found in the same chunk.
+//
+// This harness stages the real extract under tmp/app.asar.contents/ exactly as
+// the orchestrator does, runs the compiled patch binary on it (twice), and pins:
+//   [1] the pristine anchors: the handler, the lock instance and its export
+//       getter, all once and in the same chunk; no hook yet.
+//   [2] the patch applies with its full counter, reports 4e, and is idempotent.
+//   [3] the injected call lands once and passes id, source and the holder read
+//       through the lock's export getter; the changed chunk passes node --check.
+//   [4] the patched handler, evaluated in a vm sandbox: the hook receives the
+//       args before upstream's call runs; upstream's call always runs, also when
+//       the hook throws or rejects or is missing; off Linux nothing is called.
+// Sections SKIP when the binary or the extract is missing. CDB_CU_PATCH_BIN
+// points at another compiled binary (e.g. master's, to see the harness fail).
+//
+// Exit codes follow the repo convention: 0 = PASS, 3 = SKIP, other = FAIL.
+
+import {
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  accessSync,
+  constants,
+} from "node:fs";
+import { spawnSync, execFileSync } from "node:child_process";
+import vm from "node:vm";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = join(here, "..", "..", "..");
+const SKIP_EXIT = 3;
+const PATCH_SRC = join(repo, "patches", "linux", "fix_computer_use_linux.nim");
+const PATCH_BIN =
+  process.env.CDB_CU_PATCH_BIN || join(repo, "patches", "linux", "fix_computer_use_linux");
+const BUILD_DIR = join(
+  process.env.CDB_BUNDLE_DIR || join(repo, "tmp", "app.asar.contents"),
+  ".vite",
+  "build"
+);
+const EXPECTED_PATCHES = Number(
+  /const EXPECTED_PATCHES = (\d+)/.exec(readFileSync(PATCH_SRC, "utf8"))[1]
+);
+
+let pass = 0;
+const failures = [];
+function check(label, actual, expected) {
+  if (actual === expected) {
+    console.log(`  PASS ${label} -> ${actual}`);
+    pass++;
+  } else {
+    console.log(`  FAIL ${label} -> got ${actual}, expected ${expected}`);
+    failures.push(label);
+  }
+}
+const count = (hay, needle) => hay.split(needle).length - 1;
+const countRe = (hay, re) => (hay.match(new RegExp(re.source, "g")) || []).length;
+
+// Upstream's handler (quote style may flip between releases) and our hook.
+const PRISTINE_HANDLER_RE =
+  /releaseRemoteCuLock:\(([\w$]+),([\w$]+)\)=>\{([\w$]+)\(\1\?\?void 0,\2===(["`])stop_click\4\?\4stop_click\4:\4renderer\4\)\}/;
+const PATCHED_HANDLER_RE =
+  /releaseRemoteCuLock:(\(([\w$]+),([\w$]+)\)=>\{try\{process\.platform==="linux"&&globalThis\.__linuxExecutor\?\.__cuTaskBoundary\?\.\(\2\?\?void 0,\3==="stop_click"\?"stop_click":"renderer",exports\.([\w$]+)\.currentHolder\)\?\.catch\?\.\([^{}]*\)\}catch\([\w$]+\)\{[^{}]*\}([\w$]+)\(\2\?\?void 0,\3===(["`])stop_click\6\?\6stop_click\6:\6renderer\6\)\})/;
+const LOCK_DECL_RE = /(?<![\w$.])([\w$]+)=new class extends [\w$]+(?:\.[\w$]+)*\{/g;
+const HOLDER_GETTER = "get currentHolder(){return this.exclusiveHolder}";
+const SPLIT_RE = /\n\/\*__CDB_SPLIT__([^*\n]+?)__\*\/\n/;
+
+function splitParts(blob) {
+  const pieces = blob.split(SPLIT_RE);
+  const names = ["index.js"];
+  const bodies = [pieces[0]];
+  for (let i = 1; i < pieces.length; i += 2) {
+    names.push(pieces[i]);
+    bodies.push(pieces[i + 1]);
+  }
+  return { names, bodies };
+}
+
+// The CU lock instance (class body holds the holder getter) and its export key.
+function lockInPart(body) {
+  const names = [];
+  for (const m of body.matchAll(LOCK_DECL_RE)) {
+    const start = m.index + m[0].length;
+    let end = body.indexOf("=new class ", start);
+    if (end === -1) end = body.length;
+    const g = body.indexOf(HOLDER_GETTER, start);
+    if (g !== -1 && g < end) names.push(m[1]);
+  }
+  if (names.length !== 1) return { names };
+  const esc = names[0].replace(/\$/g, "\\$");
+  const exportRe = new RegExp(
+    'Object\\.defineProperty\\(exports,(["`])([A-Za-z_$][\\w$]*)\\1,\\{enumerable:!0,get:function\\(\\)\\{return ' +
+      esc +
+      "\\}\\}\\)",
+    "g"
+  );
+  const keys = [...body.matchAll(exportRe)].map((m) => m[2]);
+  return { names, keys };
+}
+
+// --- the rig ------------------------------------------------------------------
+// Evaluate the patched handler arrow in a fresh context: `process`, `exports`,
+// upstream's release function and the executor stub are what the real chunk
+// scope provides at that site.
+function makeHandler(arrowSrc, upstreamFn, lockKey, opts) {
+  const calls = [];
+  const diag = [];
+  let holderReads = 0;
+  const exportsObj = {};
+  Object.defineProperty(exportsObj, lockKey, {
+    get() {
+      holderReads++;
+      return { currentHolder: opts.holder };
+    },
+  });
+  const ctx = {
+    process: { platform: opts.platform },
+    exports: exportsObj,
+    console: { warn: (...a) => diag.push(["console.warn", ...a]) },
+    __cdbDiag: (...a) => diag.push(a),
+  };
+  ctx[upstreamFn] = (...a) => calls.push(["upstream", ...a]);
+  if (opts.executor !== undefined) ctx.__linuxExecutor = opts.executor(calls);
+  vm.createContext(ctx);
+  const fn = vm.runInContext("(" + arrowSrc + ")", ctx);
+  return { fn, calls, diag, holderReads: () => holderReads };
+}
+const recordingExecutor = (calls) => ({
+  __cuTaskBoundary: (...a) => {
+    calls.push(["boundary", ...a]);
+  },
+});
+
+let skipped = false;
+let patchMissing = false;
+try {
+  accessSync(PATCH_BIN, constants.X_OK);
+} catch {
+  patchMissing = true;
+}
+const stub = join(BUILD_DIR, "index.js");
+if (patchMissing || !existsSync(stub)) {
+  skipped = true;
+  console.log(
+    "\n  SKIP real-bundle sections: " +
+      (patchMissing
+        ? `${PATCH_BIN} is not compiled (run: make -C patches linux/fix_computer_use_linux)`
+        : "no extract under tmp/app.asar.contents/ (set CDB_BUNDLE_DIR to point at one)")
+  );
+} else {
+  const scratch = mkdtempSync(join(tmpdir(), "cdb-cu-task-boundary-"));
+  try {
+    // Stage exactly as the orchestrator does: stub + every index*.chunk-*
+    // sibling as ONE file, each sibling preceded by its boundary marker.
+    const chunks = readdirSync(BUILD_DIR)
+      .filter((d) => /^index.*\.chunk-.*\.js$/.test(d))
+      .sort();
+    const originals = new Map([["index.js", readFileSync(stub, "utf8")]]);
+    let blob = originals.get("index.js");
+    for (const c of chunks) {
+      const body = readFileSync(join(BUILD_DIR, c), "utf8");
+      originals.set(c, body);
+      blob += "\n/*__CDB_SPLIT__" + c + "__*/\n" + body;
+    }
+    const staged = join(scratch, "staged_index.js");
+    writeFileSync(staged, blob);
+
+    console.log("\n[1] pristine anchors in the staged bundle");
+    check("pristine handler present once", countRe(blob, PRISTINE_HANDLER_RE), 1);
+    check("no __cuTaskBoundary hook yet", count(blob, "__cuTaskBoundary"), 0);
+    const pristine = splitParts(blob);
+    const hIdx = pristine.bodies.findIndex((b) => PRISTINE_HANDLER_RE.test(b));
+    check("handler found in a chunk part", hIdx >= 0, true);
+    const lock = hIdx >= 0 ? lockInPart(pristine.bodies[hIdx]) : { names: [] };
+    check("CU lock instance in the handler's chunk", lock.names.length, 1);
+    check("its export getter in the same chunk", (lock.keys || []).length, 1);
+    console.log(
+      `  (handler in ${pristine.names[hIdx]}, lock ${lock.names[0]}, exported as ${(lock.keys || [])[0]})`
+    );
+
+    console.log("\n[2] the compiled patch applies with the full counter, then is idempotent");
+    const run = () => {
+      const r = spawnSync(PATCH_BIN, [staged], { encoding: "utf8" });
+      return { status: r.status, out: String(r.stdout || "") + String(r.stderr || "") };
+    };
+    const r1 = run();
+    check("first run exits 0", r1.status, 0);
+    check("no [FAIL] line", /\[FAIL\]/.test(r1.out), false);
+    check(
+      `[PASS] ${EXPECTED_PATCHES}/${EXPECTED_PATCHES} reported`,
+      r1.out.includes(`[PASS] ${EXPECTED_PATCHES}/${EXPECTED_PATCHES} sub-patches applied`),
+      true
+    );
+    check(
+      "4e reported [OK] with the lock's export key",
+      /\[OK\] 4e task boundary: releaseRemoteCuLock hands id, source and holder \(exports\.[\w$]+ = [\w$]+\) to the Linux executor \(1 match\)/.test(
+        r1.out
+      ),
+      true
+    );
+    if (r1.status !== 0) console.log(r1.out);
+    const patched = readFileSync(staged, "utf8");
+    const r2 = run();
+    check("second run exits 0", r2.status, 0);
+    check(
+      "second run reports every end-state marker present",
+      /\[OK\] all \d+ end-state markers already present \(idempotent, no change\)/.test(r2.out),
+      true
+    );
+    check("second run leaves the file byte-identical", readFileSync(staged, "utf8") === patched, true);
+
+    console.log("\n[3] the injected call");
+    check("__cuTaskBoundary call present once", count(patched, "__cuTaskBoundary?.("), 1);
+    check("patched handler shape present once", countRe(patched, PATCHED_HANDLER_RE), 1);
+    check("pristine handler shape gone", countRe(patched, PRISTINE_HANDLER_RE), 0);
+    const pm = PATCHED_HANDLER_RE.exec(patched);
+    const [, arrowSrc, idP, srcP, key, upstreamFn] = pm || [];
+    const pristineM = PRISTINE_HANDLER_RE.exec(blob) || [];
+    check("passes upstream's id param (??void 0)", idP, pristineM[1]);
+    check("passes upstream's source param", srcP, pristineM[2]);
+    check("upstream's call is the same function", upstreamFn, pristineM[3]);
+    check("holder read through the lock's own export key", key, (lock.keys || [])[0]);
+    const after = splitParts(patched);
+    const pIdx = after.bodies.findIndex((b) => PATCHED_HANDLER_RE.test(b));
+    check("hook lands in the handler's own chunk", after.names[pIdx], pristine.names[hIdx]);
+    if (pIdx >= 0) {
+      const f = join(scratch, after.names[pIdx]);
+      writeFileSync(f, after.bodies[pIdx]);
+      let ok = true;
+      try {
+        execFileSync("node", ["--check", f], { stdio: "pipe" });
+      } catch {
+        ok = false;
+      }
+      check(`node --check ${after.names[pIdx]}`, ok, true);
+    }
+
+    console.log("\n[4] the patched handler in a vm sandbox");
+    if (!pm) {
+      check("patched handler extracted", false, true);
+    } else {
+      // a. Linux, idle edge: hook first with (id, "renderer", holder), then upstream.
+      let h = makeHandler(arrowSrc, upstreamFn, key, {
+        platform: "linux",
+        holder: "cse_ABC",
+        executor: recordingExecutor,
+      });
+      let ret = h.fn("session_ABC", null);
+      check("returns undefined (no return-value use)", ret, undefined);
+      check(
+        "linux renderer: hook then upstream",
+        JSON.stringify(h.calls),
+        JSON.stringify([
+          ["boundary", "session_ABC", "renderer", "cse_ABC"],
+          ["upstream", "session_ABC", "renderer"],
+        ])
+      );
+
+      // b. Stop.
+      h = makeHandler(arrowSrc, upstreamFn, key, {
+        platform: "linux",
+        holder: "cse_ABC",
+        executor: recordingExecutor,
+      });
+      h.fn("cse_ABC", "stop_click");
+      check(
+        "linux stop_click: source passed to both",
+        JSON.stringify(h.calls),
+        JSON.stringify([
+          ["boundary", "cse_ABC", "stop_click", "cse_ABC"],
+          ["upstream", "cse_ABC", "stop_click"],
+        ])
+      );
+
+      // c. No id, no holder.
+      h = makeHandler(arrowSrc, upstreamFn, key, {
+        platform: "linux",
+        holder: undefined,
+        executor: recordingExecutor,
+      });
+      h.fn(null, "archive");
+      check("null id arrives as undefined", h.calls[0].length === 4 && h.calls[0][1] === undefined, true);
+      check("unknown source maps to renderer", h.calls[0][2], "renderer");
+      check("undefined holder passed through", h.calls[0][3], undefined);
+      check("upstream still runs", h.calls.length === 2 && h.calls[1][0] === "upstream", true);
+
+      // d. A throwing hook does not break upstream's call.
+      h = makeHandler(arrowSrc, upstreamFn, key, {
+        platform: "linux",
+        holder: "x",
+        executor: () => ({
+          __cuTaskBoundary: () => {
+            throw new Error("boom");
+          },
+        }),
+      });
+      let threw = false;
+      try {
+        h.fn("x", "stop_click");
+      } catch {
+        threw = true;
+      }
+      check("throwing hook: handler does not throw", threw, false);
+      check(
+        "throwing hook: upstream still runs",
+        JSON.stringify(h.calls),
+        JSON.stringify([["upstream", "x", "stop_click"]])
+      );
+      check("throwing hook: logged", h.diag.length === 1 && String(h.diag[0][0]).includes("task boundary"), true);
+
+      // e. A rejecting async hook does not break upstream's call or go unhandled.
+      let unhandled = 0;
+      const onUnhandled = () => unhandled++;
+      process.on("unhandledRejection", onUnhandled);
+      h = makeHandler(arrowSrc, upstreamFn, key, {
+        platform: "linux",
+        holder: "x",
+        executor: () => ({ __cuTaskBoundary: async () => Promise.reject(new Error("async boom")) }),
+      });
+      h.fn("x", null);
+      await new Promise((r) => setTimeout(r, 10));
+      process.off("unhandledRejection", onUnhandled);
+      check("rejecting hook: upstream still runs", JSON.stringify(h.calls), JSON.stringify([["upstream", "x", "renderer"]]));
+      check("rejecting hook: rejection logged", h.diag.length === 1, true);
+      check("rejecting hook: no unhandled rejection", unhandled, 0);
+
+      // f. No executor / no method on Linux.
+      for (const [label, executor] of [
+        ["no __linuxExecutor", undefined],
+        ["executor without __cuTaskBoundary", () => ({})],
+      ]) {
+        h = makeHandler(arrowSrc, upstreamFn, key, { platform: "linux", holder: "x", executor });
+        threw = false;
+        try {
+          h.fn("x", null);
+        } catch {
+          threw = true;
+        }
+        check(`${label}: no throw, upstream runs`, !threw && h.calls.length === 1 && h.calls[0][0] === "upstream", true);
+      }
+
+      // g. Off Linux nothing of ours is evaluated.
+      for (const platform of ["darwin", "win32"]) {
+        h = makeHandler(arrowSrc, upstreamFn, key, {
+          platform,
+          holder: "x",
+          executor: recordingExecutor,
+        });
+        h.fn("x", "stop_click");
+        check(
+          `${platform}: hook not called, upstream runs`,
+          JSON.stringify(h.calls),
+          JSON.stringify([["upstream", "x", "stop_click"]])
+        );
+        check(`${platform}: lock export not read`, h.holderReads(), 0);
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+console.log("");
+if (failures.length) {
+  console.log(`${failures.length} CHECK(S) FAILED: ${failures.join(", ")}`);
+  process.exit(1);
+}
+if (skipped) {
+  console.log(`${pass} checks passed; real-bundle sections SKIPPED`);
+  process.exit(SKIP_EXIT);
+}
+console.log("ALL " + pass + " CHECKS PASSED");
