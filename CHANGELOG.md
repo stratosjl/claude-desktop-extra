@@ -2,6 +2,25 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-10-27
+
+### Computer Use on a background display - Experimental (#300)
+
+- **New Community switch "Computer Use on a background display"** (Settings -> Extra -> Community Features) points Linux Computer Use at a second display you start yourself - Xvfb or Xephyr (via `x11-bridge`), or a headless or nested sway or labwc (via `wlroots-bridge`) - so Claude works there while you keep your desktop. The setup page lists the displays it finds with size, a live preview and the restrictions that apply, gives copy-paste recipes, and has a Test button. The setting is the `computerUseBackgroundDisplay` key (`enabled`, `kind`, `display`, and an `env` map you edit by hand) in `claude-desktop-extra.jsonc`, per profile. Off by default; off is today's behavior. A change applies from Claude's next Computer Use action. Details, recipes and limits: [docs/computer-use.md](docs/computer-use.md#computer-use-on-a-background-display-experimental).
+- **Fails closed.** While the switch is on and display 2 is not running, every Computer Use action is refused; it never falls back to your desktop. Single-instance apps already running on your desktop open there, and Claude is told so. The teach overlay is unavailable in this mode, and KDE Plasma 6.6+ needs a restart to switch. Headless GNOME or KWin, weston, cage and Hyprland/niri headless are not supported targets.
+- **Covered by** the new `test-cu-target-session.mjs` and `test-cu-background-display-main.mjs`, and an extended `test-extra-settings-dom.mjs`.
+
+### Computer Use: fixes for every session
+
+- **`wlroots-bridge`: ctrl, alt and shift combos are sent as real modifiers** on wlroots compositors and niri (measured on Sway; `ctrl+c` used to arrive as a plain `c`); the first input is no longer lost on a seat with no keyboard or pointer yet, and held modifiers are released when the bridge is terminated.
+- **`x11-bridge`: `frontmost-app` answers `null` when no window has focus**, and the window list works on window managers without `_NET_CLIENT_LIST_STACKING` (xfwm4).
+- **Zoom and screenshots recover after a monitor is plugged or unplugged:** a "display not found" answer re-reads the screen list and retries once. Covered by the new `test-cu-screens-invalidate.mjs`.
+- **`open_application` no longer sleeps synchronously** while it waits for the app's window to appear.
+
+### Docs
+
+- **README: Omarchy and other Arch-based distros** are named in the Arch install row; they use the same AUR package and pacman repo.
+
 ## 2026-10-26
 
 ### Computer Use: the screen-sharing session ends with the task (#293)

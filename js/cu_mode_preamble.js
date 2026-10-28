@@ -94,6 +94,97 @@ if(!globalThis.__cdbDiag){globalThis.__cdbDiag=function(){var s="";try{var i,a=[
       return "";
     });
   }
+  // ── background display (issue #300) ────────────────────────────────────────
+  // Settings -> Extra -> Community -> "Computer Use on a background display":
+  // key computerUseBackgroundDisplay in <userData>/claude-desktop-extra.jsonc
+  // (wins per key) or .json. __cuTargetRead() -> null (off / key absent),
+  // {kind,display,env} (valid), or {invalid:why,display} (on but unusable: CU
+  // fails closed). Same rules as the panel's validator (js/extra_settings_main.js),
+  // the own-display rule included (spec ruling "T8 review, SEVERITY 1"). Small
+  // sync reads; the executor calls it at startup and once per CU lock, never
+  // mid-turn.
+  // __cuTargetIdentity(kind,display,env): is the target Claude's own display
+  // (display 1, never probed, captured or driven)? null = a different display;
+  // {own:1}; {down:1} = a wlroots socket that does not exist (yet); {why} =
+  // unusable. x11: display NUMBERS compared, own parsed from DISPLAY in any
+  // host:N.S form (XWayland on a Wayland desktop counts). wlroots: the target
+  // must stat as a socket (symlinks followed); own = Claude's WAYLAND_DISPLAY
+  // socket; the same (dev, ino) is own. A relative target name resolves against
+  // the env map's XDG_RUNTIME_DIR (what the bridge child uses), else Claude's;
+  // Claude's own socket always against Claude's. Not provable (own socket set but
+  // unstatable) = refused. stat only, no spawn; the executor re-checks before
+  // every `screens` probe.
+  if(!globalThis.__cuTargetIdentity)globalThis.__cuTargetIdentity=function(k,d,env){
+    var hrt=process.env.XDG_RUNTIME_DIR||"",trt=env&&typeof env.XDG_RUNTIME_DIR==="string"&&env.XDG_RUNTIME_DIR||hrt;
+    // The display NUMBER of any host:N.S form ([::1]:0, ::1:0 and host::0 included).
+    function xn(s){var m=/:(\d+)(?:\.\d+)?$/.exec(String(s||""));return m?parseInt(m[1],10):null}
+    function abs(w,rt){return w.charAt(0)==="/"?w:(rt.charAt(0)==="/"?_rp.join(rt,w):"")}
+    var ownX=xn(process.env.DISPLAY),ow=process.env.WAYLAND_DISPLAY||"",op=ow?abs(ow,hrt):"",os=null,osTried=!1;
+    function wl(w){
+      var p=abs(w,trt),st;
+      if(!p)return{why:"XDG_RUNTIME_DIR is not set, so "+w+" cannot be found - use an absolute socket path"};
+      try{st=_rfs.statSync(p)}catch(e){return e&&e.code==="ENOENT"?{down:1}:{why:w+" cannot be checked ("+(e&&e.code||e)+")"}}
+      if(!st.isSocket())return{why:w+" is not a Wayland socket"};
+      if(!osTried){osTried=!0;if(op){try{os=_rfs.statSync(op)}catch(e){}}}
+      if(ow&&!os)return{why:"cannot tell whether "+w+" is your own desktop (Claude's own Wayland socket "+ow+" cannot be checked)",unsure:1};
+      return os&&os.dev===st.dev&&os.ino===st.ino?{own:1}:null;
+    }
+    // The env map's other display var reaches every spawn too (the target's
+    // own var always wins over the map): the same rule applies to it.
+    if(env&&k==="wlroots"&&typeof env.DISPLAY==="string"&&env.DISPLAY&&ownX!==null&&xn(env.DISPLAY)===ownX)return{own:1,via:"env DISPLAY "+env.DISPLAY};
+    if(env&&k==="x11"&&typeof env.WAYLAND_DISPLAY==="string"&&env.WAYLAND_DISPLAY){var q=wl(env.WAYLAND_DISPLAY);if(q&&(q.own||q.unsure))return q.own?{own:1,via:"env WAYLAND_DISPLAY "+env.WAYLAND_DISPLAY}:q}
+    if(k==="x11")return ownX!==null&&ownX===xn(d)?{own:1}:null;
+    return wl(d);
+  };
+  if(!globalThis.__cuTargetRead)globalThis.__cuTargetRead=function(){
+    function strip(s){return String(s).replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,function(m,q){return q?q:""}).replace(/,(\s*[}\]])/g,"$1")}
+    // -> the object, null (absent), or {__err, raw} (there but not usable; raw =
+    // its text when it could be read, else undefined). No userData (no
+    // Electron app yet) = no file.
+    function rd(n){var p,raw;try{try{(globalThis.__cdbCfgMigrate||function(){})()}catch(me){}p=_rp.join(require("electron").app.getPath("userData"),n)}catch(pe){return null}try{raw=String(_rfs.readFileSync(p,"utf8"));var t=strip(raw),v=t.trim()?JSON.parse(t):{};return v&&typeof v==="object"&&!Array.isArray(v)?v:{__err:"not a JSON object",raw:raw}}catch(e){return e&&e.code==="ENOENT"?null:{__err:e&&(e.code||e.message)||String(e),raw:raw}}}
+    // The human-owned .jsonc wins. One that is there but does not parse while
+    // its text names the key fails closed (a typo must not silently move
+    // Computer Use back to the desktop). Without the key, or unreadable (its
+    // text unknown), it is skipped as before - a broken file must not stop
+    // Computer Use for users who never turned this on - with a diagnostics line.
+    var K="computerUseBackgroundDisplay",c=rd("claude-desktop-extra.jsonc");
+    if(c&&c.__err){
+      if(typeof c.raw==="string"&&c.raw.indexOf(K)>=0)return{invalid:"claude-desktop-extra.jsonc cannot be parsed ("+c.__err+")",display:""};
+      var dl="[claude-cu] diagnostics: target: claude-desktop-extra.jsonc "+(typeof c.raw==="string"?"does not parse":"cannot be read")+" ("+c.__err+")"+(typeof c.raw==="string"?" and does not mention "+K:"")+" - ignored for the background display setting";
+      if(globalThis.__cuTgtJsoncDiag!==dl){globalThis.__cuTgtJsoncDiag=dl;try{globalThis.__cdbDiag(dl)}catch(de){}}
+      c=null;
+    }
+    var o=c&&Object.prototype.hasOwnProperty.call(c,K)?c:rd("claude-desktop-extra.json");
+    if(o&&o.__err)o=null;
+    var v=o&&o[K];
+    if(!v||typeof v!=="object"||v.enabled!==!0)return null;
+    var k=v.kind,d=v.display,e=v.env,bad=function(w){return{invalid:w,display:typeof d==="string"?d:""}};
+    if(k!=="x11"&&k!=="wlroots")return bad("kind must be \"x11\" or \"wlroots\"");
+    if(typeof d!=="string"||!(k==="x11"?/^:(0|[1-9]\d{0,4})$/.test(d):d.length<=255&&(/^wayland-[A-Za-z0-9._-]{1,64}$/.test(d)||(d.charAt(0)==="/"&&d.indexOf("\0")<0&&!/(^|\/)\.\.?(\/|$)/.test(d)))&&!/\.lock$/.test(d)))return bad("display "+JSON.stringify(d)+" is not a valid "+k+" display");
+    if(e!==void 0){
+      if(!e||typeof e!=="object"||Array.isArray(e))return bad("env must be an object of strings");
+      for(var n in e){if(!Object.prototype.hasOwnProperty.call(e,n))continue;if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)||n==="PATH"||n==="CLAUDE_ELECTRON"||/^LD_/.test(n))return bad("env may not set "+n);if(typeof e[n]!=="string")return bad("env value of "+n+" must be a string")}
+    }
+    // Claude's own display (display 1) is never a target: that is the desktop.
+    // A wlroots socket that is not there yet is "not running", decided by the
+    // executor's probe (which re-runs this check first).
+    var idn=globalThis.__cuTargetIdentity(k,d,e);
+    if(idn&&idn.own)return bad((idn.via||d)+" is your own desktop, not a background display");
+    if(idn&&idn.why)return bad(idn.why);
+    var env={};if(e)for(var m in e){if(Object.prototype.hasOwnProperty.call(e,m))env[m]=e[m]}
+    return{kind:k,display:d,env:env};
+  };
+  // Change detection for the setting, so it can be latched per TOOL CALL
+  // (upstream's app-scoped lock, acquireApp, never reaches our lock hook):
+  // a signature of both files (ino, size, mtime; "-" = absent). Async stat
+  // per call, no read; the sync twin is for module load only.
+  if(!globalThis.__cuTargetSig){
+    var _sigPaths=function(){try{var u=require("electron").app.getPath("userData");return[_rp.join(u,"claude-desktop-extra.jsonc"),_rp.join(u,"claude-desktop-extra.json")]}catch(e){return null}};
+    var _sigOf=function(st){return st?st.ino+":"+st.size+":"+st.mtimeMs:"-"};
+    globalThis.__cuTargetSig=function(){var ps=_sigPaths();if(!ps)return Promise.resolve("no-userdata");return Promise.all(ps.map(function(p){return _rfs.promises.stat(p).then(_sigOf,function(e){return e&&e.code==="ENOENT"?"-":"?"+(e&&e.code)})})).then(function(a){return a.join("|")})};
+    globalThis.__cuTargetSigSync=function(){var ps=_sigPaths();if(!ps)return"no-userdata";return ps.map(function(p){try{return _sigOf(_rfs.statSync(p))}catch(e){return e&&e.code==="ENOENT"?"-":"?"+(e&&e.code)}}).join("|")};
+  }
+  var _cuTgt=null;try{_cuTgt=globalThis.__cuTargetRead()}catch(te){}
   var envMode=process.env.CLAUDE_CU_MODE;
   var autoMode="regular";
   var _kwinVer="";
@@ -109,7 +200,11 @@ if(!globalThis.__cdbDiag){globalThis.__cdbDiag=function(){var s="";try{var i,a=[
   // XDG_SESSION_TYPE is not always exported.
   var _curDesk=(process.env.XDG_CURRENT_DESKTOP||"").toLowerCase();
   var _isWaylandSess=process.env.XDG_SESSION_TYPE==="wayland"||!!process.env.WAYLAND_DISPLAY;
-  var _isKdeWayland=_curDesk.indexOf("kde")>=0&&_isWaylandSess;
+  // A background display forces the regular executor: kwin mode drives the
+  // live KDE session only, and the executor is chosen once, here. So the
+  // kwin probes are skipped; a switch flipped while running takes effect in
+  // kwin mode after a restart (executor_linux.js refuses until then).
+  var _isKdeWayland=_curDesk.indexOf("kde")>=0&&_isWaylandSess&&!_cuTgt;
   var _resolvedBin="";
   // Session gating for the regular-executor bridges, so we don't probe
   // binaries irrelevant to the running compositor.
@@ -140,7 +235,7 @@ if(!globalThis.__cdbDiag){globalThis.__cdbDiag=function(){var s="";try{var i,a=[
     if(_resolvedBin){autoMode="kwin-wayland";globalThis.__cuKwinBridgeBin=_resolvedBin}
     else _kwinBroken=!!_bridgeFail["kwin-portal-bridge"];
   }
-  var _mode=envMode||autoMode;
+  var _mode=_cuTgt?"regular":envMode||autoMode;
   globalThis.__cuKwinMode=_mode==="kwin-wayland";
   // x11-bridge serves the regular (non-kwin-wayland) executor: X11 sessions,
   // and the XWayland input/screenshot backend on Wayland sessions where ydotool
@@ -166,7 +261,8 @@ if(!globalThis.__cdbDiag){globalThis.__cdbDiag=function(){var s="";try{var i,a=[
     }
   }
   var _reason;
-  if(envMode)_reason=" (CLAUDE_CU_MODE set)";
+  if(_cuTgt)_reason=" (background display "+(_cuTgt.invalid?"setting invalid: "+_cuTgt.invalid:_cuTgt.kind+" "+_cuTgt.display)+")";
+  else if(envMode)_reason=" (CLAUDE_CU_MODE set)";
   else if(autoMode==="kwin-wayland")_reason=" (auto: KDE Wayland + kwin-portal-bridge at "+_resolvedBin+", "+_kwinVer+")";
   else if(_kwinBroken)_reason=" (auto: KDE Wayland, KWin "+_kwinVer+", but kwin-portal-bridge cannot run: "+_bridgeFail["kwin-portal-bridge"].cause+")";
   else if(_isKdeWayland&&!_kwinOk)_reason=" (auto: cross-distro fallback; KWin "+(_kwinVer||"unknown")+" < 6.6)";

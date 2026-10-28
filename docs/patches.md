@@ -20,6 +20,8 @@ Each row below says what a patch does and why you would want it. The mechanism -
 
 **17 patches**, each with a switch in Settings → **Extra** → **Community Features**. They reshape first-party surfaces, so they are asked for rather than assumed: turning one off is a full retreat to upstream's own behavior. Off by default, except the theme picker.
 
+The Community Features panel also holds one **Experimental** switch that has no patch of its own: [Computer Use on a background display](computer-use.md#computer-use-on-a-background-display-experimental), drawn by the Extra settings page and read by the Computer Use executor.
+
 | Patch | What it does & why it exists |
 |-------|------------------------------|
 | [`add_feature_theme_picker.nim`](../patches/community/add_feature_theme_picker.nim) | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> opens a [searchable gallery](../themes/README.md#theme-picker-ctrlshiftt) of every bundled theme; one click applies it live in every open window and saves your choice |

@@ -1128,7 +1128,10 @@
     var host = el("div", "cdbx-list");
     var node = el("div", "cdbx-row");
     var main = el("div", "cdbx-row-main");
-    main.appendChild(el("div", "cdbx-id", spec.title));
+    var title = el("div", "cdbx-id", spec.title);
+    // spec.badge: a pill after the title ("Experimental"), see experimentalBadge().
+    if (spec.badge) title.appendChild(experimentalBadge(spec.badge));
+    main.appendChild(title);
     main.appendChild(el("div", "cdbx-note", spec.note));
     var stateLine = el("div", "cdbx-state", "Loading...");
     main.appendChild(stateLine);
@@ -1159,6 +1162,13 @@
     }
 
     api[spec.read]().then(function (res) {
+      // spec.hideIf(res): a read that says the feature does not exist on this
+      // platform removes the row instead of showing it as unavailable.
+      if (typeof spec.hideIf === "function" && spec.hideIf(res)) {
+        head.remove();
+        host.remove();
+        return;
+      }
       if (failed(res)) {
         stateLine.textContent = "Unavailable: " + reason(res);
         return;
@@ -1381,6 +1391,528 @@
       },
       errorPrefix: "Could not change the developer tools setting: "
     });
+  }
+
+  // --- Computer Use on a background display (issue #300) -------------------
+  // Experimental. Display 1 is the user's desktop; display 2 is a second display
+  // (Xvfb, Xephyr, a headless sway) the user starts themselves and Computer Use
+  // works on instead. The executor reads the key at every Computer Use start, so
+  // the switch applies from the next one; the row's "Set up" opens a page of its
+  // own in this same panel (candidates, previews, restrictions, recipes, Test).
+  // Everything it shows comes from the cuBackground* bridge (main side:
+  // cdb-cubg:* in js/extra_settings_main.js), which refuses the user's own
+  // display and never takes an env map from here.
+  var CUBG_API = ["cuBackgroundRead", "cuBackgroundSet", "cuBackgroundCandidates", "cuBackgroundProbe",
+    "cuBackgroundThumbnail", "cuBackgroundTest", "cuBackgroundTools"];
+
+  function cubgApiOk() {
+    return !!api && CUBG_API.every(function (n) { return typeof api[n] === "function"; });
+  }
+
+  // A small pill after a title. One style for every experimental feature, so
+  // the word means the same thing wherever it appears.
+  function experimentalBadge(text) {
+    var b = el("span", "cdbx-exp", text || "Experimental");
+    b.title = "Experimental: works, but may change or be removed";
+    return b;
+  }
+
+  // The executor is chosen once at startup: on a KDE Plasma session that runs
+  // the kwin executor (or would, had the switch been off), a flip only takes
+  // effect after a restart. The main side says so in startedWith.
+  function cubgRestartOwed(on, res) {
+    var sw = res && res.startedWith;
+    return !!(sw && sw.restartOnChange === true && typeof sw.enabled === "boolean" && on !== sw.enabled);
+  }
+
+  // Where a change applies, said the same way in the row note, the setup
+  // page and the toasts: from the next Computer Use start, or - on a KDE
+  // session that picked its Computer Use mode at startup - after a restart.
+  function cubgKwin(res) {
+    return !!(res && res.startedWith && res.startedWith.restartOnChange === true);
+  }
+  function cubgApplies(res) {
+    return cubgKwin(res)
+      ? "On this KDE session a change takes effect after a restart: Computer Use picked its mode when the app started."
+      : "Applies live, from the next Computer Use start - no restart.";
+  }
+  function cubgNote(res) {
+    return "Claude clicks, types and takes screenshots on a second display you start yourself (Xvfb, " +
+      "Xephyr or a headless sway) while you keep working on your own desktop. Choose that display " +
+      "with Set up. " + cubgApplies(res) + " While it is on and that display is not running, Computer " +
+      "Use refuses to act rather than fall back to your desktop.";
+  }
+
+  function cubgName(kind, display) {
+    return (kind === "x11" ? "X11 display " : "Wayland display ") + display;
+  }
+
+  function renderCuBackgroundRow(panel) {
+    // The setup page needs every channel; an older preload gets no row at all.
+    if (!cubgApiOk()) return;
+    var lastRes = null;
+    var noteNode = null;
+    var row = renderToggleRow(panel, {
+      section: "Computer Use",
+      title: "Computer Use on a background display",
+      badge: "Experimental",
+      note: cubgNote(null),
+      ariaLabel: "let Computer Use work on a background display instead of your desktop",
+      read: "cuBackgroundRead",
+      write: "cuBackgroundSet",
+      lockFile: "claude-desktop-extra.jsonc",
+      // The downstream Windows build carries this page; its main side answers
+      // "Linux only" and the row must not appear there.
+      hideIf: function (res) { return failed(res) && /Linux only/.test(reason(res)); },
+      isOn: function (res) {
+        lastRes = res;
+        // The note says where a change applies, which the read just told us.
+        if (noteNode && cubgKwin(res)) noteNode.textContent = cubgNote(res);
+        return res.enabled === true;
+      },
+      restartOwed: cubgRestartOwed,
+      describe: function (on, res) {
+        var cfg = res && res.config;
+        var tail = cubgRestartOwed(on, res) ? " - after a restart (this KDE session chose its Computer Use mode at startup)" : "";
+        if (on && res && res.valid === false) return "on but invalid: " + res.error + " - Computer Use refuses to act" + tail;
+        if (!cfg) return (on ? "on" : "off - no display chosen yet (Set up)") + tail;
+        return (on ? "on - " : "off - ") + cubgName(cfg.kind, cfg.display) + (on ? "" : " saved") + tail;
+      },
+      // Only `enabled` travels: the main side keeps the chosen display.
+      writeArg: function (next) { return { enabled: next }; },
+      toast: function (next) {
+        if (cubgRestartOwed(next, lastRes)) return "Saved - restart the app for it to take effect on this KDE session";
+        return next ? "Background display on - applies from the next Computer Use start"
+          : "Background display off - Computer Use works on your desktop again from its next start";
+      },
+      errorPrefix: "Could not change the background display: "
+    });
+    if (!row) return;
+    noteNode = row.host.querySelector(".cdbx-note");
+    var aside = row.host.querySelector(".cdbx-row-aside");
+    var setup = el("button", "cdbx-btn", "Set up");
+    setup.type = "button";
+    setup.title = "Choose the display, preview it, test it";
+    setup.addEventListener("click", function () { renderCuBackground(panel); });
+    if (aside) aside.insertBefore(setup, aside.firstChild);
+    return row;
+  }
+
+  // A copyable command block. There is no other copy button on these pages;
+  // the clipboard API can be refused (no focus, permissions), so a failure
+  // selects the text instead and says so.
+  function codeBlock(text) {
+    var wrap = el("div", "cdbx-cubg-code");
+    var pre = el("pre", "cdbx-cubg-pre", text);
+    var copy = el("button", "cdbx-btn cdbx-cubg-copy", "Copy");
+    copy.type = "button";
+    copy.addEventListener("click", function () {
+      function fallback() {
+        try {
+          var r = document.createRange();
+          r.selectNodeContents(pre);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+        } catch (e) {}
+        toast("Selected - press Ctrl+C to copy");
+      }
+      try {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") { fallback(); return; }
+        navigator.clipboard.writeText(text).then(function () { toast("Copied"); }, fallback);
+      } catch (e) { fallback(); }
+    });
+    wrap.appendChild(pre);
+    wrap.appendChild(copy);
+    return wrap;
+  }
+
+  function cubgSection(host, text) {
+    var head = el("div", "cdbx-sec-h");
+    head.appendChild(el("span", "cdbx-sec-t", text));
+    host.appendChild(head);
+  }
+
+  // Package names per distro family, for a recipe whose tool is not installed.
+  var CUBG_PKGS = {
+    Xvfb: "Arch: xorg-server-xvfb - Debian/Ubuntu: xvfb - Fedora/RHEL: xorg-x11-server-Xvfb",
+    Xephyr: "Arch: xorg-server-xephyr - Debian/Ubuntu: xserver-xephyr - Fedora: xorg-x11-server-Xephyr",
+    wm: "a window manager: xfwm4 or openbox (same package name on Arch, Debian/Ubuntu, Fedora)",
+    sway: "sway (Arch, Debian/Ubuntu, Fedora; EPEL on RHEL)",
+    x11vnc: "x11vnc (Arch, Debian/Ubuntu, Fedora/EPEL), plus any VNC viewer",
+    wayvnc: "wayvnc (Arch, Debian/Ubuntu, Fedora), plus any VNC viewer"
+  };
+
+  // The recipes, built for what is installed: the window manager line uses
+  // one that is there, the display numbers avoid the ones in use, and a recipe
+  // whose tool is missing says which package brings it.
+  function cubgRecipes(host, tools, candidates) {
+    tools = tools || {};
+    var used = {};
+    (candidates || []).forEach(function (c) { if (c.kind === "x11") used[c.display] = true; });
+    function freeX(start) {
+      for (var n = start; n < start + 50; n++) if (!used[":" + n]) { used[":" + n] = true; return ":" + n; }
+      return ":" + start;
+    }
+    var wm = tools.xfwm4 ? "xfwm4" : tools.openbox ? "openbox" : tools.i3 ? "i3" : "";
+    var wmLine = wm || "openbox";
+    var xd = freeX(99);
+    var ed = freeX(98);
+
+    function recipe(title, note, code, missing) {
+      var box = el("div", "cdbx-cubg-recipe");
+      box.appendChild(el("div", "cdbx-id", title));
+      if (note) box.appendChild(el("div", "cdbx-note", note));
+      missing.forEach(function (m) { box.appendChild(el("div", "cdbx-note cdbx-cubg-pkg", "Install " + CUBG_PKGS[m])); });
+      box.appendChild(codeBlock(code));
+      host.appendChild(box);
+    }
+    var x11Missing = [];
+    if (!tools.Xvfb) x11Missing.push("Xvfb");
+    if (!wm) x11Missing.push("wm");
+    recipe("Invisible X display (Xvfb + a window manager)",
+      "Nothing appears on your screen. The window manager lets Claude switch between windows.",
+      "Xvfb " + xd + " -screen 0 1600x900x24 -nolisten tcp &\nDISPLAY=" + xd + " " + wmLine + " &", x11Missing);
+    var xeMissing = [];
+    if (!tools.Xephyr) xeMissing.push("Xephyr");
+    if (!wm) xeMissing.push("wm");
+    recipe("Visible X display in a window (Xephyr)",
+      "Display 2 as a window on your desktop - handy to watch what Claude does.",
+      "Xephyr " + ed + " -screen 1600x900 -no-host-grab &\nDISPLAY=" + ed + " " + wmLine + " &", xeMissing);
+    recipe("Invisible Wayland display (headless sway)",
+      "Its socket appears as a new wayland-N in this list; choose that one.",
+      "env -u WAYLAND_DISPLAY -u DISPLAY WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway &",
+      tools.sway ? [] : ["sway"]);
+    recipe("Watch an X display (x11vnc)",
+      "Then point a VNC viewer at localhost:5900.",
+      "x11vnc -display " + xd + " -localhost -nopw -forever &", tools.x11vnc ? [] : ["x11vnc"]);
+    recipe("Watch a Wayland display (wayvnc)",
+      "Use the socket name from the list above; then point a VNC viewer at localhost:5901.",
+      "WAYLAND_DISPLAY=wayland-1 wayvnc 127.0.0.1 5901 &", tools.wayvnc ? [] : ["wayvnc"]);
+  }
+
+  // The probe answer as one line: size, outputs, supported or why not, WM.
+  function cubgProbeLine(p) {
+    if (failed(p)) return "Unavailable: " + reason(p);
+    // A full main-side queue says nothing about the display.
+    if (p.busy) return "Busy - too many checks at once; press Refresh";
+    if (p.running === false) return "Not running - " + String(p.reason || "no answer").replace(/^not running:\s*/, "");
+    if (p.running === null) return "Cannot check - " + (p.reason || "unknown");
+    var parts = [];
+    if (p.size) parts.push(p.size.width + "x" + p.size.height);
+    var outs = (p.screens || []).length;
+    parts.push(outs + " output" + (outs === 1 ? "" : "s"));
+    parts.push(p.supported ? "supported" : "not supported: " + (p.reason || "unknown"));
+    if (p.wm && p.wm.present === true) parts.push("window manager: " + (p.wm.name || "yes"));
+    else if (p.wm && p.wm.present === false) parts.push("no window manager");
+    if (typeof p.windows === "number") parts.push(p.windows + " window" + (p.windows === 1 ? "" : "s"));
+    return parts.join(", ");
+  }
+
+  function cubgRestrictions(host, p) {
+    var list = (p && p.restrictions) || [];
+    if (!list.length) return;
+    var ul = el("ul", "cdbx-cubg-restr");
+    list.forEach(function (r) { ul.appendChild(el("li", null, r.text)); });
+    host.appendChild(ul);
+  }
+
+  function cubgImage(host, dataUrl, alt) {
+    if (!dataUrl || !/^data:image\/(jpeg|png);base64,/.test(dataUrl)) return;
+    var img = el("img", "cdbx-cubg-img");
+    img.alt = alt;
+    img.src = dataUrl;
+    host.appendChild(img);
+  }
+
+  // The setup page, drawn into the Community Features panel itself; Back
+  // redraws the feature list. Every block fills in from its own async call, so
+  // one slow probe never holds up the rest.
+  function renderCuBackground(panel) {
+    clear(panel);
+    var back = el("button", "cdbx-btn cdbx-cubg-back", "Back to Community Features");
+    back.type = "button";
+    back.addEventListener("click", function () { renderFeatures(panel); });
+    panel.appendChild(back);
+    var h1 = el("div", "cdbx-h1", "Computer Use on a background display");
+    h1.appendChild(experimentalBadge());
+    panel.appendChild(h1);
+    var intro = "Display 1 is your desktop, where you chat with Claude and keep working. Display 2 is a separate " +
+      "display that Claude clicks, types and takes screenshots on, so it never moves your mouse or " +
+      "steals your focus. You start display 2 yourself (recipes below) and stop it when you are done; " +
+      "this page only chooses it. ";
+    var sub = el("div", "cdbx-sub", intro + cubgApplies(null));
+    panel.appendChild(sub);
+    if (!cubgApiOk()) {
+      panel.appendChild(el("div", "cdbx-error",
+        "This build's preload does not expose the background display bridge - reinstall to pick it up."));
+      return;
+    }
+    var page = el("div", "cdbx-cubg");
+    panel.appendChild(page);
+    var status = el("div", "cdbx-empty", "Reading the configuration...");
+    page.appendChild(status);
+    api.cuBackgroundRead().then(function (st) {
+      status.remove();
+      if (failed(st)) {
+        page.appendChild(el("div", "cdbx-error", "The configuration is unavailable: " + reason(st)));
+        return;
+      }
+      sub.textContent = intro + cubgApplies(st);
+      drawCuBackground(panel, page, st);
+    }, function (err) {
+      status.className = "cdbx-error";
+      status.textContent = "The configuration is unavailable: " + (err && err.message ? err.message : String(err));
+    });
+  }
+
+  function drawCuBackground(panel, page, st) {
+    var locked = !!st.lockedByJsonc;
+    var cfg = st.config;
+    function redraw() { renderCuBackground(panel); }
+    function save(arg, okText) {
+      return api.cuBackgroundSet(arg).then(function (r) {
+        if (failed(r)) { toast("Could not save: " + reason(r), true); return; }
+        // The env map a settings file carried belongs to one display; the main
+        // side drops it when the display changes and says so.
+        toast(okText + (r.envDropped ? " - the env map in the settings file was for the previous display and was removed" : ""));
+        redraw();
+      }, function (err) {
+        toast("Could not save: " + (err && err.message ? err.message : String(err)), true);
+      });
+    }
+
+    if (locked) {
+      var lock = el("div", "cdbx-notice cdbx-info cdbx-cubg-locked");
+      lock.appendChild(el("div", "cdbx-notice-title", "Set in claude-desktop-extra.jsonc - read-only here"));
+      lock.appendChild(el("div", "cdbx-notice-body",
+        "The hand-edited file wins over this page. Edit computerUseBackgroundDisplay there to change it; " +
+        "previews and Test still work."));
+      if (st.path) lock.appendChild(pathRow("", st.path, cfgLocation(st.path)));
+      page.appendChild(lock);
+    }
+
+    // A KDE session that chose its executor at startup needs a restart for a
+    // change made here (or with the switch) to take effect.
+    if (cubgRestartOwed(!!st.enabled, st) && typeof api.appRelaunch === "function") {
+      var rn = el("div", "cdbx-notice cdbx-info cdbx-cubg-restart");
+      rn.appendChild(el("div", "cdbx-notice-title", "Restart to apply"));
+      rn.appendChild(el("div", "cdbx-notice-body",
+        "This KDE session chose its Computer Use mode when the app started, so the switch takes effect " +
+        "after a restart. Until then Computer Use keeps the mode it started with, or refuses with a restart hint."));
+      rn.appendChild(restartButton());
+      page.appendChild(rn);
+    }
+
+    // The .jsonc could not be read at all: the setting comes from the .json.
+    if (st.note) page.appendChild(el("div", "cdbx-note cdbx-warn cdbx-cubg-filenote", st.note));
+
+    // --- status of the configured display ---------------------------------
+    cubgSection(page, "Status");
+    var stList = el("div", "cdbx-list");
+    var stRow = el("div", "cdbx-row");
+    var stMain = el("div", "cdbx-row-main");
+    stMain.appendChild(el("div", "cdbx-id", cfg ? cubgName(cfg.kind, cfg.display) : "No display chosen"));
+    var stLine = el("div", "cdbx-state cdbx-cubg-status");
+    stMain.appendChild(stLine);
+    stMain.appendChild(el("div", "cdbx-note",
+      "While the switch is on, Computer Use works only on this display. If it is not running, every " +
+      "Computer Use action is refused - it never falls back to your desktop. Turn the switch off to " +
+      "use your desktop again."));
+    stRow.appendChild(stMain);
+    var stAside = el("div", "cdbx-row-aside");
+    var test = el("button", "cdbx-btn cdbx-cubg-test", "Test");
+    test.type = "button";
+    test.disabled = !cfg;
+    test.title = cfg ? "Take a screenshot and move the pointer on " + cfg.display : "Choose a display first";
+    var refresh = el("button", "cdbx-btn cdbx-cubg-refresh", "Refresh");
+    refresh.type = "button";
+    refresh.addEventListener("click", redraw);
+    stAside.appendChild(test);
+    stAside.appendChild(refresh);
+    if (st.enabled && !locked) {
+      var off = el("button", "cdbx-btn", "Turn off");
+      off.type = "button";
+      off.addEventListener("click", function () {
+        off.disabled = true;
+        save({ enabled: false }, "Background display off - " + (cubgKwin(st)
+          ? "restart the app for it to take effect on this KDE session" : "applies from the next Computer Use start"));
+      });
+      stAside.appendChild(off);
+    }
+    stRow.appendChild(stAside);
+    stList.appendChild(stRow);
+    page.appendChild(stList);
+    var testOut = el("div", "cdbx-cubg-testout");
+    page.appendChild(testOut);
+
+    var sw = st.enabled ? "On" : "Off";
+    if (st.enabled && st.valid === false) {
+      stLine.textContent = "On, but the setting is invalid: " + st.error + " - Computer Use refuses to act until it is fixed or switched off.";
+      stLine.classList.add("cdbx-warn");
+    } else if (!cfg) {
+      stLine.textContent = sw + " - choose a display below.";
+    } else {
+      stLine.textContent = sw + " - checking " + cfg.display + "...";
+      api.cuBackgroundProbe(cfg.kind, cfg.display).then(function (p) {
+        var running = !failed(p) && p.running === true;
+        stLine.textContent = sw + " - " + (running ? (p.supported ? "running" : "running but not supported") : "not running") +
+          ": " + cubgProbeLine(p) + (st.enabled && !(running && p.supported) ? ". Computer Use refuses to act until it runs." : "");
+        stLine.classList.toggle("cdbx-warn", !!st.enabled && !(running && p.supported));
+      }, function (err) {
+        stLine.textContent = sw + " - could not check: " + (err && err.message ? err.message : String(err));
+      });
+    }
+
+    test.addEventListener("click", function () {
+      test.disabled = true;
+      clear(testOut);
+      testOut.appendChild(el("div", "cdbx-note", "Testing " + cfg.display + "..."));
+      api.cuBackgroundTest().then(function (r) {
+        test.disabled = false;
+        clear(testOut);
+        if (!r || !Array.isArray(r.steps)) {
+          testOut.appendChild(el("div", "cdbx-error", "Test failed: " + reason(r)));
+          return;
+        }
+        var ul = el("ul", "cdbx-cubg-steps");
+        r.steps.forEach(function (s) {
+          ul.appendChild(el("li", s.ok ? null : "cdbx-warn",
+            (s.ok ? "ok   " : "FAIL ") + s.name + " (" + s.ms + " ms)" + (s.detail ? " - " + s.detail : "")));
+        });
+        testOut.appendChild(el("div", r.ok ? "cdbx-note" : "cdbx-note cdbx-warn",
+          r.ok ? "Test passed - Computer Use can work on " + r.display + "." : "Test failed: " + reason(r)));
+        testOut.appendChild(ul);
+        cubgImage(testOut, r.dataUrl, "Screenshot of " + r.display);
+      }, function (err) {
+        test.disabled = false;
+        clear(testOut);
+        testOut.appendChild(el("div", "cdbx-error", "Test failed: " + (err && err.message ? err.message : String(err))));
+      });
+    });
+
+    // --- the displays on this machine --------------------------------------
+    cubgSection(page, "Displays");
+    var list = el("div", "cdbx-list cdbx-cubg-cands");
+    var listNote = el("div", "cdbx-empty", "Looking for displays...");
+    page.appendChild(listNote);
+    page.appendChild(list);
+
+    // --- recipes ------------------------------------------------------------
+    cubgSection(page, "Start display 2");
+    var recipes = el("div", "cdbx-cubg-recipes");
+    page.appendChild(recipes);
+
+    api.cuBackgroundCandidates().then(function (cr) {
+      if (failed(cr)) {
+        listNote.className = "cdbx-error";
+        listNote.textContent = "Could not list displays: " + reason(cr);
+        return;
+      }
+      var cands = cr.candidates || [];
+      var others = cands.filter(function (c) { return !c.own; });
+      if (others.length) listNote.remove();
+      else listNote.textContent = "No second display found. Start one with a recipe below, then Refresh.";
+      cands.forEach(function (c) { list.appendChild(candidateRow(c)); });
+      api.cuBackgroundTools().then(function (tr) {
+        cubgRecipes(recipes, failed(tr) ? {} : tr.tools, cands);
+      }, function () { cubgRecipes(recipes, {}, cands); });
+    }, function (err) {
+      listNote.className = "cdbx-error";
+      listNote.textContent = "Could not list displays: " + (err && err.message ? err.message : String(err));
+    });
+
+    // Candidate probes, two at a time: each one runs up to five bridge
+    // children, and a machine with many displays must not overflow the main
+    // side's queue on page open (that would read as "busy" everywhere).
+    var probeQueue = [];
+    var probing = 0;
+    function probeLimited(kind, display) {
+      return new Promise(function (resolve, reject) {
+        probeQueue.push(function () {
+          probing++;
+          api.cuBackgroundProbe(kind, display).then(function (v) { probing--; resolve(v); pump(); },
+            function (e) { probing--; reject(e); pump(); });
+        });
+        pump();
+      });
+    }
+    function pump() {
+      while (probing < 2 && probeQueue.length) probeQueue.shift()();
+    }
+
+    function candidateRow(c) {
+      var wrap = el("div", "cdbx-cubg-cand" + (c.own ? " cdbx-cubg-own" : ""));
+      wrap.setAttribute("data-display", c.display);
+      var node = el("div", "cdbx-row");
+      var main = el("div", "cdbx-row-main");
+      var chosen = cfg && cfg.kind === c.kind && cfg.display === c.display;
+      main.appendChild(el("div", "cdbx-id", (c.own ? "Display 1 - your desktop (" + c.display + ")" : cubgName(c.kind, c.display)) +
+        (chosen ? " - chosen" : "")));
+      var line = el("div", "cdbx-state");
+      main.appendChild(line);
+      node.appendChild(main);
+      wrap.appendChild(node);
+      if (c.own || !c.selectable) {
+        line.textContent = "Where you chat and work - never used as display 2.";
+        return wrap;
+      }
+      var aside = el("div", "cdbx-row-aside");
+      var prev = el("button", "cdbx-btn cdbx-cubg-preview", "Show preview");
+      prev.type = "button";
+      var pick = el("button", "cdbx-btn cdbx-cubg-select", chosen ? "Chosen" : "Select");
+      pick.type = "button";
+      pick.disabled = locked || chosen;
+      if (locked) pick.title = "Set in claude-desktop-extra.jsonc - edit that file to change it";
+      aside.appendChild(prev);
+      aside.appendChild(pick);
+      node.appendChild(aside);
+      var extra = el("div", "cdbx-cubg-extra");
+      wrap.appendChild(extra);
+      var shot = el("div", "cdbx-cubg-shot");
+      wrap.appendChild(shot);
+
+      line.textContent = "Checking...";
+      probeLimited(c.kind, c.display).then(function (p) {
+        line.textContent = cubgProbeLine(p);
+        if (!failed(p) && p.running === true && p.supported === false) {
+          line.classList.add("cdbx-warn");
+          pick.disabled = true;
+          pick.title = p.reason || "not supported";
+        }
+        if (!failed(p) && p.running === true) cubgRestrictions(extra, p);
+      }, function (err) {
+        line.textContent = "Could not check: " + (err && err.message ? err.message : String(err));
+      });
+
+      // On demand only: a screenshot of every display on open would be a
+      // burst of captures nobody asked for.
+      prev.addEventListener("click", function () {
+        prev.disabled = true;
+        clear(shot);
+        shot.appendChild(el("div", "cdbx-note", "Taking a screenshot..."));
+        api.cuBackgroundThumbnail(c.kind, c.display).then(function (t) {
+          prev.disabled = false;
+          prev.textContent = "Refresh preview";
+          clear(shot);
+          if (failed(t)) { shot.appendChild(el("div", "cdbx-note cdbx-warn", "No preview: " + reason(t))); return; }
+          cubgImage(shot, t.dataUrl, "Preview of " + c.display);
+        }, function (err) {
+          prev.disabled = false;
+          clear(shot);
+          shot.appendChild(el("div", "cdbx-note cdbx-warn", "No preview: " + (err && err.message ? err.message : String(err))));
+        });
+      });
+
+      pick.addEventListener("click", function () {
+        if (pick.disabled) return;
+        pick.disabled = true;
+        save({ enabled: true, kind: c.kind, display: c.display },
+          c.display + " chosen and switched on - " + (cubgKwin(st)
+            ? "restart the app for it to take effect on this KDE session" : "applies from the next Computer Use start"));
+      });
+      return wrap;
+    }
   }
 
   function renderAllowNonAnthropicModelsRow(panel) {
@@ -2266,15 +2798,16 @@
     renderWindowTransparencyRow,
     renderGlowRow,
     renderThemePickerRow,
-    renderDevToolsRow
+    renderDevToolsRow,
+    renderCuBackgroundRow
   ];
 
   function renderFeatures(panel) {
     clear(panel);
     panel.appendChild(el("div", "cdbx-h1", "Community Features"));
     panel.appendChild(el("div", "cdbx-sub",
-      "Optional features this package adds on top of the official build - each one is a single patch " +
-      "in patches/community/, and each applies live unless its row says it needs a restart."));
+      "Optional features this package adds on top of the official build - each applies live unless its " +
+      "row says it needs a restart."));
 
     var search = el("input", "cdbx-search");
     search.type = "search";

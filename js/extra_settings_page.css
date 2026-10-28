@@ -775,3 +775,81 @@
 .cdbx-models-testline { margin-top: 4px; }
 .cdbx-models-field .cdbx-models-agent-prompt { width: 100%; max-width: 100%; min-height: 72px; }
 .cdbx-models-announce { margin-top: 6px; padding: 6px 8px; border-left: 2px solid color-mix(in srgb, currentColor 22%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; white-space: pre-wrap; }
+
+/* --- experimental badge --------------------------------------------------- *
+ * The pill after the title of a feature that works but may still change. The
+ * amber is the same one the Custom models warnings use, mixed into the ink so
+ * the text stays readable on a light and on a dark modal alike.
+ */
+.cdbx-exp {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 0 6px;
+  vertical-align: 1px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 16px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: color-mix(in srgb, #e0a030 70%, currentColor);
+  background: color-mix(in srgb, #e0a030 12%, transparent);
+  border: 1px solid color-mix(in srgb, #e0a030 45%, transparent);
+  border-radius: 999px;
+}
+
+/* --- Computer Use on a background display -------------------------------- *
+ * The setup page in the Community Features panel. Rows wrap their buttons
+ * under the text on a narrow dialog, and commands and screenshots never
+ * widen the panel: code wraps, images scale down.
+ */
+.cdbx-cubg-back { margin: 0 0 8px; }
+.cdbx-cubg .cdbx-row { flex-wrap: wrap; }
+.cdbx-cubg .cdbx-row-aside { flex-wrap: wrap; }
+.cdbx-cubg .cdbx-btn:disabled { opacity: 0.5; cursor: default; }
+.cdbx-cubg-locked { margin: 0 0 10px; }
+.cdbx-cubg-cand { border-top: 1px solid color-mix(in srgb, currentColor 11%, transparent); }
+.cdbx-cubg-cand:first-child { border-top: 0; }
+.cdbx-cubg-cand > .cdbx-row { border-top: 0; }
+.cdbx-cubg-own { opacity: 0.6; }
+.cdbx-cubg-restr, .cdbx-cubg-steps {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 12px;
+  opacity: 0.75;
+  overflow-wrap: anywhere;
+}
+.cdbx-cubg-steps { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.cdbx-cubg-img {
+  display: block;
+  max-width: min(100%, 480px);
+  height: auto;
+  margin: 2px 0 10px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 6px;
+}
+.cdbx-cubg-testout { margin: 4px 0 0; }
+.cdbx-cubg-recipe { margin: 4px 0 12px; }
+.cdbx-cubg-pkg { color: color-mix(in srgb, #e0a030 70%, currentColor); opacity: 1; }
+.cdbx-cubg-code {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 5px;
+  min-width: 0;
+}
+.cdbx-cubg-pre {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  border-radius: 6px;
+  user-select: text;
+}
+.cdbx-cubg-code .cdbx-cubg-copy { flex: 0 0 auto; margin-top: 0; }

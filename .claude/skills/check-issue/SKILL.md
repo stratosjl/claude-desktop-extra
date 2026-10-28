@@ -85,6 +85,7 @@ Ask the real design forks with AskUserQuestion: one question per fork, with the 
 - `make` does not track `js/`. After a JS edit, `touch` the embedding `.nim` file before `make`.
 - Patch work follows AGENTS.md strictness: every sub-patch must apply, idempotency checks positive end state, `[\w$]+` anchors.
 - A new harness must fail against the old code. Ask for the before/after count.
+- A harness must fire the trigger upstream really uses. If it only calls our own injected hook (e.g. the CU lock hook), it misses upstream paths that bypass that hook: #300 passed ~400 harness cases and a private-display rig, then failed in the first real Code-tab turn.
 - Live checks run on scratch trees only.
 
 **Reviews:**
@@ -119,14 +120,15 @@ Weigh each finding against the live evidence. A reviewer's mechanism claim can b
 
 ## Phase 6 - ship
 
-1. **Bridge repos first.** That covers `patrickjaja/{wlroots,x11,gnome,kwin-portal}-bridge` (local checkouts usually sit next to this repo, e.g. `../computer-use/<bridge>`). CI and local builds fetch bridge HEAD from GitHub, so push the bridges before the main repo.
-2. **Main repo.** Commit to `master` per `/commit-fast`. A push rejected because CI committed README versions or the Nix hash is safe to `git rebase origin/master` and push again; check that the CI commits touch other files first. Reference the issue numbers without closing keywords, so the issues close with the release comment instead.
-3. **Maintainer builds and installs.** Give them the commands and wait.
-4. **Live check on the installed package:**
+1. **Local build and live check BEFORE committing** (the maintainer usually wants to test first):
+   - `build-local.sh` bundles pre-built bridges from `../computer-use/<bridge>/target/x86_64-unknown-linux-musl/release/` when present, without checking freshness. Rebuild them (`cargo build --release --target x86_64-unknown-linux-musl`) after any bridge change, and verify the sha inside the package.
+   - Build only when the maintainer asks; they install (`sudo pacman -U ...`). Check that the running app started after the install before testing.
    - Run the Xvfb repro against `/usr/lib/claude-desktop/claude` in a worker.
-   - Have the user exercise Computer Use fixes in a **Code tab session**. A plain chat never gets `computer_*` tools on Linux, and its "computer use is off" answer is misleading.
+   - Exercise Computer Use in a real **Code tab session**. A plain chat never gets `computer_*` tools on Linux, and its "computer use is off" answer is misleading. When the maintainer authorizes it (e.g. while AFK), a worker may drive the real logged-in app with the bundled x11-bridge: back up and restore the settings files, kill only its own processes, never signal Claude, and use a virtual display for anything it starts.
    - Read `~/.config/Claude/logs/claude-patches.log` afterwards to confirm the exact argv or path.
-5. **Release:** `gh workflow run build-and-release.yml --ref master -f force_rebuild=true` (or `/deploy force`). Watch the run in the background with `gh run watch <id> --exit-status`, then confirm the tag with `gh release view v<ver>-<n>`.
+2. **Bridge repos first.** That covers `patrickjaja/{wlroots,x11,gnome,kwin-portal}-bridge` (local checkouts usually sit next to this repo, e.g. `../computer-use/<bridge>`). CI fetches bridge HEAD from GitHub, so push the bridges before the main repo. Auto mode may block the push as an external write; commit and push in separate calls after the maintainer's explicit go.
+3. **Main repo.** Commit to `master` per `/commit-fast`. A push rejected because CI committed README versions or the Nix hash is safe to `git rebase origin/master` and push again; check that the CI commits touch other files first. Reference the issue numbers without closing keywords, so the issues close with the release comment instead.
+4. **Release:** `gh workflow run build-and-release.yml --ref master -f force_rebuild=true` (or `/deploy force`). Watch the run in the background with `gh run watch <id> --exit-status`, then confirm the tag with `gh release view v<ver>-<n>`.
 
 ## Phase 7 - close the loop with the reporter
 
@@ -135,6 +137,7 @@ Use the `/comment` voice for every comment:
 - name the fix and the **release** in bold
 - no blame on our patches
 - no internals and no speculation
+- for a new UI feature, attach screenshots with a rectangle around what is new. Upload them as release assets (`gh release upload`) and embed those URLs. Check every PNG for personal data (names, avatar, sidebar, paths, other windows) before uploading.
 
 **Asking for more data.** Give one action plus one copy-paste command, and end with "empty output is fine too" when that is true. Never ask them to look for strings themselves. Never explain what each line would mean. `claude-desktop --diagnose` is the default collector, but never ask for it again when the thread already has one. Use a targeted `grep` only when the evidence is not in `--diagnose`, which does not include `claude-patches.log`.
 

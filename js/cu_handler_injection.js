@@ -2,6 +2,10 @@ if(process.platform==="linux"){
 // Per-call compliance deny (parity with upstream's handleToolCall preamble, which this Linux
 // block returns before). Patch 11 publishes the captured HIPAA gate; unset (older shapes) = no check.
 if(typeof globalThis.__cdbCuHipaa==="function"&&globalThis.__cdbCuHipaa()){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call denied: organization compliance settings");return{isError:!0,content:[{type:"text",text:"Computer Use isn't available under your organization's compliance settings. If you recently switched organizations, restart the app."}]}}
+// Background display (issue #300): while its setting is invalid or the display
+// is down every tool returns the executor's refusal (never the user's desktop);
+// teach mode is refused there (its overlay draws on the desktop).
+if(globalThis.__linuxExecutor&&typeof globalThis.__linuxExecutor.__targetCheck==="function"){var __tgm=await globalThis.__linuxExecutor.__targetCheck(__TOOL_NAME__);if(__tgm){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): "+__tgm);return{isError:!0,content:[{type:"text",text:__tgm}]}}}
 var __lxTeachTools=["request_teach_access","teach_step","teach_batch"];
 if(__lxTeachTools.indexOf(__TOOL_NAME__)>=0){const __n=__MAKE_DISPATCH__;const{save_to_disk:__sd,...__s}=__INPUT__;return await __n(__TOOL_NAME__,__s)}
 if(__TOOL_NAME__==="request_access"){var __apps=__INPUT__.apps||[];
@@ -65,7 +69,11 @@ function __syncUpstreamShotDims(dims){
   try{if(__SESSION__&&typeof __SESSION__.onCuScreenshotDimsUpdated==="function")__SESSION__.onCuScreenshotDimsUpdated(dims)}catch(e){}
 }
 var __actionTools=new Set(["left_click","right_click","double_click","triple_click","middle_click","left_click_drag","mouse_move","scroll","key","type","hold_key","left_mouse_down","left_mouse_up","computer_batch"]);
-async function __hideWindows(fn){var __bws=require("electron").BrowserWindow.getAllWindows().filter(function(w){return!w.isDestroyed()});for(var __i=0;__i<__bws.length;__i++)__bws[__i].setIgnoreMouseEvents(true);try{await new Promise(function(r){setTimeout(r,50)});return await fn()}finally{for(var __i=0;__i<__bws.length;__i++){if(!__bws[__i].isDestroyed())__bws[__i].setIgnoreMouseEvents(false)}}}
+// Background display: a failed tool may mean the display went away - the
+// executor re-checks it and, when down, the not-running refusal replaces the
+// raw bridge error (and refuses every following call until it answers).
+async function __tgtErr(err){try{if(ex.__targetAfterError){var m=await ex.__targetAfterError(err);if(m){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): "+m);return{isError:!0,content:[{type:"text",text:m}]}}}}catch(e){}return null}
+async function __hideWindows(fn){if(ex.__targetActive&&ex.__targetActive())return await fn();var __bws=require("electron").BrowserWindow.getAllWindows().filter(function(w){return!w.isDestroyed()});for(var __i=0;__i<__bws.length;__i++)__bws[__i].setIgnoreMouseEvents(true);try{await new Promise(function(r){setTimeout(r,50)});return await fn()}finally{for(var __i=0;__i<__bws.length;__i++){if(!__bws[__i].isDestroyed())__bws[__i].setIgnoreMouseEvents(false)}}}
 if(__actionTools.has(__TOOL_NAME__)){try{return await __hideWindows(async function(){switch(__TOOL_NAME__){
 case"left_click":{var __lc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]);await ex.click(__lc[0],__lc[1],"left",1);return{content:[{type:"text",text:"Clicked at ("+__lc[0]+","+__lc[1]+")"}]}}
 case"right_click":{var __rc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]);await ex.click(__rc[0],__rc[1],"right",1);return{content:[{type:"text",text:"Right clicked"}]}}
@@ -88,6 +96,10 @@ case"computer_batch":{
   // image blocks — never serialized into text — so a screenshot inside a batch
   // never blows the token cap.
   var __actions=__INPUT__.actions||[],__total=__actions.length,__done=[],__failIdx=-1;
+  // Background display: the batch runs on the display its gate latched; a
+  // setting change mid-batch refuses the remaining action (executor gate).
+  var __tgB=typeof ex.__targetBatch==="function"&&ex.__targetBatch(1);
+  try{
   for(var __bi=0;__bi<__actions.length;__bi++){
     var __ba=__actions[__bi],__bact=__ba.action||__ba.type;
     var __br;
@@ -96,6 +108,7 @@ case"computer_batch":{
     __done.push({action:__bact,inner:__br||{content:[]}});
     if(__br&&__br.isError){__failIdx=__bi;break}
   }
+  }finally{if(__tgB)ex.__targetBatch(-1)}
   function __fmtAct(idx,total,entry,errCtx){
     var inner=entry.inner||{},blocks=Array.isArray(inner.content)?inner.content:[];
     var texts=blocks.filter(function(b){return b.type==="text"}).map(function(b){return(b.text||"").trim()}).filter(function(t){return t.length>0});
@@ -119,7 +132,7 @@ case"computer_batch":{
   return{content:__ok};
 }
 default:return{content:[{type:"text",text:"Unknown action tool: "+__TOOL_NAME__}],isError:!0}
-}})}catch(err){return{content:[{type:"text",text:"Error: "+(err&&err.message||err)}],isError:!0}}}
+}})}catch(err){return(await __tgtErr(err))||{content:[{type:"text",text:"Error: "+(err&&err.message||err)}],isError:!0}}}
 // screenshot display: a pinned display (switch_display) wins, then an explicit
 // display_number / display_id (0 is a real display, hence the typeof checks),
 // then the executor's default (on GNOME the monitor shared in the portal
@@ -161,5 +174,5 @@ case"list_granted_applications":{return{content:[{type:"text",text:"All applicat
 case"read_clipboard":{var cb=await ex.readClipboard();return{content:[{type:"text",text:cb}]}}
 case"write_clipboard":{await ex.writeClipboard(__INPUT__.text||"");return{content:[{type:"text",text:"Written to clipboard"}]}}
 default:return{content:[{type:"text",text:"Unknown tool: "+__TOOL_NAME__}],isError:!0}
-}}catch(err){return{content:[{type:"text",text:"Error: "+err.message}],isError:!0}}
+}}catch(err){return(await __tgtErr(err))||{content:[{type:"text",text:"Error: "+err.message}],isError:!0}}
 }

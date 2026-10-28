@@ -1319,6 +1319,762 @@
     };
   }
 
+  // --- Computer Use on a background display (issue #300) -------------------
+  // The setup half of the switch. The executor (js/cu_linux_executor.js) reads
+  // the same key itself at every CU lock; this file only persists it and feeds
+  // the setup panel: which displays exist, what the bundled bridge says about
+  // each, a downscaled screenshot, the restrictions that apply right now, which
+  // helper tools are installed, and a Test (screenshot + pointer-move).
+  //
+  // NEVER BLOCKS (issues #184/#232): every child is an async execFile with a
+  // hard timeout, every file and /proc read below is fs.promises, nothing runs
+  // at module load - only when the panel asks. Children run through a small
+  // queue so a page that loops cannot fork-bomb the main process; screenshots
+  // are coalesced per display and capped in size, the /proc scan is cached.
+  // The one sync step is the WRITE in cdb-cubg:set, through __cdbEx_writeCfg,
+  // the single writer every row shares.
+  //
+  // SECURITY: the caller is remote code. kind/display are re-validated here,
+  // and Claude's own display ("display 1") is never probed, screenshotted,
+  // tested or saved - not even switched off. Identity is decided like the
+  // executor decides it (spec ruling "T8 review"): x11 by display NUMBER
+  // (no leading zeros, so ":00" cannot alias ":0"), wlroots by the (dev, ino)
+  // of the socket after following symlinks. The page cannot write `env`: an
+  // env map ends up in the environment of every app Computer Use launches, so
+  // only a hand-edited file may carry one. A write from the page keeps it for
+  // the same display and drops it when the display changes (it belongs to one).
+  var __cdbEx_CUBG_KEY = "computerUseBackgroundDisplay";
+  var __cdbEx_CUBG_TIMEOUT_MS = 5000;
+  var __cdbEx_CUBG_X11_DIR = "/tmp/.X11-unix";
+  var __cdbEx_CUBG_MAX_CHILDREN = 6;
+  var __cdbEx_CUBG_MAX_QUEUED = 48;
+  var __cdbEx_CUBG_THUMB_W = 480;
+  var __cdbEx_CUBG_SHOT_MAX = 64 * 1024 * 1024;
+  var __cdbEx_CUBG_PROC_TTL_MS = 5000;
+  var __cdbEx_CUBG_SHOT_MIN_MS = 2000;
+  var __cdbEx_CUBG_BUSY = "busy - too many checks at once, refresh in a moment";
+  // Resolved exactly like js/cu_mode_preamble.js resolves them: the env
+  // override first, then the bundled copy in process.resourcesPath.
+  var __cdbEx_CUBG_BRIDGES = {
+    x11: { name: "x11-bridge", envVar: "X11_BRIDGE_BIN" },
+    wlroots: { name: "wlroots-bridge", envVar: "WLROOTS_BRIDGE_BIN" }
+  };
+  // Tools the recipes and restrictions mention; looked up on PATH, never run.
+  var __cdbEx_CUBG_TOOLS = ["Xvfb", "Xephyr", "sway", "labwc", "xfwm4", "openbox", "i3",
+    "x11vnc", "wayvnc", "xclip", "xsel", "wl-copy", "wl-paste", "xprop"];
+  // /proc/<pid>/status Name (the 15-char comm) -> the app a hint names.
+  var __cdbEx_CUBG_SINGLE = {
+    "firefox": "Firefox", "firefox-bin": "Firefox", "firefox-esr": "Firefox",
+    "chromium": "Chromium", "chromium-browse": "Chromium",
+    "chrome": "Google Chrome", "google-chrome": "Google Chrome"
+  };
+  // Never part of the env map: PATH and CLAUDE_ELECTRON belong to the
+  // launcher, LD_* would load code into every child.
+  function __cdbEx_cubgEnvKeyBad(k) {
+    return k === "PATH" || k === "CLAUDE_ELECTRON" || /^LD_/.test(k);
+  }
+
+  var __cdbEx_cubgCpMod = null;
+  function __cdbEx_cubgCp() {
+    return __cdbEx_cubgCpMod || (__cdbEx_cubgCpMod = require("child_process"));
+  }
+
+  function __cdbEx_cubgDisplayOk(kind, display) {
+    if (typeof display !== "string") return false;
+    if (kind === "x11") return /^:(0|[1-9]\d{0,4})$/.test(display);
+    if (kind === "wlroots") {
+      if (/^wayland-[A-Za-z0-9._-]{1,64}$/.test(display)) return !/\.lock$/.test(display);
+      return display.length <= 255 && display.charAt(0) === "/" && display.indexOf("\0") < 0 &&
+        !/(^|\/)\.\.?(\/|$)/.test(display) && !/\.lock$/.test(display);
+    }
+    return false;
+  }
+
+  function __cdbEx_cubgEnvCheck(env) {
+    if (env === undefined) return null;
+    if (!env || typeof env !== "object" || Array.isArray(env)) return "env must be an object of strings";
+    var keys = Object.keys(env);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) return "env key \"" + k + "\" is not a variable name";
+      if (__cdbEx_cubgEnvKeyBad(k)) return "env may not set " + k;
+      if (typeof env[k] !== "string") return "env value of " + k + " must be a string";
+    }
+    return null;
+  }
+
+  // The one validator for the key. {ok, value, error}: value is the normalized
+  // contract shape, error the first reason it is not usable. Invalid while
+  // enabled means Computer Use refuses to run (fail closed), so the page shows
+  // the error rather than guessing.
+  function __cdbEx_cubgValidate(v) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) {
+      return { ok: false, error: __cdbEx_CUBG_KEY + " must be an object" };
+    }
+    if (typeof v.enabled !== "boolean") return { ok: false, error: "enabled must be true or false" };
+    if (v.kind !== "x11" && v.kind !== "wlroots") return { ok: false, error: "kind must be \"x11\" or \"wlroots\"" };
+    if (!__cdbEx_cubgDisplayOk(v.kind, v.display)) {
+      return { ok: false, error: v.kind === "x11"
+        ? "display must look like \":99\" (no leading zeros) for kind x11"
+        : "display must be a socket name like \"wayland-1\" or an absolute socket path for kind wlroots" };
+    }
+    var envErr = __cdbEx_cubgEnvCheck(v.env);
+    if (envErr) return { ok: false, error: envErr };
+    var out = { enabled: v.enabled, kind: v.kind, display: v.display };
+    if (v.env !== undefined) out.env = v.env;
+    return { ok: true, value: out };
+  }
+
+  // Claude's own session ("display 1"): the NUMBER of its X display (from
+  // DISPLAY in any host:N.S form, XWayland included) and its Wayland socket
+  // resolved against XDG_RUNTIME_DIR.
+  function __cdbEx_cubgOwn() {
+    // Anchored at the end only, so "[::1]:0", "::1:0" and "host::0" parse too.
+    var m = /:(\d+)(?:\.\d+)?$/.exec(process.env.DISPLAY || "");
+    var w = process.env.WAYLAND_DISPLAY || "";
+    return {
+      x11: m ? Number(m[1]) : null, wayland: w || null,
+      waylandPath: __cdbEx_cubgWlPath(w, process.env.XDG_RUNTIME_DIR || "") || null
+    };
+  }
+
+  function __cdbEx_cubgWlPath(display, rt) {
+    if (!display) return "";
+    if (display.charAt(0) === "/") return display;
+    // Only an absolute runtime dir counts (as in the executor's reader).
+    return rt && rt.charAt(0) === "/" ? _path.join(rt, display) : "";
+  }
+
+  // Is kind/display Claude's own desktop? Resolves {own, missing, notSocket,
+  // error}. x11 compares numbers. wlroots stats the target (fs.promises.stat
+  // follows symlinks, so /proc/self/root/... or /var/run/... aliases resolve
+  // to the real socket) and compares (dev, ino) with Claude's own socket; a
+  // target that does not exist cannot be the desktop and reports `missing`.
+  // `rt` is the XDG_RUNTIME_DIR the bridge will resolve a relative name in.
+  function __cdbEx_cubgIdentity(kind, display, rt) {
+    var own = __cdbEx_cubgOwn();
+    // `key` names the display itself, not its spelling: what screenshots are
+    // coalesced and rate-limited on.
+    if (kind === "x11") return Promise.resolve({ own: own.x11 !== null && Number(display.slice(1)) === own.x11, key: "x11:" + Number(display.slice(1)) });
+    var path = __cdbEx_cubgWlPath(display, rt);
+    if (!path) return Promise.resolve({ own: false, error: "XDG_RUNTIME_DIR is not set, so " + display + " cannot be found - use an absolute socket path" });
+    function st(p) {
+      return p ? _fs.promises.stat(p).then(function (x) { return { st: x }; }, function (e) { return { err: e }; })
+        : Promise.resolve({ err: { code: "ENOENT" } });
+    }
+    return Promise.all([st(path), st(own.waylandPath)]).then(function (r) {
+      var t = r[0], o = r[1];
+      if (t.err) {
+        if (t.err.code === "ENOENT" || t.err.code === "ENOTDIR") return { own: false, missing: true, path: path, key: "wl:" + path };
+        return { own: false, error: "cannot check " + path + ": " + (t.err.message || t.err.code), path: path };
+      }
+      if (!t.st.isSocket()) return { own: false, notSocket: true, path: path };
+      // Claude has a Wayland socket but it cannot be checked: not provable
+      // that the target is a different display, so refused (as the executor does).
+      if (own.wayland && !o.st) {
+        return { own: false, path: path, unsure: true, error: "cannot tell whether " + display + " is your own desktop (Claude's own Wayland socket " + own.wayland + " cannot be checked)" };
+      }
+      var mine = !!o.st && o.st.dev === t.st.dev && o.st.ino === t.st.ino;
+      return { own: mine, path: path, key: "wl:" + t.st.dev + ":" + t.st.ino };
+    });
+  }
+
+  // What the running app started with. The Computer Use executor is chosen
+  // once at startup (js/cu_mode_preamble.js): with the switch on it forces the
+  // regular executor; with it off, KDE Plasma 6.6+ gets the kwin executor
+  // (globalThis.__cuKwinMode). So on such a session a flip only takes effect
+  // after a restart, and the row behaves as a restart row there. The stored
+  // value is read once on "ready" - our listener runs before upstream's ready
+  // handler, where the preamble reads the same file - and after upstream has
+  // settled userData (3P mode moves it). When the app started with the switch
+  // on, the kwin probe was skipped, so a KDE Wayland session counts as kwin
+  // capable unless CLAUDE_CU_MODE pins another mode (it may be KDE < 6.6,
+  // where the restart is merely unneeded).
+  var __cdbEx_cubgStartP = null;
+  function __cdbEx_cubgStartedWith() {
+    return (__cdbEx_cubgStartP || Promise.resolve(null)).then(function (s) {
+      var desk = (process.env.XDG_CURRENT_DESKTOP || "").toLowerCase();
+      var kdeWl = desk.indexOf("kde") >= 0 && (process.env.XDG_SESSION_TYPE === "wayland" || !!process.env.WAYLAND_DISPLAY);
+      var kwin = typeof globalThis.__cuKwinMode === "boolean" ? globalThis.__cuKwinMode : null;
+      var enabled = s ? (!!s.broken || !!(s.raw && typeof s.raw === "object" && s.raw.enabled === true)) : null;
+      var mode = process.env.CLAUDE_CU_MODE || "";
+      return {
+        enabled: enabled, kwinMode: kwin, kdeWayland: kdeWl,
+        restartOnChange: enabled !== null && (kwin === true || (enabled === true && kdeWl && (mode === "" || mode === "kwin-wayland")))
+      };
+    });
+  }
+
+  function __cdbEx_cubgOwnError(display) {
+    return display + " is your desktop - Computer Use on a background display needs a second display";
+  }
+
+  // One key out of a .json/.jsonc, async. {value} (undefined when absent);
+  // {broken: why} when the file does not parse (or is not an object) AND its
+  // raw text names our key - the user meant to set it, so the executor fails
+  // closed; {value: undefined, unreadable: code} when the read itself fails
+  // (treated as absent, like the other rows, with a note). A broken file that
+  // never mentions the key is absent too. Same parse as __cdbEx_readFileKey.
+  function __cdbEx_cubgReadKey(file) {
+    return _fs.promises.readFile(file, "utf8").then(function (raw) {
+      var cfg, why = null;
+      try { cfg = JSON.parse(__cdbEx_strip(raw) || "{}"); }
+      catch (e) { why = (e && e.message) || String(e); }
+      if (!why && (!cfg || typeof cfg !== "object" || Array.isArray(cfg))) why = "it does not hold a JSON object";
+      if (why) return raw.indexOf(__cdbEx_CUBG_KEY) >= 0 ? { broken: why } : { value: undefined };
+      return { value: cfg[__cdbEx_CUBG_KEY] };
+    }, function (e) {
+      if (e && e.code === "ENOENT") return { value: undefined };
+      return { value: undefined, unreadable: (e && (e.code || e.message)) || String(e) };
+    });
+  }
+
+  // A valid config can still point at Claude's own desktop: the target itself
+  // (a hand-written value), or the env map's variable of the OTHER kind - the
+  // target's own variable always wins over the map, so for an x11 target only
+  // env.WAYLAND_DISPLAY reaches the apps beside DISPLAY, for a wlroots target
+  // only env.DISPLAY. Mirrors __cuTargetIdentity in js/cu_mode_preamble.js
+  // exactly (spec rulings "T4 review, MED" and "T12 final review", MEDIUM-2):
+  // for env.WAYLAND_DISPLAY only "own" or "cannot tell" count; relative names
+  // resolve against the env map's XDG_RUNTIME_DIR, then the host's. Resolves
+  // the reason, or null.
+  function __cdbEx_cubgConfigIdentity(v) {
+    var env = v.env || {};
+    var rt = env.XDG_RUNTIME_DIR || process.env.XDG_RUNTIME_DIR || "";
+    var own = __cdbEx_cubgOwn();
+    if (v.kind === "wlroots" && typeof env.DISPLAY === "string" && env.DISPLAY) {
+      var m = /:(\d+)(?:\.\d+)?$/.exec(env.DISPLAY);
+      if (m && own.x11 !== null && Number(m[1]) === own.x11) {
+        return Promise.resolve("env DISPLAY " + env.DISPLAY + " is your own desktop, not a background display");
+      }
+    }
+    var first = v.kind === "x11" && typeof env.WAYLAND_DISPLAY === "string" && env.WAYLAND_DISPLAY
+      ? __cdbEx_cubgIdentity("wlroots", env.WAYLAND_DISPLAY, rt).then(function (id) {
+        if (id.own) return "env WAYLAND_DISPLAY " + env.WAYLAND_DISPLAY + " is your own desktop, not a background display";
+        return id.unsure ? id.error : null;
+      })
+      : Promise.resolve(null);
+    return first.then(function (why) {
+      if (why) return why;
+      return __cdbEx_cubgIdentity(v.kind, v.display, rt).then(function (id) {
+        if (id.own) return v.display + " is your own desktop, not a background display";
+        if (id.notSocket) return id.path + " is not a Wayland socket";
+        return id.error || null;
+      });
+    });
+  }
+
+  // The stored value, .jsonc first (it wins per key). A .jsonc that exists but
+  // cannot be read or parsed decides too: the executor then refuses to run
+  // (fail closed), so it reads as on + invalid and locks the row - it never
+  // reads as off and never falls through to the .json. (The other rows treat
+  // such a file as absent; for them "off" is harmless, here it is not.)
+  function __cdbEx_cubgStored() {
+    var p = __cdbEx_paths();
+    return Promise.all([__cdbEx_cubgReadKey(p.jsonc), __cdbEx_cubgReadKey(p.json)]).then(function (r) {
+      if (r[0].broken) {
+        var why = "claude-desktop-extra.jsonc cannot be parsed (" + r[0].broken + ") - Computer Use is refused until it is fixed";
+        return { paths: p, raw: undefined, locked: true, source: "jsonc", broken: why, check: { ok: false, error: why } };
+      }
+      var jsonc = r[0].value, json = r[1].broken ? undefined : r[1].value;
+      var raw = jsonc !== undefined ? jsonc : json;
+      var check = raw === undefined ? null : __cdbEx_cubgValidate(raw);
+      // Anything but an object with enabled:true is OFF, exactly as the
+      // executor reads it (null, a string, an array, enabled:false): there is
+      // no verdict to show then, beyond a usable config to keep for later.
+      var on = !!raw && typeof raw === "object" && raw.enabled === true;
+      if (!on && check && !check.ok) check = null;
+      return (on && check && check.ok ? __cdbEx_cubgConfigIdentity(check.value) : Promise.resolve(null)).then(function (err) {
+        return {
+          paths: p, raw: raw, locked: jsonc !== undefined,
+          source: jsonc !== undefined ? "jsonc" : (json !== undefined ? "json" : "default"),
+          check: err ? { ok: false, error: err } : check,
+          note: r[0].unreadable ? "claude-desktop-extra.jsonc could not be read (" + r[0].unreadable + "); this setting is taken from claude-desktop-extra.json" : null
+        };
+      });
+    });
+  }
+
+  // The child environment for one display: the target's display variable set,
+  // the other one unset (an env map may provide it, e.g. sway's XWayland
+  // DISPLAY), toolkit overrides cleared, XDG_SESSION_TYPE matching the target.
+  // Host-compositor sockets are dropped too, so a wlroots-bridge talking to
+  // display 2 never names the host compositor.
+  function __cdbEx_cubgEnv(kind, display, overlay) {
+    var e = {};
+    Object.keys(process.env).forEach(function (k) { e[k] = process.env[k]; });
+    ["DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "GDK_BACKEND", "QT_QPA_PLATFORM", "XDG_SESSION_TYPE",
+      "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "NIRI_SOCKET"].forEach(function (k) { delete e[k]; });
+    if (overlay) Object.keys(overlay).forEach(function (k) { e[k] = overlay[k]; });
+    if (kind === "x11") { e.DISPLAY = display; e.XDG_SESSION_TYPE = "x11"; }
+    else { e.WAYLAND_DISPLAY = display; e.XDG_SESSION_TYPE = "wayland"; }
+    return e;
+  }
+
+  var __cdbEx_cubgActive = 0;
+  var __cdbEx_cubgQueue = [];
+  // Async execFile with a hard timeout, queued behind __cdbEx_CUBG_MAX_CHILDREN.
+  // Resolves (never rejects) to {ok, stdout} or {ok:false, error, timedOut}.
+  function __cdbEx_cubgExec(bin, args, env, maxBuffer) {
+    return new Promise(function (resolve) {
+      function run() {
+        __cdbEx_cubgActive++;
+        var settled = false;
+        function fin(r) {
+          if (settled) return;
+          settled = true;
+          __cdbEx_cubgActive--;
+          var nextRun = __cdbEx_cubgQueue.shift();
+          if (nextRun) nextRun();
+          resolve(r);
+        }
+        try {
+          __cdbEx_cubgCp().execFile(bin, args, {
+            env: env, timeout: __cdbEx_CUBG_TIMEOUT_MS, killSignal: "SIGKILL",
+            maxBuffer: maxBuffer || 1024 * 1024, encoding: "utf8", windowsHide: true
+          }, function (err, stdout, stderr) {
+            if (!err) { fin({ ok: true, stdout: String(stdout || "") }); return; }
+            if (err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+              fin({ ok: false, error: "output larger than " + Math.round((maxBuffer || 1048576) / 1048576) + " MB - refused" });
+              return;
+            }
+            var timedOut = !!(err.killed && err.signal === "SIGKILL");
+            var line = String(stderr || "").split("\n").map(function (s) { return s.trim(); })
+              .filter(Boolean)[0] || "";
+            fin({
+              ok: false, timedOut: timedOut,
+              error: timedOut ? "no answer within " + (__cdbEx_CUBG_TIMEOUT_MS / 1000) + " s"
+                : (line || err.message || String(err)).slice(0, 400)
+            });
+          });
+        } catch (e) {
+          fin({ ok: false, error: (e && e.message) || String(e) });
+        }
+      }
+      if (__cdbEx_cubgActive < __cdbEx_CUBG_MAX_CHILDREN) run();
+      else if (__cdbEx_cubgQueue.length >= __cdbEx_CUBG_MAX_QUEUED) resolve({ ok: false, busy: true, error: __cdbEx_CUBG_BUSY });
+      else __cdbEx_cubgQueue.push(run);
+    });
+  }
+
+  function __cdbEx_cubgJson(r) {
+    if (!r.ok) return { ok: false, error: r.error, timedOut: r.timedOut, busy: !!r.busy };
+    try { return { ok: true, value: JSON.parse(r.stdout) }; }
+    catch (e) { return { ok: false, error: "unreadable bridge output (" + e.message + ")" }; }
+  }
+
+  function __cdbEx_cubgExecutable(p) {
+    if (!p) return Promise.resolve(false);
+    return _fs.promises.access(p, _fs.constants.X_OK).then(function () {
+      return _fs.promises.stat(p).then(function (st) { return !st.isDirectory(); });
+    }).then(null, function () { return false; });
+  }
+
+  function __cdbEx_cubgBridge(kind) {
+    var b = __cdbEx_CUBG_BRIDGES[kind];
+    if (!b) return Promise.resolve({ path: "", error: "unknown kind" });
+    var override = process.env[b.envVar] || "";
+    return __cdbEx_cubgExecutable(override).then(function (yes) {
+      if (yes) return override;
+      var dir = process.resourcesPath;
+      if (!dir) return "";
+      var p = _path.join(dir, b.name);
+      return __cdbEx_cubgExecutable(p).then(function (y) { return y ? p : ""; });
+    }).then(function (p) {
+      if (!p) return { path: "", error: b.name + " is not part of this install" };
+      // The CU preamble probes `--version` at startup and records a bridge that
+      // cannot load; say why instead of spawning it again.
+      var f = globalThis.__cuBridgeFail && globalThis.__cuBridgeFail[b.name];
+      if (f && f.path === p) return { path: "", error: b.name + " cannot run (" + f.cause + ")" + (f.hint ? " - " + f.hint : "") };
+      return { path: p, error: null };
+    });
+  }
+
+  // `which` without a spawn: the first executable regular file on PATH.
+  function __cdbEx_cubgWhich(name) {
+    var dirs = (process.env.PATH || "").split(":").filter(function (d) { return d.charAt(0) === "/"; });
+    var i = 0;
+    function next() {
+      if (i >= dirs.length) return Promise.resolve(null);
+      var c = _path.join(dirs[i++], name);
+      return __cdbEx_cubgExecutable(c).then(function (y) { return y ? c : next(); });
+    }
+    return next();
+  }
+
+  function __cdbEx_cubgTools() {
+    return Promise.all(__cdbEx_CUBG_TOOLS.map(__cdbEx_cubgWhich)).then(function (found) {
+      var tools = {};
+      __cdbEx_CUBG_TOOLS.forEach(function (n, i) { tools[n] = found[i]; });
+      return tools;
+    });
+  }
+
+  // Firefox / Chromium / Chrome processes of this user. A hint only: such an
+  // app hands a new window to its running instance, wherever that instance
+  // shows, so launching it for display 2 opens it on the user's desktop.
+  // Cached for __cdbEx_CUBG_PROC_TTL_MS, in-flight scans shared: a panel that
+  // probes every candidate at once walks /proc once, 64 reads at a time.
+  var __cdbEx_cubgProcCache = null;
+  function __cdbEx_cubgSingleInstance() {
+    var now = Date.now();
+    if (__cdbEx_cubgProcCache && now - __cdbEx_cubgProcCache.at < __cdbEx_CUBG_PROC_TTL_MS) return __cdbEx_cubgProcCache.p;
+    __cdbEx_cubgProcCache = { at: now, p: __cdbEx_cubgScanProc() };
+    return __cdbEx_cubgProcCache.p;
+  }
+  function __cdbEx_cubgScanProc() {
+    var uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    return _fs.promises.readdir("/proc").then(function (names) {
+      var pids = names.filter(function (n) { return /^\d+$/.test(n); }).slice(0, 8192);
+      var found = {};
+      var i = 0;
+      function batch() {
+        if (i >= pids.length) return Promise.resolve();
+        var chunk = pids.slice(i, i + 64);
+        i += 64;
+        return Promise.all(chunk.map(function (pid) {
+          return _fs.promises.readFile("/proc/" + pid + "/status", "utf8").then(function (s) {
+            var nm = /^Name:\s*(.*)$/m.exec(s);
+            var u = /^Uid:\s*(\d+)/m.exec(s);
+            if (!nm || !u || (uid >= 0 && Number(u[1]) !== uid)) return;
+            var label = __cdbEx_CUBG_SINGLE[nm[1].trim()];
+            if (label) found[label] = true;
+          }, function () {});
+        })).then(batch);
+      }
+      return batch().then(function () { return Object.keys(found).sort(); });
+    }, function () { return []; });
+  }
+
+  // _NET_SUPPORTING_WM_CHECK through xprop, when installed: a window manager
+  // is what lets activate-window and focus work on an X display.
+  function __cdbEx_cubgX11Wm(env) {
+    return __cdbEx_cubgWhich("xprop").then(function (xprop) {
+      if (!xprop) return { present: null, name: null, via: null };
+      return __cdbEx_cubgExec(xprop, ["-root", "_NET_SUPPORTING_WM_CHECK"], env).then(function (r) {
+        if (!r.ok) return { present: null, name: null, via: "xprop", busy: !!r.busy };
+        var m = /window id # (0x[0-9a-fA-F]+)/.exec(r.stdout);
+        if (!m) return { present: false, name: null, via: "xprop" };
+        return __cdbEx_cubgExec(xprop, ["-id", m[1], "_NET_WM_NAME"], env).then(function (r2) {
+          var n = r2.ok ? /=\s*"(.*)"/.exec(r2.stdout) : null;
+          return { present: true, name: n ? n[1].slice(0, 80) : null, via: "xprop" };
+        });
+      });
+    });
+  }
+
+  // Bridge `screens` -> plain monitors. Both bridges answer the same shape.
+  function __cdbEx_cubgScreens(list) {
+    if (!Array.isArray(list)) return [];
+    return list.slice(0, 16).map(function (s) {
+      var g = (s && s.geometry) || {};
+      return {
+        id: String((s && (s.id || s.name)) || ""), name: String((s && s.name) || ""),
+        x: Number(g.x) || 0, y: Number(g.y) || 0, width: Number(g.width) || 0, height: Number(g.height) || 0,
+        scale: Number(s && s.scale) || 1, primary: !!(s && s.is_primary)
+      };
+    });
+  }
+
+  // Validated target + its child env, or {error, own}. Async: the identity
+  // check stats sockets and the env overlay comes from the stored config.
+  function __cdbEx_cubgTarget(kind, display, stored) {
+    kind = String(kind || "");
+    display = String(display || "");
+    if (kind !== "x11" && kind !== "wlroots") return Promise.resolve({ error: "kind must be \"x11\" or \"wlroots\"" });
+    if (!__cdbEx_cubgDisplayOk(kind, display)) return Promise.resolve({ error: "not a valid " + kind + " display: " + display.slice(0, 80) });
+    return (stored ? Promise.resolve(stored) : __cdbEx_cubgStored()).then(function (s) {
+      var v = s.check && s.check.ok ? s.check.value : null;
+      var configured = !!v && v.kind === kind && v.display === display;
+      // The env map of the stored config, but only for the display it belongs to.
+      var env = __cdbEx_cubgEnv(kind, display, configured && v.env ? v.env : null);
+      return __cdbEx_cubgIdentity(kind, display, env.XDG_RUNTIME_DIR || "").then(function (id) {
+        if (id.own) return { error: __cdbEx_cubgOwnError(display), own: true };
+        if (id.notSocket) return { error: id.path + " is not a Wayland socket" };
+        if (id.error) return { error: id.error };
+        return { kind: kind, display: display, env: env, configured: configured, missing: !!id.missing, path: id.path || "",
+          idKey: id.key || kind + ":" + display };
+      });
+    });
+  }
+
+  // The configured target when the page names none (Test, status line).
+  function __cdbEx_cubgTargetOrStored(kind, display) {
+    if (kind || display) return __cdbEx_cubgTarget(kind, display);
+    return __cdbEx_cubgStored().then(function (s) {
+      if (!s.check) return { error: "no background display is configured" };
+      if (!s.check.ok) return { error: s.check.error };
+      return __cdbEx_cubgTarget(s.check.value.kind, s.check.value.display, s);
+    });
+  }
+
+  function __cdbEx_cubgNoSocket(t) {
+    return t.display + " is not running (no Wayland socket at " + t.path + ")";
+  }
+
+  function __cdbEx_cubgListSockets(dir, re) {
+    if (!dir) return Promise.resolve([]);
+    return _fs.promises.readdir(dir).then(function (names) {
+      var hits = names.filter(function (n) { return re.test(n) && !/\.lock$/.test(n); }).slice(0, 64);
+      return Promise.all(hits.map(function (n) {
+        var p = _path.join(dir, n);
+        return _fs.promises.lstat(p).then(function (st) { return st.isSocket() ? { name: n, path: p } : null; },
+          function () { return null; });
+      })).then(function (r) { return r.filter(Boolean); });
+    }, function () { return []; });
+  }
+
+  function __cdbEx_cubgCandidates() {
+    var own = __cdbEx_cubgOwn();
+    var rt = process.env.XDG_RUNTIME_DIR || "";
+    return Promise.all([
+      __cdbEx_cubgListSockets(__cdbEx_CUBG_X11_DIR, /^X\d{1,5}$/),
+      __cdbEx_cubgListSockets(rt, /^wayland-[A-Za-z0-9._-]{1,64}$/)
+    ]).then(function (r) {
+      // X<n> with a leading zero is not a display name we accept; skip it.
+      var x11 = r[0].filter(function (s) { return /^X(0|[1-9]\d{0,4})$/.test(s.name); }).map(function (s) {
+        var d = ":" + s.name.slice(1);
+        var mine = own.x11 !== null && Number(d.slice(1)) === own.x11;
+        return { kind: "x11", display: d, socket: s.path, own: mine, selectable: !mine,
+          label: mine ? "your desktop" : "X11 display " + d };
+      }).sort(function (a, b) { return Number(a.display.slice(1)) - Number(b.display.slice(1)); });
+      return Promise.all(r[1].map(function (s) {
+        return __cdbEx_cubgIdentity("wlroots", s.name, rt).then(function (id) {
+          return { kind: "wlroots", display: s.name, socket: s.path, own: !!id.own, selectable: !id.own,
+            label: id.own ? "your desktop" : "Wayland socket " + s.name };
+        });
+      })).then(function (wl) {
+        wl.sort(function (a, b) { return a.display < b.display ? -1 : a.display > b.display ? 1 : 0; });
+        return { ok: true, candidates: x11.concat(wl), own: { display: own.x11 !== null ? ":" + own.x11 : null, wayland: own.wayland } };
+      });
+    });
+  }
+
+  function __cdbEx_cubgProbe(kind, display) {
+    var t0 = Date.now();
+    return __cdbEx_cubgTarget(kind, display).then(function (t) {
+      if (t.error) return { ok: false, own: !!t.own, error: t.error };
+      return __cdbEx_cubgProbeTarget(t, t0);
+    });
+  }
+
+  function __cdbEx_cubgProbeTarget(t, t0) {
+    var base = {
+      ok: true, kind: t.kind, display: t.display, own: false, configured: t.configured,
+      running: null, supported: false, reason: null, screens: [], size: null, windows: null,
+      wm: { present: null, name: null, via: null }, compositor: null, missing: [],
+      clipboard: { tool: null, needs: t.kind === "x11" ? "xclip or xsel" : "wl-clipboard (wl-copy, wl-paste)" },
+      singleInstance: [], restrictions: [], ms: 0
+    };
+    if (t.missing) {
+      base.running = false;
+      base.reason = __cdbEx_cubgNoSocket(t);
+      base.ms = Date.now() - t0;
+      return Promise.resolve(base);
+    }
+    return __cdbEx_cubgBridge(t.kind).then(function (b) {
+      if (!b.path) { base.reason = b.error; return base; }
+      return __cdbEx_cubgExec(b.path, ["screens"], t.env).then(function (sr) {
+        var sj = __cdbEx_cubgJson(sr);
+        if (!sj.ok) {
+          // A full queue is not an answer about the display.
+          if (sj.busy) { base.busy = true; base.supported = null; base.reason = sj.error; return base; }
+          base.running = false;
+          base.reason = "not running: " + sj.error;
+          return base;
+        }
+        base.running = true;
+        base.screens = __cdbEx_cubgScreens(sj.value);
+        if (base.screens.length) base.size = { width: base.screens[0].width, height: base.screens[0].height };
+        return Promise.all([
+          __cdbEx_cubgExec(b.path, ["doctor"], t.env).then(__cdbEx_cubgJson),
+          __cdbEx_cubgExec(b.path, ["windows"], t.env).then(__cdbEx_cubgJson),
+          t.kind === "x11" ? __cdbEx_cubgX11Wm(t.env) : Promise.resolve(null),
+          __cdbEx_cubgWhich(t.kind === "x11" ? "xclip" : "wl-copy"),
+          __cdbEx_cubgWhich(t.kind === "x11" ? "xsel" : "wl-paste"),
+          __cdbEx_cubgSingleInstance()
+        ]).then(function (r) {
+          var doc = r[0].ok ? r[0].value || {} : null;
+          if (Array.isArray(r[1].value)) base.windows = r[1].value.length;
+          if (t.kind === "x11") {
+            base.wm = r[2];
+            var ext = doc && doc.extensions;
+            if (!doc) base.reason = "doctor failed: " + r[0].error;
+            else if (!ext || ext.xtest !== true) base.reason = "the X server has no XTEST extension, so input cannot be sent";
+            else if (!base.screens.length) base.reason = "the X server reports no screen";
+            else base.supported = true;
+            base.clipboard.tool = r[3] ? "xclip" : (r[4] ? "xsel" : null);
+          } else {
+            var g = (doc && doc.globals) || {};
+            base.compositor = doc && doc.compositor && doc.compositor !== "unknown" ? String(doc.compositor) : null;
+            base.wm = { present: true, name: base.compositor, via: "compositor" };
+            [["virtual_pointer", "zwlr_virtual_pointer_v1"], ["virtual_keyboard", "zwp_virtual_keyboard_v1"],
+              ["screencopy", "zwlr_screencopy_manager_v1"]].forEach(function (p) {
+              if (!g[p[0]]) base.missing.push(p[1]);
+            });
+            if (!doc) base.reason = "doctor failed: " + r[0].error;
+            else if (base.missing.length) {
+              base.reason = "the compositor does not offer " + base.missing.join(", ") +
+                " - only wlroots compositors such as sway or labwc are supported (not weston, GNOME or KDE)";
+            } else if (!base.screens.length) base.reason = "the compositor reports no output";
+            else base.supported = true;
+            base.clipboard.tool = r[3] && r[4] ? "wl-copy" : null;
+            if (!g.foreign_toplevel_wlr && !g.foreign_toplevel_ext) {
+              base.restrictions.push({ id: "no-window-list", text: "The compositor does not list windows, so Claude cannot see or switch between open apps." });
+            }
+          }
+          base.singleInstance = r[5];
+          // doctor or windows refused by a full queue: say busy, never "not supported".
+          if (r[0].busy || r[1].busy) { base.busy = true; base.supported = null; base.reason = __cdbEx_CUBG_BUSY; }
+          if (t.kind === "x11" && base.wm.present === false) {
+            base.restrictions.push({ id: "no-wm", text: "No window manager runs on " + t.display + ": windows cannot be activated or focused reliably. Start one, e.g. xfwm4 or openbox." });
+          } else if (t.kind === "x11" && base.wm.present === null && !base.wm.busy) {
+            base.restrictions.push({ id: "wm-unknown", text: "Could not check for a window manager on " + t.display +
+              (base.wm.via === "xprop" ? " (xprop gave no answer)." : " (xprop is not installed).") });
+          }
+          if (!base.clipboard.tool) {
+            base.restrictions.push({ id: "no-clipboard", text: "Clipboard tools are off: install " + base.clipboard.needs + "." });
+          }
+          if (base.singleInstance.length) {
+            base.restrictions.push({ id: "single-instance", text: base.singleInstance.join(", ") +
+              " already runs on your desktop: opening it for Claude will open the window there. Close it first, or use another app." });
+          }
+          base.restrictions.push({ id: "teach", text: "Teach mode is not available on a background display." });
+          return base;
+        });
+      });
+    }).then(function (res) { res.ms = Date.now() - t0; return res; });
+  }
+
+  // Bridge screenshot -> a JPEG data URL no wider than __cdbEx_CUBG_THUMB_W.
+  function __cdbEx_cubgThumbFrom(shot) {
+    var b64 = shot && typeof shot.base64 === "string" ? shot.base64 : "";
+    if (!b64) return { ok: false, error: "the bridge returned no image" };
+    var ni = _electron.nativeImage;
+    var src = { width: Number(shot.width) || 0, height: Number(shot.height) || 0 };
+    if (!ni || typeof ni.createFromBuffer !== "function") {
+      if (b64.length > 4 * 1024 * 1024) return { ok: false, error: "image too large to show without downscaling" };
+      return { ok: true, dataUrl: "data:image/jpeg;base64," + b64, width: src.width, height: src.height, sourceWidth: src.width, sourceHeight: src.height };
+    }
+    var img = ni.createFromBuffer(Buffer.from(b64, "base64"));
+    if (!img || (typeof img.isEmpty === "function" && img.isEmpty())) return { ok: false, error: "the screenshot could not be decoded" };
+    var sz = img.getSize();
+    var small = sz.width > __cdbEx_CUBG_THUMB_W ? img.resize({ width: __cdbEx_CUBG_THUMB_W, quality: "good" }) : img;
+    var out = small.getSize();
+    return {
+      ok: true, dataUrl: "data:image/jpeg;base64," + small.toJPEG(70).toString("base64"),
+      width: out.width, height: out.height, sourceWidth: sz.width, sourceHeight: sz.height
+    };
+  }
+
+  // One screenshot per display at a time, and at most one every
+  // __cdbEx_CUBG_SHOT_MIN_MS: keyed on the display itself (number, or socket
+  // dev+ino), so other spellings share it. A request inside the interval gets
+  // the last result (cached:true). The frame is parsed and downscaled once
+  // per capture - on the main thread, so this is its rate limit - and only the
+  // thumbnail is kept. Output above __cdbEx_CUBG_SHOT_MAX is refused.
+  var __cdbEx_cubgShots = {};
+  function __cdbEx_cubgShot(t, b) {
+    var key = t.idKey;
+    var e = __cdbEx_cubgShots[key];
+    if (e && e.p) return e.p;
+    if (e && Date.now() - e.at < __cdbEx_CUBG_SHOT_MIN_MS) {
+      var c = {};
+      Object.keys(e.res).forEach(function (k) { c[k] = e.res[k]; });
+      c.cached = true;
+      return Promise.resolve(c);
+    }
+    if (Object.keys(__cdbEx_cubgShots).length > 64) __cdbEx_cubgShots = {};
+    var p = __cdbEx_cubgExec(b.path, ["screenshot"], t.env, __cdbEx_CUBG_SHOT_MAX).then(__cdbEx_cubgJson).then(function (r) {
+      var res;
+      if (!r.ok) res = { ok: false, error: r.error, busy: !!r.busy };
+      else {
+        var th = __cdbEx_cubgThumbFrom(r.value);
+        res = th.ok ? { ok: true, width: Number(r.value.width) || 0, height: Number(r.value.height) || 0, thumb: th }
+          : { ok: false, error: th.error };
+      }
+      if (res.busy) delete __cdbEx_cubgShots[key];
+      else __cdbEx_cubgShots[key] = { at: Date.now(), res: res };
+      return res;
+    }, function (err) {
+      delete __cdbEx_cubgShots[key];
+      return { ok: false, error: (err && err.message) || String(err) };
+    });
+    __cdbEx_cubgShots[key] = { p: p };
+    return p;
+  }
+
+
+  function __cdbEx_cubgThumbnail(kind, display) {
+    return __cdbEx_cubgTarget(kind, display).then(function (t) {
+      if (t.error) return { ok: false, own: !!t.own, error: t.error };
+      if (t.missing) return { ok: false, error: __cdbEx_cubgNoSocket(t) };
+      return __cdbEx_cubgThumbTarget(t);
+    });
+  }
+
+  function __cdbEx_cubgThumbTarget(t) {
+    return __cdbEx_cubgBridge(t.kind).then(function (b) {
+      if (!b.path) return { ok: false, error: b.error };
+      return __cdbEx_cubgShot(t, b).then(function (r) {
+        if (!r.ok) return { ok: false, busy: !!r.busy, error: r.busy ? r.error : "screenshot failed: " + r.error };
+        var th = {};
+        Object.keys(r.thumb).forEach(function (k) { th[k] = r.thumb[k]; });
+        th.kind = t.kind;
+        th.display = t.display;
+        th.cached = !!r.cached;
+        return th;
+      });
+    });
+  }
+
+  // Test = what Computer Use does first: read the screens, take a screenshot,
+  // move the pointer to the middle of the first screen. Each step reports.
+  function __cdbEx_cubgTest(kind, display) {
+    var t0 = Date.now();
+    return __cdbEx_cubgTargetOrStored(kind, display).then(function (t) {
+      if (t.error) return { ok: false, own: !!t.own, error: t.error };
+      if (t.missing) return { ok: false, kind: t.kind, display: t.display, steps: [], error: __cdbEx_cubgNoSocket(t), ms: Date.now() - t0 };
+      return __cdbEx_cubgTestTarget(t, t0);
+    });
+  }
+
+  function __cdbEx_cubgTestTarget(t, t0) {
+    var steps = [];
+    function step(name, startedAt, r, detail) {
+      steps.push({ name: name, ok: !!r.ok, ms: Date.now() - startedAt, detail: r.ok ? detail : r.error });
+      return r.ok;
+    }
+    return __cdbEx_cubgBridge(t.kind).then(function (b) {
+      if (!b.path) return { ok: false, kind: t.kind, display: t.display, steps: steps, error: b.error };
+      var s0 = Date.now();
+      return __cdbEx_cubgExec(b.path, ["screens"], t.env).then(__cdbEx_cubgJson).then(function (sr) {
+        var screens = sr.ok ? __cdbEx_cubgScreens(sr.value) : [];
+        if (sr.ok && !screens.length) sr = { ok: false, error: "no screen reported" };
+        if (!step("screens", s0, sr, screens.length ? screens[0].width + "x" + screens[0].height : "")) {
+          return { ok: false, kind: t.kind, display: t.display, steps: steps, error: t.display + " is not running" };
+        }
+        var s1 = Date.now();
+        return __cdbEx_cubgShot(t, b).then(function (shot) {
+          var thumb = shot.ok ? shot.thumb : null;
+          step("screenshot", s1, shot, shot.ok ? shot.width + "x" + shot.height + (shot.cached ? " (taken under 2 s ago)" : "") : "");
+          var sc = screens[0];
+          var x = Math.round(sc.x + sc.width / 2), y = Math.round(sc.y + sc.height / 2);
+          var s2 = Date.now();
+          return __cdbEx_cubgExec(b.path, ["pointer-move", "--x", String(x), "--y", String(y)], t.env).then(function (pm) {
+            step("pointer-move", s2, pm, x + "," + y);
+            var allOk = steps.every(function (s) { return s.ok; });
+            return {
+              ok: allOk, kind: t.kind, display: t.display, steps: steps,
+              dataUrl: thumb && thumb.ok ? thumb.dataUrl : null,
+              error: allOk ? null : steps.filter(function (s) { return !s.ok; }).map(function (s) { return s.name + ": " + s.detail; }).join("; ")
+            };
+          });
+        });
+      });
+    }).then(function (res) { res.ms = Date.now() - t0; return res; });
+  }
+
   // --- handlers ------------------------------------------------------------
 
   var __cdbEx_diagSeen = {};
@@ -1692,6 +2448,130 @@
       return { ok: true, path: res.file, expected: after.expected, source: after.source };
     },
 
+    // Computer Use on a background display (issue #300). The executor reads the
+    // key itself at every CU lock, so a write applies from the next Computer Use
+    // start; these channels only persist it and serve the setup panel. All
+    // probing is async (see __cdbEx_cubgExec) and runs only when asked.
+    "cdb-cubg:read": function () {
+      return Promise.all([__cdbEx_cubgStored(), __cdbEx_cubgStartedWith()]).then(function (both) {
+        var s = both[0];
+        var raw = s.raw;
+        var own = __cdbEx_cubgOwn();
+        return {
+          ok: true,
+          present: raw !== undefined || !!s.broken,
+          // On as written, even when the rest is invalid: that combination is
+          // the fail-closed case the page has to show, not hide. An unreadable
+          // .jsonc is that case too.
+          enabled: !!s.broken || !!(raw && typeof raw === "object" && raw.enabled === true),
+          config: s.check && s.check.ok
+            ? { enabled: s.check.value.enabled, kind: s.check.value.kind, display: s.check.value.display }
+            : null,
+          valid: s.check ? s.check.ok : true,
+          error: s.check && !s.check.ok ? s.check.error : null,
+          // Names only: the values are the user's and the page never edits them.
+          envKeys: s.check && s.check.ok && s.check.value.env ? Object.keys(s.check.value.env) : [],
+          lockedByJsonc: s.locked ? true : null,
+          source: s.source,
+          path: s.locked ? s.paths.jsonc : s.paths.json,
+          own: { display: own.x11 !== null ? ":" + own.x11 : null, wayland: own.wayland },
+          // {enabled, kwinMode, kdeWayland, restartOnChange}: see __cdbEx_cubgStartedWith.
+          startedWith: both[1],
+          note: s.note || null
+        };
+      }).then(null, function (e) { return { ok: false, error: (e && e.message) || String(e) }; });
+    },
+
+    // Takes {enabled, kind, display}; an empty kind/display keeps the stored
+    // one, so the Community switch can flip `enabled` alone. Never takes env.
+    // Claude's own display is never stored, not even switched off: a stored
+    // own display that is switched off is removed instead (absent = off).
+    "cdb-cubg:set": function (input) {
+      if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, error: "expected {enabled, kind, display}" };
+      if (typeof input.enabled !== "boolean") return { ok: false, error: "enabled must be a boolean" };
+      return __cdbEx_cubgStored().then(function (s) {
+        if (s.locked) {
+          return { ok: false, lockedByJsonc: true,
+            error: s.broken ? s.broken : __cdbEx_CUBG_KEY + " is set in claude-desktop-extra.jsonc - edit that file to change it" };
+        }
+        var prev = s.raw && typeof s.raw === "object" && !Array.isArray(s.raw) ? s.raw : null;
+        var fromInput = !!((typeof input.kind === "string" && input.kind) || (typeof input.display === "string" && input.display));
+        var kind = typeof input.kind === "string" && input.kind ? input.kind : (prev ? prev.kind : undefined);
+        var display = typeof input.display === "string" && input.display ? input.display : (prev ? prev.display : undefined);
+        var any = kind !== undefined || display !== undefined;
+        // Turning it ON must name a usable second display. Turning it OFF must
+        // always work, even over a hand-broken value - it is the revert path.
+        if (input.enabled) {
+          if (kind !== "x11" && kind !== "wlroots") return { ok: false, error: "choose a display first" };
+          if (!__cdbEx_cubgDisplayOk(kind, display)) return { ok: false, error: "not a valid " + kind + " display: " + String(display).slice(0, 80) };
+        } else if (fromInput) {
+          if (!__cdbEx_cubgDisplayOk(kind, display)) return { ok: false, error: "not a valid " + kind + " display: " + String(display).slice(0, 80) };
+        }
+        // env belongs to one display: kept for the same one, dropped on a change.
+        var keepEnv = !!prev && prev.env !== undefined && prev.kind === kind && prev.display === display;
+        var envDropped = !!prev && prev.env !== undefined && !keepEnv;
+        var keptEnvOk = keepEnv && !__cdbEx_cubgEnvCheck(prev.env);
+        var rt = (keptEnvOk && prev.env.XDG_RUNTIME_DIR) || process.env.XDG_RUNTIME_DIR || "";
+        var checkable = (kind === "x11" || kind === "wlroots") && __cdbEx_cubgDisplayOk(kind, display);
+        return (checkable ? __cdbEx_cubgIdentity(kind, display, rt) : Promise.resolve({ own: false })).then(function (id) {
+          if (id.notSocket) return { ok: false, error: id.path + " is not a Wayland socket" };
+          if (id.error) return { ok: false, error: id.error };
+          var dropOwn = false;
+          if (id.own) {
+            if (input.enabled || fromInput) return { ok: false, own: true, error: display + " is your desktop - choose a second display" };
+            dropOwn = true;
+          }
+          var res = __cdbEx_writeCfg(function (cfg) {
+            if (!any || dropOwn) { delete cfg[__cdbEx_CUBG_KEY]; return null; }
+            var out = { enabled: input.enabled, kind: kind, display: display };
+            if (keepEnv) out.env = prev.env;
+            cfg[__cdbEx_CUBG_KEY] = out;
+            return out;
+          });
+          if (!res.ok) return res;
+          var check = res.extra ? __cdbEx_cubgValidate(res.extra) : null;
+          return {
+            ok: true, path: res.path,
+            config: res.extra ? { enabled: res.extra.enabled, kind: res.extra.kind, display: res.extra.display } : null,
+            valid: check ? check.ok : true, error: check && !check.ok ? check.error : null,
+            // The page says so: the hand-written env map was for the old display.
+            envDropped: envDropped && !dropOwn,
+            ownRemoved: dropOwn
+          };
+        });
+      }).then(null, function (e) { return { ok: false, error: (e && e.message) || String(e) }; });
+    },
+
+    "cdb-cubg:candidates": function () {
+      return __cdbEx_cubgCandidates().then(null, function (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+      });
+    },
+
+    "cdb-cubg:probe": function (kind, display) {
+      return __cdbEx_cubgProbe(kind, display).then(null, function (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+      });
+    },
+
+    "cdb-cubg:thumbnail": function (kind, display) {
+      return __cdbEx_cubgThumbnail(kind, display).then(null, function (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+      });
+    },
+
+    // Empty kind/display = the configured display.
+    "cdb-cubg:test": function (kind, display) {
+      return __cdbEx_cubgTest(kind, display).then(null, function (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+      });
+    },
+
+    "cdb-cubg:tools": function () {
+      return __cdbEx_cubgTools().then(function (tools) { return { ok: true, tools: tools }; },
+        function (e) { return { ok: false, error: (e && e.message) || String(e) }; });
+    },
+
     // Open one of OUR files in the desktop's default handler, or show it in the
     // file manager. `name` is a fixed location name, never a path (see
     // __cdbEx_revealTarget); "folder" is used automatically for anything that
@@ -1771,6 +2651,26 @@
       return { ok: true };
     }
   };
+
+  // The setting the executor starts with, captured on "ready" (see
+  // __cdbEx_cubgStartedWith). An async read of one small file, nothing else.
+  if (process.platform === "linux") {
+    try {
+      _app.once("ready", function () {
+        __cdbEx_cubgStartP = __cdbEx_cubgStored().then(null, function () { return null; });
+      });
+    } catch (e) {}
+  }
+
+  // The background-display channels are Linux-only: on the downstream Windows
+  // build they answer a plain refusal instead of touching /proc or X sockets.
+  if (process.platform !== "linux") {
+    Object.keys(__cdbEx_handlers).forEach(function (ch) {
+      if (ch.indexOf("cdb-cubg:") === 0) {
+        __cdbEx_handlers[ch] = function () { return { ok: false, error: "Computer Use on a background display is Linux only" }; };
+      }
+    });
+  }
 
   // removeHandler first, so re-evaluating this module replaces the handlers
   // instead of throwing.

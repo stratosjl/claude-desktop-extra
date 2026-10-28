@@ -244,7 +244,38 @@ export function notSharedText(message, isNotShared = false) {
 // idle end, and their completion (success or failure) re-arms it. Commands the
 // stop latch refuses never get here (ensureBridgeSession throws first), so
 // they do not count as activity.
+// Background display (issue #300) switched on while this kwin-mode executor
+// runs: the executor was chosen at startup (cu_mode_preamble.js forces the
+// regular one when the setting is on), so until a restart every command but
+// session-end is refused instead of acting on the user's desktop. Re-read on
+// lock acquire AND before every command when the settings files changed
+// (upstream's app-scoped lock, acquireApp, never reaches __setLockHeld): one
+// async stat pair per command (__cuTargetSig, cu_mode_preamble.js), no read
+// while the files are unchanged.
+const TARGET_RESTART_TEXT = 'Computer Use is set to a background display, which takes effect on KDE Plasma after Claude restarts. Ask the user to restart Claude, or to turn off Settings -> Extra -> Community -> Computer Use on a background display.'
+let targetRestartMessage = null
+let targetSigLast = null
+try { if (typeof globalThis.__cuTargetSigSync === 'function') targetSigLast = globalThis.__cuTargetSigSync() } catch {}
+function applyTargetSetting() {
+  let target = null
+  try { target = typeof globalThis.__cuTargetRead === 'function' ? globalThis.__cuTargetRead() : null } catch {}
+  const was = targetRestartMessage
+  targetRestartMessage = target ? TARGET_RESTART_TEXT : null
+  if (targetRestartMessage && !was) {
+    globalThis.__cdbDiag('[claude-cu] diagnostics: target=' + (target.invalid ? 'invalid' : target.kind + ' ' + target.display) + ' needs a restart in kwin mode - refusing Computer Use until then')
+  }
+}
+async function refreshTargetSetting() {
+  if (typeof globalThis.__cuTargetSig !== 'function') return
+  let sig = null
+  try { sig = await globalThis.__cuTargetSig() } catch {}
+  if (sig === null || sig === targetSigLast) return
+  targetSigLast = sig
+  applyTargetSetting()
+}
 async function execBridge(command, args, opts = {}) {
+  if (command !== 'session-end') await refreshTargetSetting()
+  if (targetRestartMessage && command !== 'session-end') throw new Error(targetRestartMessage)
   if (!KWIN_SESSION_COMMANDS.has(command)) return execBridgeOnce(command, args, opts)
   portalCommandsInFlight += 1
   try {
@@ -359,6 +390,8 @@ async function execBridgeJson(command, args, opts) {
 }
 
 async function ensureBridgeSession() {
+  await refreshTargetSetting()
+  if (targetRestartMessage) throw new Error(targetRestartMessage)
   if (!bridgeSessionActive) {
     throw new Error('[kwin-portal-bridge] bridge session is not active; cuLock is not held')
   }
@@ -1700,6 +1733,11 @@ export function createLinuxExecutor(opts = {}) {
 
     async __setLockHeld(isHeld) {
       debugLog('__setLockHeld', { isHeld })
+      if (isHeld) {
+        try { if (typeof globalThis.__cuTargetSig === 'function') targetSigLast = await globalThis.__cuTargetSig() } catch {}
+        applyTargetSetting()
+        if (targetRestartMessage) return
+      }
       dockControllerState.isLockHeld = isHeld
       if (isHeld) {
         await startBridgeSession()
