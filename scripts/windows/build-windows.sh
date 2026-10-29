@@ -133,15 +133,54 @@ make -C "$SRC/patches" -j"$(nproc)" >/dev/null
 log "Applying the Windows patch set"
 python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 
-# resources/ion-dist (the third-party inference setup window) is not inside
-# app.asar: its `@patch-type: nim-dir` patches run on the folder itself, as in
-# build-patched-tarball.sh. The Linux-only ion fix (fix_ion_dist_linux) stays out.
+# ion-dist (the third-party inference setup window) is not inside app.asar:
+# its `@patch-type: nim-dir` patches run on a folder, as in
+# build-patched-tarball.sh. Since v4.29.0 it ships packed as
+# resources/ion-dist.asar (before, as a resources/ion-dist folder): the archive
+# is extracted, patched and repacked to its place, and its record in the exe's
+# integrity resource rewritten if the exe has one (step 4). The Linux-only ion
+# fix (fix_ion_dist_linux) stays out.
+ION_ASAR="$RES/ion-dist.asar"
+if [ -e "$ION_ASAR" ] && [ -e "$RES/ion-dist" ]; then
+    die "the package has both resources/ion-dist.asar and resources/ion-dist/ - re-audit which one the app serves"
+elif [ -e "$ION_ASAR" ]; then
+    { [ -f "$ION_ASAR" ] && [ ! -L "$ION_ASAR" ]; } || die "resources/ion-dist.asar is not a regular file"
+    # The repack writes every file into the archive: an --unpack layout would be lost.
+    [ ! -e "$ION_ASAR.unpacked" ] || die "resources/ion-dist.asar.unpacked exists - teach the repack its --unpack layout"
+    ION_FORMAT=asar
+    ION_DIR="$WORK/ion-dist"
+    cp "$ION_ASAR" "$WORK/original-ion-dist.asar"
+    "${ASAR[@]}" extract "$ION_ASAR" "$ION_DIR"
+elif [ -d "$RES/ion-dist" ]; then
+    ION_FORMAT=dir
+    ION_DIR="$RES/ion-dist"
+else
+    die "neither resources/ion-dist.asar nor resources/ion-dist/ in the package - the layout moved; re-audit the ion-dist patches"
+fi
+[ -f "$ION_DIR/index.html" ] && [ -d "$ION_DIR/assets/v1" ] ||
+    die "the staged ion-dist ($ION_FORMAT) has no index.html or assets/v1/ - the setup window's layout moved"
 WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
 for p in "${WINDOWS_ION_PATCHES[@]}"; do
     grep -q '^# @patch-type: nim-dir$' "$SRC/patches/$p.nim" || die "$p is not a nim-dir patch"
-    log "Applying $p to resources/ion-dist"
-    "$SRC/patches/$p" "$RES/ion-dist" || die "ion-dist patch failed: $p"
+    log "Applying $p to ion-dist ($ION_FORMAT)"
+    "$SRC/patches/$p" "$ION_DIR" || die "ion-dist patch failed: $p"
 done
+if [ "$ION_FORMAT" = asar ]; then
+    log "Repacking ion-dist.asar"
+    "${ASAR[@]}" pack "$ION_DIR" "$WORK/ion-dist.asar"
+    # Read it back: every staged file packed (`asar list --is-pack` prints
+    # "pack   : /path" or "unpack : /path"), none unpacked, index.html there.
+    "${ASAR[@]}" list --is-pack "$WORK/ion-dist.asar" > "$WORK/ion-dist.list" ||
+        die "the repacked ion-dist.asar does not read back"
+    if grep -q '^unpack ' "$WORK/ion-dist.list"; then die "the repacked ion-dist.asar flags unpacked files"; fi
+    grep -qx 'pack *: /index.html' "$WORK/ion-dist.list" || die "the repacked ion-dist.asar has no /index.html"
+    missing="$(LC_ALL=C comm -23 \
+        <(cd "$ION_DIR" && find . -type f | sed 's|^\.||' | LC_ALL=C sort) \
+        <(sed -n 's/^pack *: //p' "$WORK/ion-dist.list" | LC_ALL=C sort) | wc -l)"
+    [ "$missing" -eq 0 ] || die "the repacked ion-dist.asar is missing $missing of the staged files"
+    mv -f "$WORK/ion-dist.asar" "$ION_ASAR"
+    rm -rf "$ION_DIR"
+fi
 
 log "Validating JavaScript syntax"
 bad=0
@@ -163,21 +202,37 @@ log "Repacking app.asar"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" unpacked "$WORK/app/app.asar" > "$WORK/unpacked.after"
 diff -u "$WORK/unpacked.before" "$WORK/unpacked.after" >&2 ||
     die "the repacked asar unpacks a different set of files than the official one"
-# Electron also checks every file it reads from the archive against its block
-# hashes, so each file entry must carry them.
-node -e '
-  const h = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-  let n = 0, missing = 0;
-  (function walk(d) { for (const e of Object.values(d.files || {})) {
-    if (e.files) walk(e); else if (!e.unpacked && !e.link) { n++; if (!e.integrity || !e.integrity.hash) missing++; } } })(h);
-  if (!n || missing) { console.error("integrity blocks missing on " + missing + " of " + n + " files"); process.exit(1); }
-' <(python3 -I -c 'import sys,struct;f=open(sys.argv[1],"rb");_,_,_,n=struct.unpack("<4I",f.read(16));sys.stdout.write(f.read(n).decode())' "$WORK/app/app.asar") ||
-    die "the repacked asar has no per-file integrity"
+# Electron also checks every file it reads from a checked archive against its
+# block hashes, so each file entry must carry them.
+block_integrity() {
+    node -e '
+      const h = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let n = 0, missing = 0;
+      (function walk(d) { for (const e of Object.values(d.files || {})) {
+        if (e.files) walk(e); else if (!e.unpacked && !e.link) { n++; if (!e.integrity || !e.integrity.hash) missing++; } } })(h);
+      if (!n || missing) { console.error("integrity blocks missing on " + missing + " of " + n + " files"); process.exit(1); }
+    ' <(python3 -I -c 'import sys,struct;f=open(sys.argv[1],"rb");_,_,_,n=struct.unpack("<4I",f.read(16));sys.stdout.write(f.read(n).decode())' "$1")
+}
+block_integrity "$WORK/app/app.asar" || die "the repacked asar has no per-file integrity"
 
 rm -rf "$RES/app.asar" "$RES/app.asar.unpacked"
 mv "$WORK/app/app.asar" "$RES/app.asar"
 mv "$WORK/app/app.asar.unpacked" "$RES/app.asar.unpacked"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" fix-exe "$APP_TREE/claude.exe" "$WORK/original.asar" "$RES/app.asar"
+# Electron checks only the archives the integrity resource lists. A repacked
+# ion-dist.asar that is listed needs its record rewritten like app.asar's.
+records="$(python3 -I "$SCRIPT_DIR/asar_integrity.py" records "$APP_TREE/claude.exe")" ||
+    die "cannot read claude.exe's integrity records"
+log "claude.exe integrity records: $(tr '\n' ' ' <<< "$records")"
+if [ "$ION_FORMAT" = asar ]; then
+    if grep -qxF 'ion-dist.asar' <<< "$records"; then
+        block_integrity "$ION_ASAR" || die "the repacked ion-dist.asar has no per-file integrity"
+        python3 -I "$SCRIPT_DIR/asar_integrity.py" fix-exe "$APP_TREE/claude.exe" \
+            "$WORK/original-ion-dist.asar" "$ION_ASAR" ion-dist.asar
+    else
+        log "claude.exe has no integrity record for ion-dist.asar: left unchecked, as in the official build"
+    fi
+fi
 
 # The Squirrel updater and its shortcut stub only work inside Squirrel's own
 # install layout; this build is portable.

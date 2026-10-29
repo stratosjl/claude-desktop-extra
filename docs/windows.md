@@ -5,7 +5,7 @@ A portable Windows build of Anthropic's official Claude Desktop with this projec
 - **Profiles**: several separate Claude instances side by side, each with its own sign-in, settings and Claude Code configuration.
 - **Settings → Extra**, with these panels:
   - **Themes**: the [theme engine](themes.md), its bundled palettes and the <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> picker.
-  - **Community**: the opt-in features. They are diff view modes, panel tabs and files quick open (<kbd>Ctrl</kbd>+<kbd>P</kbd>) in the [Code tab](code-tab.md); load large sessions in full; allow non-Anthropic models (3P gateways); calm Cowork glow; the theme picker; and developer tools.
+  - **Community**: the opt-in features. They are diff view modes, panel tabs and files quick open (<kbd>Ctrl</kbd>+<kbd>P</kbd>) in the [Code tab](code-tab.md); load large sessions in full; allow non-Anthropic models (3P gateways); the theme picker; and developer tools.
   - **Models**: [custom models](custom-models.md) from other providers in the Code tab's picker.
   - **Anthropic**: [feature flag overrides](feature-flags.md).
 
@@ -89,8 +89,8 @@ Save hand-edited files as **UTF-8 without a byte-order mark**: Notepad's default
 2. Prepares the sources: `scripts/windows/prepare-sources.sh` copies the repo to a temp folder and applies `scripts/windows/upstream-overlay.patch` there (see [Staying in sync with upstream](#staying-in-sync-with-upstream)).
 3. Extracts `app.asar` and applies the Windows patch set from that copy:
    - `apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (every core and community feature except the Linux window handling, the Quick Entry socket and the Linux profile URL routing), then everything in `patches/windows/`;
-   - the allow-non-Anthropic-models patch of `resources/ion-dist` (the 3P setup window) runs on that folder. The strictness rules are the same as on Linux: a patch that does not match fails the build.
-4. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
+   - the allow-non-Anthropic-models patch of the 3P setup window runs on its files: since v4.29.0 they ship as `resources/ion-dist.asar`, which is extracted, patched and repacked to its place (older packages have a `resources/ion-dist` folder, patched in place). The strictness rules are the same as on Linux: a patch that does not match fails the build, and so does a layout that is neither of the two.
+4. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. The exe checks only the archives its integrity record lists; if it lists `ion-dist.asar` too, that hash is rewritten the same way. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
 5. Drops the Squirrel updater (the build is portable and does not auto-update), checks that no path in the app is longer than 150 characters, packs the app as `app.zip` and zips it with `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` and `VERSION.txt`.
 
 ```bash

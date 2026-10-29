@@ -12,7 +12,7 @@ index c8ce7db..c8bbc7c 100644
      return;
    }
 diff --git a/js/diff_views_main.js b/js/diff_views_main.js
-index 9a8009c..e735c06 100644
+index dc7bb5d..aa85e3b 100644
 --- a/js/diff_views_main.js
 +++ b/js/diff_views_main.js
 @@ -97,7 +97,7 @@
@@ -75,7 +75,7 @@ index 9a8009c..e735c06 100644
      // pathological; spaces are deliberately ALLOWED, because "my notes.md" is an
      // ordinary tracked file and rejecting it would drop that one file back to the
 diff --git a/js/extra_settings_main.js b/js/extra_settings_main.js
-index 0fcf5d3..93218e2 100644
+index 8868e84..3b04682 100644
 --- a/js/extra_settings_main.js
 +++ b/js/extra_settings_main.js
 @@ -325,6 +325,8 @@
@@ -88,7 +88,7 @@ index 0fcf5d3..93218e2 100644
    }
  
 diff --git a/js/extra_settings_page.js b/js/extra_settings_page.js
-index 7c137f1..0437b4f 100644
+index 0fa795f..ff2e171 100644
 --- a/js/extra_settings_page.js
 +++ b/js/extra_settings_page.js
 @@ -563,10 +563,10 @@
@@ -106,7 +106,7 @@ index 7c137f1..0437b4f 100644
    if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
      NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
    }
-@@ -1392,7 +1392,8 @@
+@@ -1923,7 +1923,8 @@
          "list. For 3P/gateway users who route to non-Anthropic models through their own gateway; " +
          "with it off, those routes are silently removed and the session falls back to the default " +
          "model. The setting is per mode: set it while in 3P mode, where it is saved in " +
@@ -116,7 +116,7 @@ index 7c137f1..0437b4f 100644
        ariaLabel: "allow non-Anthropic models from a third-party gateway in the model list",
        read: "allowNonAnthropicModelsRead",
        write: "allowNonAnthropicModelsSet",
-@@ -1787,8 +1788,8 @@
+@@ -2318,8 +2319,8 @@
    function restartButton() {
      var restart = el("button", "cdbx-btn", "Restart now");
      restart.type = "button";
@@ -127,9 +127,9 @@ index 7c137f1..0437b4f 100644
      restart.addEventListener("click", function () {
        restart.disabled = true;
        restart.textContent = "Restarting...";
-@@ -2268,6 +2269,15 @@
-     renderThemePickerRow,
-     renderDevToolsRow
+@@ -2766,6 +2767,15 @@
+     renderDevToolsRow,
+     renderCuBackgroundRow
    ];
 +  // The Windows build ships these rows' patches. Window controls, the native
 +  // titlebar and window transparency are Linux window handling (Windows draws
@@ -137,13 +137,13 @@ index 7c137f1..0437b4f 100644
 +  // its patch is ported and listed.
 +  if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
 +    var WINDOWS_ROWS = [renderDiffViewsRow, renderPanelTabsRow, renderFilesQuickOpenRow, renderCustomModelsRow,
-+      renderAllowNonAnthropicModelsRow, renderTranscriptLimitsRow, renderGlowRow, renderThemePickerRow, renderDevToolsRow];
++      renderAllowNonAnthropicModelsRow, renderTranscriptLimitsRow, renderThemePickerRow, renderDevToolsRow];
 +    FEATURE_ROWS = FEATURE_ROWS.filter(function (r) { return WINDOWS_ROWS.indexOf(r) >= 0; });
 +  }
  
    function renderFeatures(panel) {
      clear(panel);
-@@ -2679,7 +2689,7 @@
+@@ -3177,7 +3187,7 @@
  
  
        var files = el("div", "cdbx-note cdbx-models-files",
@@ -152,7 +152,7 @@ index 7c137f1..0437b4f 100644
          "Routing changes (a key, a model, a provider) reach open sessions at once through " + (st.paths && st.paths.routes) +
          ". New models show in the picker after the Code tab reloads. Sub-agent types, the default sub-agent " +
          "model, the small/fast model and the system-prompt line are handed to each session as it opens. A " +
-@@ -2996,7 +3006,7 @@
+@@ -3494,7 +3504,7 @@
        var url = field(form, "Base URL", input("text", existing ? existing.baseUrl : "", "https://api.example.com/anthropic"),
          "The Anthropic-compatible endpoint; /v1/messages is appended.");
        var key = field(form, "API key", input("password", "", existing && existing.keyOk ? "stored - type to replace" : "API key"),
@@ -161,7 +161,7 @@ index 7c137f1..0437b4f 100644
        var modelsUrl = field(form, "Models list URL", input("text", existing ? existing.modelsUrl || "" : "", "optional - found automatically"),
          "Where the provider lists its models (GET, OpenAI or Anthropic shape), on the base URL's host - the key " +
          "goes nowhere else. Left empty, fetch models tries the preset's address, then <base URL>/v1/models, " +
-@@ -3215,9 +3225,8 @@
+@@ -3713,9 +3723,8 @@
      var notice = el("div", "cdbx-notice");
      notice.appendChild(el("div", "cdbx-notice-title", "Changes here require a restart of Claude Desktop"));
      notice.appendChild(el("div", "cdbx-notice-body",
@@ -174,7 +174,7 @@ index 7c137f1..0437b4f 100644
      notice.appendChild(restart);
      panel.appendChild(notice);
 diff --git a/js/files_quick_open_main.js b/js/files_quick_open_main.js
-index c20a2e4..7d82df3 100644
+index eb26a4d..548a698 100644
 --- a/js/files_quick_open_main.js
 +++ b/js/files_quick_open_main.js
 @@ -13,7 +13,7 @@
@@ -253,7 +253,7 @@ index de45ab3..3e35ef8 100644
      try { ctx.onPreview(abs, line); }
      catch (e) { warnOnce("onpreview-threw", "onPreview threw: " + ((e && e.message) || e)); hint("Could not open " + it.rel); return; }
 diff --git a/js/panel_tabs_main.js b/js/panel_tabs_main.js
-index 4bf489e..fdf7a3c 100644
+index 7112875..1f4f399 100644
 --- a/js/panel_tabs_main.js
 +++ b/js/panel_tabs_main.js
 @@ -13,7 +13,7 @@
@@ -279,7 +279,7 @@ index 4b52bff..ad7c98b 100644
      }
      Promise.all([window.cdbThemes.list(), window.cdbThemes.active()]).then(function (res) {
 diff --git a/js/transcript_limits_main.js b/js/transcript_limits_main.js
-index e8995b3..deb5fd0 100644
+index 6a0a445..014f9cc 100644
 --- a/js/transcript_limits_main.js
 +++ b/js/transcript_limits_main.js
 @@ -54,7 +54,7 @@
@@ -292,7 +292,7 @@ index e8995b3..deb5fd0 100644
    globalThis.__cdbTranscriptLimitsMain = true;
  
 diff --git a/patches/Makefile b/patches/Makefile
-index d740a96..8d1877b 100644
+index 3b57d3b..f587074 100644
 --- a/patches/Makefile
 +++ b/patches/Makefile
 @@ -1,9 +1,10 @@
@@ -316,7 +316,7 @@ index d740a96..8d1877b 100644
  BINS := $(SRCS:.nim=)
  
  ifeq ($(strip $(SRCS)),)
-@@ -146,5 +147,8 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
+@@ -144,5 +145,8 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
  # .jsonc template at runtime.
  core/add_growthbook_overrides: ../js/growthbook_overrides.js
  
@@ -325,19 +325,6 @@ index d740a96..8d1877b 100644
 +
  clean:
  	@rm -rf $(BINS) .nimcache
-diff --git a/patches/community/add_feature_cowork_glow.nim b/patches/community/add_feature_cowork_glow.nim
-index b7a90b9..39538b6 100644
---- a/patches/community/add_feature_cowork_glow.nim
-+++ b/patches/community/add_feature_cowork_glow.nim
-@@ -65,7 +65,7 @@ return s.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,function(m,q
-         .replace(/,(\s*[}\]])/g,"$1");
- }
- function __cdbG_read(p){
--try{var r=_fs.readFileSync(p,"utf8");return JSON.parse(__cdbG_strip(r))}catch(e){return null}
-+try{var r=_fs.readFileSync(p,"utf8").replace(/^\uFEFF/,"");return JSON.parse(__cdbG_strip(r))}catch(e){return null}
- }
- // New name first, legacy name as a fallback: the one-time
- // claude-desktop-bin -> -extra migration lives in the custom-themes patch
 diff --git a/patches/community/add_feature_theme_picker.nim b/patches/community/add_feature_theme_picker.nim
 index daeb9f4..34ee2ea 100644
 --- a/patches/community/add_feature_theme_picker.nim
@@ -401,7 +388,7 @@ index ede612a..38a4dbf 100644
  var __cdb_readCfg=function(p){var r=__cdb_readRaw(p);if(r===null)return null;try{return JSON.parse(__cdb_stripJsonc(r))}catch(e){__cdb_parseFailed=true;__cdb_log("Error parsing "+p+": "+e.message);return null}};
  // One theme per file from themes.d/. A file is either the theme object itself (name =
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
-index 8cc014f..78e2114 100644
+index a0e9aaf..5eb8236 100644
 --- a/scripts/apply_patches.py
 +++ b/scripts/apply_patches.py
 @@ -11,7 +11,11 @@ target location.
@@ -417,9 +404,9 @@ index 8cc014f..78e2114 100644
  
  <app_dir> is the directory that contains app.asar.contents/, i.e. the same
  path that build-patched-tarball.sh uses as "$WORK_DIR/app".
-@@ -35,6 +39,38 @@ PATCH_SUBDIRS = ("linux", "core", "community")
+@@ -35,6 +39,37 @@ PATCH_SUBDIRS = ("linux", "core", "community")
  # remove a patch.
- EXPECTED_PATCH_COUNT = 61
+ EXPECTED_PATCH_COUNT = 59
  
 +# The Windows build (--windows). patches/windows/ holds the Windows-only
 +# patches; they are applied AFTER the shared ones (on a shared target, their
@@ -433,7 +420,6 @@ index 8cc014f..78e2114 100644
 +# routing (patches/windows/ does that on Windows). Linux fixes stay out.
 +WINDOWS_PATCH_SET = (
 +    "add_feature_allow_non_anthropic_models",
-+    "add_feature_cowork_glow",
 +    "add_feature_custom_models",
 +    "add_feature_custom_themes",
 +    "add_feature_dev_tools_toggle",
@@ -456,7 +442,7 @@ index 8cc014f..78e2114 100644
  # Byte strings that only ever appear in a bundle one of our builds already
  # patched: every injected identifier starts with `__cdb`, and
  # `__nav_spoof_applied` is the marker of the navigator spoof removed for issue
-@@ -214,12 +250,58 @@ def run_nim_patch(nim_bin: Path, target_file: Path) -> bool:
+@@ -214,12 +249,58 @@ def run_nim_patch(nim_bin: Path, target_file: Path) -> bool:
          return False
  
  
@@ -519,7 +505,7 @@ index 8cc014f..78e2114 100644
  
      if not patches_dir.is_dir():
          print(f"[ERROR] patches_dir not found: {patches_dir}", file=sys.stderr)
-@@ -268,6 +350,9 @@ def main():
+@@ -268,6 +349,9 @@ def main():
          )
          sys.exit(1)
  
@@ -530,7 +516,7 @@ index 8cc014f..78e2114 100644
      nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
  
 diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
-index 9b6869a..c580b6a 100755
+index 86d8638..087dfda 100755
 --- a/scripts/run-feature-tests.sh
 +++ b/scripts/run-feature-tests.sh
 @@ -1,5 +1,5 @@
@@ -552,8 +538,8 @@ index 9b6869a..c580b6a 100755
  # `git mv` changes what gets discovered, this fails rather than quietly reporting
  # a green run over a shrunken suite - the same reasoning as EXPECTED_PATCH_COUNT
  # in scripts/apply_patches.py. Bump this when you add or remove a harness.
--EXPECTED_TEST_HARNESSES=48
-+EXPECTED_TEST_HARNESSES=50
+-EXPECTED_TEST_HARNESSES=55
++EXPECTED_TEST_HARNESSES=57
  
 -CATEGORIES=(community core linux)
 +CATEGORIES=(community core linux windows)
@@ -572,10 +558,10 @@ index 9b6869a..c580b6a 100755
      *)             echo "[ERROR] Unknown category: $1" >&2; usage ;;
  esac
 diff --git a/scripts/tests/core/test-extra-settings-dom.mjs b/scripts/tests/core/test-extra-settings-dom.mjs
-index 4880e26..d23c211 100644
+index b3a9eea..908f428 100644
 --- a/scripts/tests/core/test-extra-settings-dom.mjs
 +++ b/scripts/tests/core/test-extra-settings-dom.mjs
-@@ -1916,12 +1916,29 @@ async function run() {
+@@ -2142,12 +2142,30 @@ async function run() {
    const box = navbox();
  
    // --- the Windows build: the page runs with navigator.platform "Win32" and
@@ -599,8 +585,9 @@ index 4880e26..d23c211 100644
 +      const has = function (label) { return !!(panel && panel.querySelector('.cdbx-switch[aria-label="' + label + '"]')); };
 +      ["open the main window frameless, without window-control buttons or a shadow",
 +       "use the system window frame instead of this app's integrated titlebar",
-+       "make the main window transparent"].forEach(function (label) {
-+        ok(!has(label), "Windows: no Linux window-handling row: " + label);
++       "make the main window transparent",
++       "let Computer Use work on a background display instead of your desktop"].forEach(function (label) {
++        ok(!has(label), "Windows: no Linux-only row: " + label);
 +      });
 +      ["load large Code sessions in full",
 +       "allow non-Anthropic models from a third-party gateway in the model list"].forEach(function (label) {

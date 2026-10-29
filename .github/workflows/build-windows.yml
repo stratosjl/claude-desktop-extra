@@ -164,7 +164,6 @@ jobs:
             '[cdb-models] installed',
             '[CustomThemes] Active theme: nord',
             '[ThemePicker] Ctrl+Shift+T armed',
-            '[cowork-glow] startup',
             '[cdb-devtools] installed',
             '[DiffViews] installed (main)',
             '[files-quick-open] installed (main)',
