@@ -6,7 +6,7 @@ AGENTS.md is upstream's (patrickjaja/claude-desktop-extra) and is kept byte-iden
 
 ## Rule: never edit upstream files in place
 
-The fork only ADDS files. That is what keeps the daily sync with upstream (`.github/workflows/upstream-sync.yml`, GitHub's "Sync fork") conflict-free. A change the Windows build needs in an upstream file goes into `scripts/windows/upstream-overlay.patch`, which `scripts/windows/prepare-sources.sh` applies to a temp copy at build time:
+The fork only ADDS files. That is what keeps the scheduled sync with upstream (`.github/workflows/upstream-sync.yml`, GitHub's "Sync fork") conflict-free. A change the Windows build needs in an upstream file goes into `scripts/windows/upstream-overlay.patch`, which `scripts/windows/prepare-sources.sh` applies to a temp copy at build time:
 
 ```bash
 scripts/windows/prepare-sources.sh /tmp/src     # copy + overlay
@@ -27,7 +27,7 @@ Check before committing: `git diff --diff-filter=M upstream/master...HEAD --stat
 | `packaging/windows/` | `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` |
 | `scripts/tests/windows/` | Windows harnesses; run them on a prepared copy (the overlaid upstream tests too) |
 | `.github/workflows/build-windows.yml` | Build x64 + arm64, boot x64 on a Windows runner, publish `windows-v<version>` (`--latest=false`) |
-| `.github/workflows/upstream-sync.yml` | Daily: sync master, rebuild + publish when upstream or Anthropic's Windows version moved, report failures |
+| `.github/workflows/upstream-sync.yml` | Every 6 hours: sync master, rebuild + publish when upstream or Anthropic's Windows version moved (or while a failure issue is open), report failures |
 
 ## Checks for a Windows change
 

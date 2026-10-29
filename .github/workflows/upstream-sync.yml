@@ -1,19 +1,23 @@
 name: Upstream Sync
 
-# Daily: keep this fork on upstream (patrickjaja/claude-desktop-extra) and
-# publish a new Windows build when anything moved.
+# Every 6 hours: keep this fork on upstream (patrickjaja/claude-desktop-extra)
+# and publish a new Windows build when anything moved.
 #
 #   1. sync     - GitHub's own "Sync fork" (merge-upstream API) on master. The
 #                 fork only ADDS files (its edits to upstream files live in
 #                 scripts/windows/upstream-overlay.patch), so this never
 #                 conflicts.
-#   2. build    - when upstream moved or Anthropic shipped a new Windows
-#                 version: Build Windows (build x64 + arm64, boot the x64
-#                 build on a Windows runner) and publish windows-v<version>.
-#                 A failed check publishes nothing.
+#   2. build    - when upstream moved, Anthropic shipped a new Windows
+#                 version, or an earlier run's failure issue is still open (so
+#                 a fix merged to master is picked up without a manual run):
+#                 Build Windows (build x64 + arm64, boot the x64 build on a
+#                 Windows runner) and publish windows-v<version>. A failed
+#                 check publishes nothing.
 #   3. report   - on any failure, an issue with the run link and a prompt to
 #                 fix it with Claude (when Issues are enabled on the repo;
-#                 otherwise the run summary). GitHub also emails the failure.
+#                 otherwise the run summary). While that issue is open, a new
+#                 failure comments on it at most once a day. GitHub also emails
+#                 each failed run.
 #
 # Syncing commits that change upstream's own .github/workflows/ files needs a
 # token with the `workflow` scope: add a fine-grained personal access token as
@@ -23,7 +27,7 @@ name: Upstream Sync
 
 on:
   schedule:
-    - cron: '51 4 * * *' # 07:51 Athens in summer time, 06:51 in winter
+    - cron: '51 4,10,16,22 * * *' # 07:51 Athens in summer time, 06:51 in winter, then every 6 hours
   workflow_dispatch:
     inputs:
       force_build:
@@ -43,6 +47,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      issues: read
     outputs:
       merge_type: ${{ steps.sync.outputs.merge_type }}
       windows_latest: ${{ steps.win.outputs.latest }}
@@ -86,15 +91,28 @@ jobs:
           echo "published=${published}" >> "$GITHUB_OUTPUT"
           echo "Windows: Anthropic ${latest}, published ${published:-none}" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Look for an open failure issue
+        id: failing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Issues disabled or unreadable: no retry, the other triggers still apply.
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search 'in:title "Automatic update failed"' --json number -q '.[0].number // empty' 2>/dev/null || true)
+          echo "issue=${n}" >> "$GITHUB_OUTPUT"
+          if [ -n "$n" ]; then
+            echo "Failure issue #${n} is open: retrying the build." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Decide
         id: decide
         env:
           MERGE_TYPE: ${{ steps.sync.outputs.merge_type }}
           LATEST: ${{ steps.win.outputs.latest }}
           PUBLISHED: ${{ steps.win.outputs.published }}
+          FAILING: ${{ steps.failing.outputs.issue }}
           FORCE: ${{ inputs.force_build }}
         run: |
-          if [ "$MERGE_TYPE" != "none" ] || [ "$LATEST" != "$PUBLISHED" ] || [ "$FORCE" = "true" ]; then
+          if [ "$MERGE_TYPE" != "none" ] || [ "$LATEST" != "$PUBLISHED" ] || [ -n "$FAILING" ] || [ "$FORCE" = "true" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
             echo "Rebuilding and publishing the Windows release." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -138,10 +156,18 @@ jobs:
           EOF
           )
           printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
-          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number -q '.[0].number' 2>/dev/null)
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number,updatedAt -q '.[0] // empty | "\(.number) \(.updatedAt)"' 2>/dev/null)
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body" ||
-              echo "::warning::could not comment on issue #$existing"
+            # The build retries every 6 hours while the issue is open: comment
+            # at most once a day, so a lasting failure does not flood the issue.
+            num=${existing%% *}
+            updated=$(date -d "${existing#* }" +%s 2>/dev/null || echo 0)
+            if [ $(( $(date +%s) - updated )) -lt 86400 ]; then
+              echo "Issue #$num was updated in the last 24 hours; not commenting again." >> "$GITHUB_STEP_SUMMARY"
+            else
+              gh issue comment "$num" -R "$GITHUB_REPOSITORY" --body "$body" ||
+                echo "::warning::could not comment on issue #$num"
+            fi
           else
             gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body" ||
               echo "::warning::could not open an issue (Issues may be disabled on this repository); the report is in this run's summary"
