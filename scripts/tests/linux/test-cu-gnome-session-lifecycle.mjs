@@ -44,8 +44,10 @@ const EXECUTOR = path.join(ROOT, "js", "cu_linux_executor.js");
 // ended or that crashed: socket present by default, no pidfile (pid null).
 // Case [22] changes them. stopped = the stopped-by-user marker the daemon
 // writes when the user clicks "Stop sharing" (case [25]).
+// clock (optional, see makeClock) replaces the executor's setTimeout /
+// clearTimeout, so the 120 s idle timer runs on a fake clock (cases [27]+).
 const rigSocket = { present: true, pid: null, stopped: false };
-function makeRig(consentMs, reply, displays, delays) {
+function makeRig(consentMs, reply, displays, delays, clock) {
   const log = [], argv = [];
   const cp = {
     execFileSync(bin, args) {
@@ -101,7 +103,8 @@ function makeRig(consentMs, reply, displays, delays) {
   delete process.env.SWAYSOCK; delete process.env.HYPRLAND_INSTANCE_SIGNATURE; delete process.env.NIRI_SOCKET;
   delete process.env.GNOME_PORTAL_BRIDGE_BIN;
   const src = readFileSync(EXECUTOR, "utf8");
-  new Function("require", "process", src)(requireStub, process);
+  new Function("require", "process", "setTimeout", "clearTimeout", src)(requireStub, process,
+    clock ? clock.setTimeout : setTimeout, clock ? clock.clearTimeout : clearTimeout);
   const ex = globalThis.__linuxExecutor;
   log.length = 0;
   return { ex, log, argv, cp, restore(){ delete globalThis.__linuxExecutor; } };
@@ -803,7 +806,7 @@ console.log("\n[22f] GNOME: an undeterminable runtime dir never concludes \"daem
 // input/capture command exits 5. Within the lock nothing may start a new
 // session (that would re-share the screen the user just stopped sharing); the
 // next lock starts clean.
-const STOPPED_MSG = "Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use resumes with the next Computer Use session - in a guided tour, after the tour ends or the user clicks Stop in Claude.";
+const STOPPED_MSG = "Screen sharing was stopped from the desktop (its screen-sharing indicator, or the desktop ended the session). Stop using Computer Use and ask the user whether to continue; do not retry. Computer Use can share the screen again once the task ends or after about 2 minutes without Computer Use actions.";
 // Bridge stderr: the old wording, and the current one (text fallback for both).
 const STOPPED_STDERR = "screen sharing was stopped by the user (the portal session was closed)";
 const STOPPED_STDERR_NEW = "screen sharing was stopped (the portal session was closed)";
@@ -1170,6 +1173,544 @@ console.log("\n[26] KWin (js/executor_linux.js): exit 5 latches for the lock; th
       await mod.stopBridgeSession();
     } finally { console.debug = savedDebug; delete globalThis.__cuKwinBridgeBin; }
   }
+}
+
+// ── Idle teardown and the task boundary (issue #293 follow-up) ───────────────
+// Upstream can hold the CU lock for many turns (cloud Cowork releases it only
+// after a 12 min idle sweep), so the lock alone left the portal session - and
+// the desktop's "screen is being shared" indicator - up after the task, and a
+// stop-sharing latch blocking the next task. The executor now ends the session
+// CU_PORTAL_IDLE_MS (120 s) after the last real portal command, lifts the latch
+// after the same idle time, and ends both on __cuTaskBoundary (upstream's
+// releaseRemoteCuLock renderer IPC). The idle timer runs on a fake clock.
+const IDLE_MS = 120000;
+// Fake setTimeout/clearTimeout for the executor: delays of 60 s and more are
+// held on a virtual clock that only advance() moves; shorter ones (the bridge
+// stubs, spawn probes) stay real.
+function makeClock() {
+  let now = 0, seq = 0;
+  const timers = new Map();
+  return {
+    setTimeout(fn, ms, ...a) {
+      if (!(ms >= 60000)) return setTimeout(fn, ms, ...a);
+      const t = { __fake: true, id: ++seq, ms, due: now + ms, fn, a, unrefd: false,
+                  unref() { this.unrefd = true; return this; }, ref() { this.unrefd = false; return this; }, hasRef() { return !this.unrefd; } };
+      timers.set(t.id, t);
+      return t;
+    },
+    clearTimeout(t) { if (t && t.__fake) { timers.delete(t.id); return; } clearTimeout(t); },
+    pending() { return [...timers.values()]; },
+    advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        let next = null;
+        for (const t of timers.values()) if (t.due <= end && (!next || t.due < next.due)) next = t;
+        if (!next) break;
+        now = next.due; timers.delete(next.id); next.fn(...next.a);
+      }
+      now = end;
+    }
+  };
+}
+const PORTAL_SUBS = new Set(["zoom", "screenshot", "pointer-move", "pointer-click", "pointer-scroll", "pointer-drag",
+                             "left-mouse-down", "left-mouse-up", "key-sequence", "type", "hold-key"]);
+// Async replies as in the share rigs; sync (input) calls succeed unless stop.on,
+// which makes every portal command exit 5 on both paths (the user clicked
+// "Stop sharing"). rig.onSync(sub), when set, runs inside a sync bridge call.
+function idleRig(delays) {
+  const clock = makeClock();
+  const stop = { on: false, start: false };       // start: session-start itself exits 5
+  const rig = makeRig(20, (sub) => {
+    if (sub === "session-start" && stop.start) throw Object.assign(new Error("Command failed: session-start\n" + STOPPED_STDERR_NEW), { code: 5 });
+    if (sub === "screens") return screensJson([true, true]);
+    if (PORTAL_SUBS.has(sub) && stop.on) throw Object.assign(new Error("Command failed: " + sub + "\n" + STOPPED_STDERR), { code: 5 });
+    if (sub === "zoom") return ZOOM_OK;
+    return "{}";
+  }, EDISPLAYS, delays, clock);
+  rig.sync = [];
+  rig.cp.execFileSync = (bin, args) => {
+    const base = path.basename(String(bin));
+    if (base === "which" || base === "systemd-detect-virt" || base === "pgrep") throw new Error("not found");
+    const sub = (args || [])[0];
+    rig.sync.push(sub);
+    if (rig.onSync) rig.onSync(sub);
+    if (sub === "session-start" && stop.start) throw Object.assign(new Error("Command failed: session-start\n" + STOPPED_STDERR_NEW), { status: 5 });
+    if (stop.on && PORTAL_SUBS.has(sub)) throw Object.assign(new Error("Command failed: " + sub + "\n" + STOPPED_STDERR), { status: 5 });
+    return "{}";
+  };
+  rig.clock = clock;
+  rig.stop = stop;
+  rig.zoom = () => rig.ex.zoom({ x: 10, y: 10, w: 10, h: 10 }, 1, null);
+  rig.idleLogged = () => rig.log.some(l => l.includes("idle for 120 s, ending the portal session"));
+  rig.deferred = (what) => rig.log.some(l => l.includes("idle timer deferred, " + what));
+  resetShot();
+  return rig;
+}
+const tryRun = async (f) => { try { await f(); return "no error"; } catch (e) { return e.message; } };
+// Lock taken, session up: the starting point of most idle cases.
+async function idleRigUp(delays) {
+  const rig = idleRig(delays);
+  rig.ex.__setLockHeld(true);
+  await sleep(60);
+  return rig;
+}
+
+console.log("\n[27] idle: 120 s without a portal command ends the portal session, the lock stays");
+{
+  const rig = await idleRigUp();
+  try {
+    const armed = rig.clock.pending();
+    ok(armed.length === 1 && armed[0].ms === IDLE_MS && armed[0].unrefd,
+       "a session that comes up arms one unref'd 120 s timer", JSON.stringify(armed.map(t => ({ ms: t.ms, unref: t.unrefd }))));
+    ok((await tryRun(rig.zoom)) === "no error", "a capture runs on the session");
+    rig.clock.advance(IDLE_MS - 1);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0, "119.999 s after the capture: still up", String(countCalls(rig, "session-end")));
+    rig.clock.advance(1);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.idleLogged(), "at 120 s: session-end, and it is logged",
+       rig.log.filter(l => l.includes("idle")).join(" | "));
+    ok(rig.log.some(l => l.includes("session ended")) && rig.clock.pending().length === 0,
+       "the teardown completes and leaves no timer behind", String(rig.clock.pending().length));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[28] idle: activity within 120 s re-arms the timer (async capture and sync input)");
+{
+  const rig = await idleRigUp();
+  try {
+    rig.clock.advance(100000);
+    await rig.zoom();
+    rig.clock.advance(100000);                     // 200 s since the start, 100 s since the capture
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0, "a capture 100 s in pushes the end out", String(countCalls(rig, "session-end")));
+    await rig.ex.moveMouse(5, 5);
+    rig.clock.advance(100000);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0 && rig.sync.includes("pointer-move"), "so does sync input", rig.sync.join(" "));
+    rig.clock.advance(20000);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.idleLogged(), "120 s after the last input it ends",
+       String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[29] idle: the stop-sharing latch lifts after 120 s; blocked commands do not re-arm it");
+{
+  const rig = await idleRigUp();
+  try {
+    rig.stop.on = true;                            // the user clicked "Stop sharing"
+    let msg = await tryRun(() => rig.ex.moveMouse(5, 5));
+    ok(msg === STOPPED_MSG, "the stop latches (sync input reads the stop message)", msg);
+    rig.clock.advance(60000);
+    const spawned = rig.sync.length;
+    msg = await tryRun(() => rig.ex.moveMouse(5, 5));
+    const shot = await shotText({});
+    ok(msg === STOPPED_MSG && shot.includes(STOPPED_MSG) && rig.sync.length === spawned && countCalls(rig, "zoom") === 0,
+       "60 s later the model retries: refused fast, nothing spawned", rig.sync.join(" "));
+    rig.clock.advance(60000);                      // 120 s after the stop, 60 s after the retries
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1, "120 s after the stop: session-end removes the marker", String(countCalls(rig, "session-end")));
+    ok(rig.log.some(l => l.includes("stopped-by-user latch cleared (idle)")), "and the latch is cleared (idle)");
+    rig.stop.on = false;                           // session-end removed the marker
+    msg = await tryRun(() => rig.ex.moveMouse(5, 5));
+    ok(msg === "no error" && rig.sync.slice(-2).join(" ") === "session-start pointer-move",
+       "the next input starts a session (sync backstop) and runs", rig.sync.join(" "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[29b] idle: a stop latched while a button is held or a command is in flight still lifts at 120 s");
+{
+  const rig = await idleRigUp({ zoom: 200 });
+  try {
+    await rig.ex.mouseDown();                      // a button is held
+    const z = tryRun(rig.zoom);                    // a capture in flight
+    await sleep(40);
+    rig.stop.on = true;                            // the user clicked "Stop sharing"
+    const msg = await tryRun(() => rig.ex.moveMouse(5, 5));
+    ok(msg === STOPPED_MSG, "the stop latches", msg);
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.log.some(l => l.includes("stopped-by-user latch cleared (idle)")),
+       "the daemon is gone: neither the held button nor the capture in flight defers the lift",
+       rig.log.filter(l => l.includes("idle")).join(" | "));
+    await z;
+  } finally { rig.restore(); }
+}
+
+console.log("\n[29c] idle: a session-start that exits 5 (async or sync backstop) arms the timer that lifts the latch");
+{
+  const rig = idleRig();
+  rig.stop.start = true;
+  try {
+    rig.ex.__setLockHeld(true);                    // async start, closed before ready
+    await sleep(60);
+    ok(rig.log.some(l => l.includes("screen sharing was stopped (session-start exit 5)")) && rig.clock.pending().length === 1,
+       "async start exit 5: latched, timer armed", String(rig.clock.pending().length));
+    rig.stop.start = false;
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.log.some(l => l.includes("stopped-by-user latch cleared (idle)")),
+       "120 s later the latch lifts", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+{
+  const rig = idleRig();
+  rig.stop.start = true;
+  try {
+    const msg = await tryRun(() => rig.ex.moveMouse(5, 5));   // no lock hook: the sync backstop starts
+    ok(msg === STOPPED_MSG && rig.clock.pending().length === 1, "sync backstop exit 5: latched, timer armed", msg);
+    rig.stop.start = false;
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.log.some(l => l.includes("stopped-by-user latch cleared (idle)")),
+       "120 s later the latch lifts", String(countCalls(rig, "session-end")));
+    const m2 = await tryRun(() => rig.ex.moveMouse(5, 5));
+    ok(m2 === "no error", "and input works again", m2);
+  } finally { rig.restore(); }
+}
+
+console.log("\n[30] idle: never ends a session while a start, an end or a portal command is in flight");
+{
+  // A command in flight (a slow capture).
+  const delays = { zoom: 150 };
+  const rig = await idleRigUp(delays);
+  try {
+    const z = rig.zoom();
+    await sleep(40);                               // the zoom is spawned and pending
+    rig.clock.advance(IDLE_MS);
+    await sleep(10);
+    ok(countCalls(rig, "session-end") === 0 && rig.deferred("a portal command"),
+       "a capture in flight: deferred, no session-end", String(countCalls(rig, "session-end")));
+    ok(rig.clock.pending().length === 1, "and the timer is re-armed");
+    await z;
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1, "once it settled, 120 s idle ends the session", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+{
+  // A start in flight: the daemon vanished, the next capture starts a new one.
+  const clockS = makeClock();
+  const rig = makeRig(150, (sub) => sub === "screens" ? screensJson([true, true]) : sub === "zoom" ? ZOOM_OK : "{}", EDISPLAYS, undefined, clockS);
+  resetShot();
+  rig.ex.__setLockHeld(true);
+  await sleep(220);                                // the lock's session is up
+  rigSocket.present = false;                       // the daemon is gone
+  try {
+    const z = rig.ex.zoom({ x: 10, y: 10, w: 10, h: 10 }, 1, null);
+    await sleep(30);
+    rigSocket.present = true;
+    ok(countCalls(rig, "session-start") === 2, "a replacement session-start is in flight", String(countCalls(rig, "session-start")));
+    clockS.advance(IDLE_MS);
+    await sleep(10);
+    ok(countCalls(rig, "session-end") === 0 && rig.log.some(l => l.includes("idle timer deferred, a session-start")),
+       "a start in flight: deferred, no session-end", String(countCalls(rig, "session-end")));
+    await z;
+    await sleep(30);
+  } finally { rigSocket.present = true; rig.restore(); }
+}
+{
+  // An end in flight (the lock release), with a sync command landing in it.
+  // The bridge has no session to run it on and answers exit 4, as a real one
+  // would; the command still settled, so it re-arms the timer either way.
+  const rig = await idleRigUp({ "session-end": 150 });
+  try {
+    const rel = rig.ex.__setLockHeld(false);
+    await sleep(20);
+    rig.onSync = (sub) => { if (sub === "pointer-move") throw Object.assign(new Error("Command failed: pointer-move\nno live portal session"), { status: 4 }); };
+    await tryRun(() => rig.ex.moveMouse(5, 5));    // the backstop declines; the bridge answers exit 4
+    rig.onSync = null;
+    ok(rig.sync.includes("pointer-move") && rig.clock.pending().length === 1, "the command landing in the end re-armed the timer",
+       rig.sync.join(" "));
+    rig.clock.advance(IDLE_MS);
+    await sleep(10);
+    ok(rig.deferred("a session-end") && countCalls(rig, "session-end") === 1,
+       "an end in flight: deferred, no second session-end", rig.log.filter(l => l.includes("idle")).join(" | "));
+    await rel;
+    ok(rig.clock.pending().length === 0, "the finished end leaves no timer", String(rig.clock.pending().length));
+  } finally { rig.restore(); }
+}
+
+{
+  // A capture enumerates monitors (`screens`, portal-free) before its zoom:
+  // the session must not end in that gap and be restarted for the zoom.
+  const rig = await idleRigUp({ screens: 150 });
+  try {
+    const z = tryRun(rig.zoom);
+    await sleep(40);                               // screens pending, zoom not spawned yet
+    rig.clock.advance(IDLE_MS);
+    await sleep(10);
+    ok(countCalls(rig, "session-end") === 0 && rig.deferred("a bridge query"),
+       "a capture enumerating monitors: deferred, no session-end", rig.log.filter(l => l.includes("idle")).join(" | "));
+    const r = await z;
+    ok(r === "no error" && countCalls(rig, "session-start") === 1 && countCalls(rig, "zoom") === 1,
+       "the capture runs on the same session, no restart", `start ${countCalls(rig, "session-start")}`);
+  } finally { rig.restore(); }
+}
+
+console.log("\n[31] idle: never ends a session while a mouse button or a key is held");
+{
+  const rig = await idleRigUp();
+  try {
+    await rig.ex.mouseDown();                      // left_mouse_down, no left_mouse_up yet
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0 && rig.deferred("a held mouse button"),
+       "button held: deferred, no session-end", rig.sync.join(" "));
+    await rig.ex.moveMouse(5, 5);                  // an action while held: the one deferral is available again
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0 && rig.log.filter(l => l.includes("idle timer deferred, a held mouse button")).length === 2,
+       "a portal command in between: the next expiry defers again", String(countCalls(rig, "session-end")));
+    await rig.ex.mouseUp();
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1, "120 s after left_mouse_up the session ends", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+{
+  // Held deferral applies once: a model that holds a button for two idle
+  // periods without any action has abandoned it.
+  const rig = await idleRigUp();
+  try {
+    await rig.ex.mouseDown();
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0 && rig.deferred("a held mouse button"), "first expiry with a held button: deferred",
+       String(countCalls(rig, "session-end")));
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.log.some(l => l.includes("held for 240 s without a Computer Use action, ending the portal session anyway")),
+       "second expiry with no action in between: the session ends, and it is logged", String(countCalls(rig, "session-end")));
+    const msg = await tryRun(() => rig.ex.mouseDown());
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(msg === "no error" && rig.deferred("a held mouse button") && countCalls(rig, "session-end") === 1,
+       "the next session gets its own deferral (the flag was reset)", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+{
+  // A FAILED left_mouse_down holds nothing.
+  const rig = await idleRigUp();
+  try {
+    rig.onSync = (sub) => { if (sub === "left-mouse-down") throw new Error("Command failed: left-mouse-down\ninput rejected"); };
+    const msg = await tryRun(() => rig.ex.mouseDown());
+    rig.onSync = null;
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(msg !== "no error" && countCalls(rig, "session-end") === 1 && !rig.deferred("a held mouse button"),
+       "a failed left_mouse_down leaves the flag clear: 120 s later the session ends", msg);
+  } finally { rig.restore(); }
+}
+{
+  // A FAILED left_mouse_up still releases the hold for the idle timer.
+  const rig = await idleRigUp();
+  try {
+    await rig.ex.mouseDown();
+    rig.onSync = (sub) => { if (sub === "left-mouse-up") throw new Error("Command failed: left-mouse-up\ninput rejected"); };
+    const msg = await tryRun(() => rig.ex.mouseUp());
+    rig.onSync = null;
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(msg !== "no error" && countCalls(rig, "session-end") === 1 && !rig.deferred("a held mouse button"),
+       "a failed left_mouse_up clears the flag: 120 s later the session ends", msg);
+  } finally { rig.restore(); }
+}
+{
+  // hold_key is ONE hold-key command that releases the key itself: the timer
+  // coming due while it runs must find it in flight.
+  const rig = await idleRigUp();
+  try {
+    rig.onSync = (sub) => { if (sub === "hold-key") rig.clock.advance(IDLE_MS); };
+    await rig.ex.holdKey("shift", 2);
+    rig.onSync = null;
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 0 && rig.deferred("a portal command"),
+       "key held (hold-key running): deferred, no session-end", rig.sync.join(" "));
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1, "120 s after the key was released the session ends", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[32] idle: a lock release cancels the timer; a new lock arms a fresh one");
+{
+  const rig = await idleRigUp();
+  try {
+    ok(rig.clock.pending().length === 1, "armed while the lock's session is up", String(rig.clock.pending().length));
+    await rig.ex.__setLockHeld(false);
+    await sleep(30);
+    ok(rig.clock.pending().length === 0, "the release cancels it", String(rig.clock.pending().length));
+    rig.clock.advance(3 * IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1 && !rig.idleLogged(), "only the release's session-end, no idle end",
+       String(countCalls(rig, "session-end")));
+    rig.ex.__setLockHeld(true);
+    await sleep(60);
+    ok(rig.clock.pending().length === 1 && countCalls(rig, "session-start") === 2, "a new lock: new session, one timer",
+       String(rig.clock.pending().length));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[33] idle: the next command after an idle end restarts the session (no \"stopped\" state)");
+{
+  const rig = await idleRigUp();
+  try {
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1, "idle end", String(countCalls(rig, "session-end")));
+    const shot = await handler("screenshot", {});
+    ok(shot && shot.content && shot.content[0] && shot.content[0].type === "image" && countCalls(rig, "session-start") === 2,
+       "a screenshot: the lazy (async) start brings a session back and captures", String(countCalls(rig, "session-start")));
+    ok(rig.clock.pending().length === 1, "and the new session is timed again");
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 2, "idle end again", String(countCalls(rig, "session-end")));
+    const before = rig.sync.length;
+    const msg = await tryRun(() => rig.ex.moveMouse(5, 5));
+    ok(msg === "no error" && rig.sync.slice(before).join(" ") === "session-start pointer-move",
+       "sync input: the backstop starts a session, then the move runs", rig.sync.join(" "));
+    ok(!rig.log.some(l => l.includes("portal session unavailable") || l.includes("screen sharing was stopped")),
+       "no cooldown, no stop latch after an idle end");
+  } finally { rig.restore(); }
+}
+
+console.log("\n[33b] idle: an async capture or a new lock arriving during an idle end waits for it, then starts");
+{
+  const rig = await idleRigUp({ "session-end": 150 });
+  try {
+    rig.clock.advance(IDLE_MS);                    // idle end in flight
+    await sleep(20);
+    ok(countCalls(rig, "session-end") === 1, "the idle end is in flight", String(countCalls(rig, "session-end")));
+    const r = await tryRun(rig.zoom);
+    const seq = calls(rig.log);
+    ok(r === "no error" && countCalls(rig, "session-start") === 2 && seq.indexOf("DONE session-end") < seq.lastIndexOf("CALL session-start"),
+       "a capture racing the end: queued behind it, then a fresh session and the capture", seq.join(" "));
+    ok(rig.log.some(l => l.includes("session-start queued behind an in-flight session-end")), "the wait is logged");
+    ok(rig.clock.pending().length === 1, "and the new session is timed", String(rig.clock.pending().length));
+  } finally { rig.restore(); }
+}
+{
+  const rig = await idleRigUp({ "session-end": 150 });
+  try {
+    rig.clock.advance(IDLE_MS);                    // idle end in flight
+    await sleep(20);
+    await rig.ex.__setLockHeld(true);              // the next task's lock
+    await sleep(30);
+    const seq = calls(rig.log);
+    ok(countCalls(rig, "session-start") === 2 && seq.indexOf("DONE session-end") < seq.lastIndexOf("CALL session-start"),
+       "a new lock during an idle end: a session-start after the end", seq.join(" "));
+    ok(seq[seq.length - 1] === "DONE session-start" && rig.clock.pending().length === 1,
+       "the run ends with the session UP and one timer", seq.join(" "));
+    const r = await tryRun(rig.zoom);
+    ok(r === "no error" && countCalls(rig, "session-start") === 2, "and it captures on that session, no further start", r);
+  } finally { rig.restore(); }
+}
+
+console.log("\n[33c] idle, no restore token: a sync start that outlasts its 8 s budget continues in the background");
+{
+  // After an idle end the next action is a click; without a restore token the
+  // blocking sync start raises the consent dialog and times out while the user
+  // is still answering it. That is not a portal fault: no cooldown, the async
+  // start takes the dialog over, and the model is told to have the user approve.
+  const timedOut = () => Object.assign(new Error("spawnSync /res/gnome-portal-bridge ETIMEDOUT"), { code: "ETIMEDOUT", signal: "SIGTERM", status: null });
+  const rig = await idleRigUp();
+  try {
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    ok(countCalls(rig, "session-end") === 1, "idle end", String(countCalls(rig, "session-end")));
+    rig.onSync = (sub) => { if (sub === "session-start") throw timedOut(); };
+    const msg = await tryRun(() => rig.ex.click(5, 5, "left", 1));
+    rig.onSync = null;
+    ok(/approve the screen-sharing dialog, then retry the action/.test(msg), "the model is told to have the user approve, then retry", msg);
+    ok(!rig.log.some(l => l.includes("portal session unavailable")), "no portal-down cooldown");
+    ok(!rig.sync.includes("pointer-click"), "the click is not sent", rig.sync.join(" "));
+    ok(countCalls(rig, "session-start") === 2, "the async start takes over (full budget)", String(countCalls(rig, "session-start")));
+    await sleep(60);                               // the user approved
+    const before = rig.sync.length;
+    const m2 = await tryRun(() => rig.ex.click(5, 5, "left", 1));
+    ok(m2 === "no error" && !rig.sync.slice(before).includes("session-start") && rig.sync.slice(before).includes("pointer-click"),
+       "the retry runs on that session, no further start", rig.sync.slice(before).join(" "));
+  } finally { rig.restore(); }
+}
+{
+  // A genuine failure (the bridge gave up on its own, no daemon left): cooldown, as before.
+  const rig = await idleRigUp();
+  try {
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    rig.onSync = (sub) => { if (sub === "session-start") throw Object.assign(new Error("Command failed: session-start\nno RemoteDesktop portal"), { status: 1 }); };
+    await tryRun(() => rig.ex.click(5, 5, "left", 1));
+    rig.onSync = null;
+    ok(rig.log.some(l => l.includes("portal session unavailable")) && countCalls(rig, "session-start") === 1,
+       "no daemon left: the portal is marked down, no background start", String(countCalls(rig, "session-start")));
+  } finally { rig.restore(); }
+}
+{
+  // The bridge failed on its own but its daemon (pidfile, live pid) is still up.
+  const rig = await idleRigUp();
+  try {
+    rig.clock.advance(IDLE_MS);
+    await sleep(30);
+    rig.onSync = (sub) => { if (sub === "session-start") { rigSocket.pid = process.pid; throw Object.assign(new Error("Command failed: session-start\ntimed out waiting for the portal"), { status: 1 }); } };
+    const msg = await tryRun(() => rig.ex.click(5, 5, "left", 1));
+    rig.onSync = null;
+    ok(/approve the screen-sharing dialog/.test(msg) && !rig.log.some(l => l.includes("portal session unavailable")),
+       "a live daemon pid: same hand-over, no cooldown", msg);
+    await sleep(60);
+  } finally { rigSocket.pid = null; rig.restore(); }
+}
+
+console.log("\n[34] __cuTaskBoundary: same session (alias ids) ends the portal session; another session is ignored");
+{
+  const call = async (rig, id, source, holder) => {
+    if (typeof rig.ex.__cuTaskBoundary !== "function") return "missing";
+    const r = rig.ex.__cuTaskBoundary(id, source, holder);
+    if (!r || typeof r.then !== "function") return "not async";
+    await r; await sleep(30);
+    return "ok";
+  };
+  let rig = await idleRigUp();
+  try {
+    let r = await call(rig, "session_ABC", "renderer", "cse_abc");
+    ok(r === "ok" && countCalls(rig, "session-end") === 1, "session_ABC vs cse_abc: same session, session-end", r);
+    ok(rig.log.some(l => l.includes("[claude-cu] task boundary (renderer): ending the portal session")), "and it is logged");
+    ok(rig.clock.pending().length === 0, "the idle timer is cancelled with it");
+  } finally { rig.restore(); }
+  rig = await idleRigUp();
+  try {
+    let r = await call(rig, "session_ABC", "renderer", "cse_xyz");
+    ok(r === "ok" && countCalls(rig, "session-end") === 0, "another session's id: ignored", r);
+    ok(rig.log.some(l => l.includes("task boundary (renderer): ignored")), "and the mismatch is logged");
+    r = await call(rig, undefined, "stop_click", "cse_xyz");
+    ok(r === "ok" && countCalls(rig, "session-end") === 1, "no id (Stop): acts", r);
+  } finally { rig.restore(); }
+  rig = await idleRigUp();
+  try {
+    const r = await call(rig, "cse_abc", "renderer", undefined);
+    ok(r === "ok" && countCalls(rig, "session-end") === 1, "no lock holder: acts", r);
+  } finally { rig.restore(); }
+  rig = await idleRigUp();
+  try {
+    rig.stop.on = true;
+    await tryRun(() => rig.ex.moveMouse(5, 5));    // latched
+    const r = await call(rig, "session_q", "renderer", "SESSION_Q");
+    ok(r === "ok" && countCalls(rig, "session-end") === 1 && rig.log.some(l => l.includes("stopped-by-user latch cleared (task boundary)")),
+       "a stop-sharing latch is lifted at the task boundary", r);
+    rig.stop.on = false;
+    const msg = await tryRun(() => rig.ex.moveMouse(5, 5));
+    ok(msg === "no error", "and the next action shares again", msg);
+  } finally { rig.restore(); }
+  rig = await idleRigUp();
+  const savedDe = process.env.XDG_CURRENT_DESKTOP;
+  try {
+    process.env.XDG_CURRENT_DESKTOP = "KDE";
+    const r = await call(rig, undefined, "renderer", undefined);
+    process.env.XDG_CURRENT_DESKTOP = savedDe;
+    ok(r === "ok" && countCalls(rig, "session-end") === 0 && !rig.log.some(l => l.includes("task boundary")),
+       "off GNOME: a no-op", r);
+  } finally { process.env.XDG_CURRENT_DESKTOP = savedDe; rig.restore(); }
 }
 
 console.log("\n" + (fail ? `${pass} passed, ${fail} FAILED` : `ALL ${pass} CHECKS PASSED`));

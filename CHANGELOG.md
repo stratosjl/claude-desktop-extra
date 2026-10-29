@@ -2,6 +2,71 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-10-29
+
+### The Code transcript's stick-to-bottom fix is retired (thanks @Felitendo, #303)
+
+- **claude.ai fixed the stranded transcript itself.** The Code transcript is now a virtualized feed with its own pin. Measured live against claude.ai without `fix_epitaxy_autoscroll`: a 3 px drift while a response streams is snapped back and the view follows to the end, and a deliberate scroll up of 30 px or 500 px is left alone.
+- **The patch now got in the way.** It pulled the view back down whenever it was within 64 px of the bottom, so a short scroll up that is not a wheel or touch gesture (dragging the scrollbar, for one) was undone by the next streamed line. `fix_epitaxy_autoscroll` and `js/fix_epitaxy_autoscroll.js` are removed.
+
+### The "Calm the Cowork glow" switch is gone (thanks @Felitendo, #302)
+
+- **claude.ai no longer has the glow it calmed.** Cowork now lives in the Claude tab, and the pulsing hero glow went with the old Cowork home: `.cowork-hero-glow` and its `cowork-hero-glow-pulse` keyframes are in none of claude.ai's current stylesheets, so the switch matched nothing and changed nothing. `add_feature_cowork_glow` and its Community Features row are removed; a leftover `coworkGlow` / `coworkGlowOpacity` key in `claude-desktop-extra.json(c)` is ignored.
+
+## 2026-10-28
+
+### Upstream v4.29.0
+
+- **Cowork finds QEMU again on RHEL 9, Rocky, Alma and NixOS.** v4.29.0 only accepts `/usr/bin/qemu-system-<arch>` and no longer searches `$PATH`, so Cowork said "requires QEMU" where QEMU lives elsewhere (RHEL's `qemu-kvm` through our shim, the Nix store, `/usr/local/bin`). `fix_cowork_firmware_paths_linux` now tries `CLAUDE_QEMU_PATH`, then `/usr/bin`, then `$PATH`; the Nix package sets `CLAUDE_QEMU_PATH`, and `--diagnose` reports the same order.
+- **The third-party setup window is patched again.** v4.29.0 ships it as `resources/ion-dist.asar` instead of a directory; the build now extracts, patches and repacks it, and a missing or unexpected layout fails the build instead of skipping both ion-dist patches.
+- **Hung window: upstream now reloads by itself.** v4.29.0 expires the watchdog's tokens and re-checks 30 s after a kill attempt, so a renderer death after an attempt no longer leaves the window blank until quit; our hand-off of that death to the reload path (`fix_renderer_clean_exit_reload` sub-patch C) is retired. The SIGKILL fallback stays: on Linux the kill attempt asks the renderer to crash itself, which does nothing when the whole renderer process is stalled. The clean-exit reload (#287) and the log line for suppressed deaths (`fix_renderer_gone_suppressed_log`) stay too; upstream still drops both silently.
+- **Re-fitted to v4.29.0:** Computer Use lock acquire (`fix_computer_use_linux`), the remaining renderer sub-patches, and transcript limits (`add_feature_transcript_limits`, which now also covers Cowork VM transcript copies through the same reader).
+- **Extra -> Deployment** lists the new managed keys `inferenceTokenWarningPercent` and `userFileUploadsEnabled`.
+- **Audited:** feature flags (635 -> 672), platform gates (no new macOS/Windows-only feature that Linux lacks), built-in MCP servers, and the deployment-key, custom-models, quick-open and panel-tabs anchors. Locale files and `claude-browser-shim.js` moved into `app.asar` upstream; nothing of ours reads them.
+
+## 2026-10-27
+
+### Computer Use on a background display - Experimental (thanks @Konakonai, #300)
+
+- **New Community switch "Computer Use on a background display"** (Settings -> Extra -> Community Features) points Linux Computer Use at a second display you start yourself - Xvfb or Xephyr (via `x11-bridge`), or a headless or nested sway or labwc (via `wlroots-bridge`) - so Claude works there while you keep your desktop. The setup page lists the displays it finds with size, a live preview and the restrictions that apply, gives copy-paste recipes, and has a Test button. The setting is the `computerUseBackgroundDisplay` key (`enabled`, `kind`, `display`, and an `env` map you edit by hand) in `claude-desktop-extra.jsonc`, per profile. Off by default; off is today's behavior. A change applies from Claude's next Computer Use action. Details, recipes and limits: [docs/computer-use.md](docs/computer-use.md#computer-use-on-a-background-display-experimental).
+- **Fails closed.** While the switch is on and display 2 is not running, every Computer Use action is refused; it never falls back to your desktop. Single-instance apps already running on your desktop open there, and Claude is told so. The teach overlay is unavailable in this mode, and KDE Plasma 6.6+ needs a restart to switch. Headless GNOME or KWin, weston, cage and Hyprland/niri headless are not supported targets.
+- **Covered by** the new `test-cu-target-session.mjs` and `test-cu-background-display-main.mjs`, and an extended `test-extra-settings-dom.mjs`.
+
+### Computer Use: fixes for every session
+
+- **`wlroots-bridge`: ctrl, alt and shift combos are sent as real modifiers** on wlroots compositors and niri (measured on Sway; `ctrl+c` used to arrive as a plain `c`); the first input is no longer lost on a seat with no keyboard or pointer yet, and held modifiers are released when the bridge is terminated (thanks @Konakonai, wlroots-bridge#3).
+- **`x11-bridge`: `frontmost-app` answers `null` when no window has focus**, and the window list works on window managers without `_NET_CLIENT_LIST_STACKING` (xfwm4).
+- **Zoom and screenshots recover after a monitor is plugged or unplugged:** a "display not found" answer re-reads the screen list and retries once. Covered by the new `test-cu-screens-invalidate.mjs`.
+- **`open_application` no longer sleeps synchronously** while it waits for the app's window to appear.
+
+### Docs
+
+- **README: Omarchy and other Arch-based distros** are named in the Arch install row; they use the same AUR package and pacman repo.
+
+## 2026-10-26
+
+### Computer Use: the screen-sharing session ends with the task (#293)
+
+- **On GNOME and KDE Wayland, Computer Use's screen-sharing session now ends when a task ends** (including cloud Cowork tasks) **or after 2 minutes without Computer Use actions**, so the desktop's sharing indicator no longer stays up. The next action shares again without a dialog once the selection is remembered.
+- **After "Stop sharing" in the desktop indicator, Computer Use becomes available again when the task ends or after 2 minutes**, instead of staying blocked until the app restarts. Covered by the new `test-cu-kwin-idle.mjs` and `test-cu-task-boundary-hook.mjs`.
+
+### Computer Use: `open_application` starts Flatpak apps, Chromium web apps and `env`-wrapped launchers (#297)
+
+- **`open_application` now runs the launcher's whole `Exec` line**, on wlroots, GNOME and X11 sessions (KDE Wayland sessions use `kwin-portal-bridge`'s own launcher and were not affected). Until now it started only the bare binary, so a Flatpak app, a Chromium web app or a launcher written as `env VAR=1 app` opened nothing. The line is parsed as the Desktop Entry spec defines it (field codes, quoting, `Path=`, `TryExec`, a leading BOM, GIO's lenient backslash handling) and run as an argv array, with no shell.
+- **Fallbacks when there is no usable `Exec`, the launcher is `Terminal=true`, or its binary is missing:** `gio launch`, `gtk-launch`, `kioclient6`/`kioclient5 exec` and `exo-open`, in that order, whichever is installed (none is required); terminal launchers then also try `xdg-terminal-exec`, `x-terminal-emulator -e` and `$TERMINAL -e`.
+- **App discovery** also scans the Snap and NixOS app dirs. `listInstalledApps` reports each app's real id instead of an `env` or `flatpak` alias, and a match on the app name or desktop id now wins over one on the executable name. Covered by the new `test-cu-open-app-exec.mjs` and an extended `test-cu-xdg-appdirs.mjs`.
+
+### Computer Use: fallback screenshots and zoom land where the model points on scaled outputs (#298)
+
+- **The Electron `desktopCapturer` fallback no longer crops a letterboxed thumbnail as if it were 1:1**, which put zoom regions about 1.7x off on a fractionally scaled output. It captures at the monitor's physical size, picks the source by `display_id`, else by a unique aspect-ratio match, else the primary display (with a log line saying so), and crops relative to that display.
+- **Fallback screenshots and zooms are downscaled with the bridges' rule** (long edge at most 1568 px, at most 1.15 MP), so the model sees one coordinate frame whichever backend answered. Covered by the new `test-cu-capture-fallback.mjs`.
+- **`wlroots-bridge` waits up to 2 s for screencopy** instead of returning before Hyprland had copied the frame (fixed in `patrickjaja/wlroots-bridge`; the next build picks it up).
+
+### A hung Claude window recovers by itself (#299)
+
+- **On Linux, Electron's `forcefullyCrashRenderer()` cannot stop a hung renderer**, so upstream's "Main webview is unresponsive, will kill and reload" did nothing, and each attempt left a token that later suppressed the real `killed` event: the window stayed frozen until a full restart. A `killed` or `crashed` that arrives with such a token pending now goes through upstream's own reload path, including its limit of 3 reloads in 5 minutes and the "keeps crashing" overlay.
+- **If the view is still hung 5 s after the watchdog's attempt and a 2 s liveness probe gets no answer, the renderer is SIGKILLed**, so the view recovers by itself about 7 s after the watchdog fires. A probe that answers cancels the kill. The same failure is reported against Claude Code in anthropics/claude-code#97259 and #99142. `fix_renderer_clean_exit_reload.nim` carries this; covered by an extended `test-renderer-clean-exit.mjs`.
+
 ## 2026-10-23
 
 ### Custom models and the Extra settings page also run on win32 (thanks @stratosjl, #295)

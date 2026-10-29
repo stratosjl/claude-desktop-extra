@@ -18,11 +18,12 @@ PKGREL="${3:?pkgrel}"
 README="${4:-$(dirname "$0")/../README.md}"
 EXPECTED="${VERSION}-${PKGREL}"
 
-# Third field of the Quick install table row whose first cell is $1.
+# Third field of the Quick install table row whose first cell starts with $1
+# (the cell may go on, e.g. "Arch / Manjaro (Omarchy, ...)").
 # `\|` inside a cell is an escaped pipe, not a column separator.
 table_row() {
   local line cell
-  line="$(grep -m1 "^| $1 |" "$README")" || { echo "README: no Quick install row '$1'" >&2; exit 1; }
+  line="$(grep -m1 "^| $1[ |]" "$README")" || { echo "README: no Quick install row '$1'" >&2; exit 1; }
   line="${line//\\|/$'\x01'}"
   IFS='|' read -r _ _ cell _ <<<"$line"
   cell="${cell#*\`}"; cell="${cell%%\`*}"

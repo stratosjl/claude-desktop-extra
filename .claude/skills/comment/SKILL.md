@@ -40,8 +40,8 @@ The goal is that the reporter invests a little more time and sends us facts. Eve
 
 1. One line of thanks, specific if possible ("the log excerpt was useful").
 2. What shipped, if anything: 1 to 3 bullets, each phrased as an observable behaviour change, with the version in bold.
-3. The ask: "Could you upgrade to X, reproduce it once, and send us the output of:" plus the single command block.
-4. One sentence on what that output tells us, so it does not feel like busywork.
+3. The ask, as one action plus one command: say exactly what to do first ("upgrade to X, then in a Claude Code session ask Claude to take a screenshot and zoom a few times"), then "run this and paste the output here:" plus the single command block. Never ask them to look for strings themselves, and never explain what each line would mean. That confused the #298 reporter, who had to ask whether to use the feature at all.
+4. If empty output is a valid answer, say so in one short sentence ("Empty output is good news too"). Otherwise skip this item.
 5. Optionally one bolded question.
 6. Short closing thanks.
 

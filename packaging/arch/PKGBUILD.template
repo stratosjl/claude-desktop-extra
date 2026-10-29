@@ -70,8 +70,8 @@ package() {
     # Install the official Claude Desktop tree VERBATIM (from the tarball's
     # claude-desktop/ dir): the Electron runtime (binary, chrome-sandbox, .so
     # files, paks, Chromium locales, snapshots), resources/ with our patched
-    # app.asar + app.asar.unpacked + upstream app resources (ion-dist, virtiofsd,
-    # locale JSONs, cowork-linux-helper) + our CU bridges. The tree is verbatim
+    # app.asar + app.asar.unpacked + upstream app resources (ion-dist.asar, virtiofsd,
+    # cowork-linux-helper; locale JSONs live inside app.asar) + our CU bridges. The tree is verbatim
     # except: the Electron entrypoint is ALREADY renamed to "claude", app.asar is
     # our patched build, and the CU bridges are added. Electron auto-loads the
     # exe-adjacent resources/app.asar (OnlyLoadAppFromAsar fuse), so no resources/

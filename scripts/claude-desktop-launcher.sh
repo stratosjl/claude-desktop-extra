@@ -76,10 +76,11 @@ APP_ID='claude'
 # (GNOME/XFCE/KDE menu), the systemd --user scope can start with an EMPTY PATH -
 # the display-manager-spawned graphical session and the systemd user manager
 # often carry no PATH. That breaks any feature that resolves a binary via $PATH;
-# in particular the native Cowork VM backend probes for `qemu-system-x86_64` by
-# walking process.env.PATH, so an empty PATH makes Cowork report "VM not
-# supported" and the workspace Download button do nothing - even though qemu is
-# installed. (Terminal launches are unaffected: they inherit the shell's PATH.)
+# in particular the Cowork VM probe's fallback for a QEMU outside /usr/bin walks
+# process.env.PATH for `qemu-system-<arch>` (see _cowork_qemu_probe below), so
+# an empty PATH makes Cowork report "VM not supported" and the workspace
+# Download button do nothing - even though qemu is installed. (Terminal launches
+# are unaffected: they inherit the shell's PATH.)
 # We export an explicit PATH that always includes the standard system bindirs
 # (where qemu/virtiofsd live), appended to whatever the launcher inherited, and
 # propagate it into the scope with --setenv at exec time.
@@ -98,12 +99,43 @@ for _d in /usr/local/bin /usr/bin /bin /usr/local/sbin /usr/sbin /sbin; do
 done
 export PATH="$_claude_path"
 
-# RHEL 9 / Rocky / Alma ship QEMU only as /usr/libexec/qemu-kvm, so upstream's
-# PATH walk for qemu-system-<arch> fails and Cowork reports "requires QEMU" with
-# qemu-kvm installed. The rpm ships qemu-shim/qemu-system-<arch> symlinks to it
-# (the helper's command line boots unchanged on RHEL qemu-kvm). Append that dir
-# only when no executable qemu-system-<arch> is on PATH (same X_OK walk as the
-# app), qemu-kvm exists and the shim is installed; a real QEMU always wins.
+# How the app finds QEMU (4.29.0+, with fix_cowork_firmware_paths_linux
+# sub-patch D): the first executable (X_OK) of
+#   1. $CLAUDE_QEMU_PATH, if set to an absolute path (our override),
+#   2. /usr/bin/qemu-system-<arch> (upstream's only candidate since 4.29.0),
+#   3. <dir>/qemu-system-<arch> for each absolute dir on $PATH (our fallback;
+#      upstream itself walked PATH up to 3.6556.2), skipping paths containing
+#      ',' or '=' (cowork-linux-helper rejects those QEMU option separators).
+# The resolved absolute path is passed to cowork-linux-helper, which execs it.
+# _cowork_qemu_probe replicates that order for --diagnose. Args: binary name,
+# PATH, override, and the /usr/bin dir (a parameter only so tests can fake it).
+_cowork_qemu_probe() {
+    local bin=$1 path=$2 override=$3 usr_bin=${4:-/usr/bin} _d _c
+    local -a cands=()
+    [[ $override == /* ]] && cands+=("$override")
+    cands+=("$usr_bin/$bin")
+    local IFS=:
+    for _d in $path; do
+        [[ $_d == /* ]] || continue
+        while [[ $_d == */ ]]; do _d=${_d%/}; done
+        _c="$_d/$bin"
+        [[ $_c == *[,=]* ]] && continue
+        cands+=("$_c")
+    done
+    for _c in "${cands[@]}"; do
+        [[ -x $_c ]] && { echo "$_c"; return 0; }
+    done
+    return 1
+}
+
+# RHEL 9 / Rocky / Alma ship QEMU only as /usr/libexec/qemu-kvm: no
+# /usr/bin/qemu-system-<arch>, nothing on PATH, so Cowork reports "requires
+# QEMU" with qemu-kvm installed. The rpm ships qemu-shim/qemu-system-<arch>
+# symlinks to it (the helper's command line boots unchanged on RHEL qemu-kvm);
+# the app's PATH fallback (step 3 above) finds the shim once this dir is on
+# PATH. Append it only when no executable qemu-system-<arch> is on PATH,
+# qemu-kvm exists and the shim is installed; a real QEMU always wins (one in
+# /usr/bin wins anyway, since the app checks /usr/bin before PATH).
 _cowork_qemu_shim_path() {
     local path=$1 arch=$2 qemu_kvm=$3 shim_dir=$4 bin _d
     case "$arch" in
@@ -2274,10 +2306,14 @@ _diagnose() {
         *)             _arch=x64;   _qemu_bin=qemu-system-x86_64 ;;
     esac
     echo "PATH (as diagnose sees it) = ${PATH:-(empty!)}"
-    # qemuPath: first on PATH that is executable
+    # qemuPath: CLAUDE_QEMU_PATH, then /usr/bin/<bin>, then PATH (same order and
+    # X_OK test as the app - see _cowork_qemu_probe)
     local _qemu_path=''
-    if command -v "$_qemu_bin" &>/dev/null; then _qemu_path="$(command -v "$_qemu_bin")"; fi
-    echo "qemuPath = ${_qemu_path:-NOT FOUND on PATH ($_qemu_bin)}"
+    _qemu_path="$(_cowork_qemu_probe "$_qemu_bin" "${PATH:-}" "${CLAUDE_QEMU_PATH:-}")" || _qemu_path=''
+    if [[ -n ${CLAUDE_QEMU_PATH:-} && $_qemu_path != "$CLAUDE_QEMU_PATH" ]]; then
+        echo "  (CLAUDE_QEMU_PATH=$CLAUDE_QEMU_PATH is ignored: not an absolute path to an executable)"
+    fi
+    echo "qemuPath = ${_qemu_path:-NOT FOUND (CLAUDE_QEMU_PATH, /usr/bin/$_qemu_bin, $_qemu_bin on PATH)}"
     # firmwarePath: first readable OVMF/AAVMF CODE candidate (must match the
     # app's patched firmware array: CLAUDE_OVMF_CODE_PATH override first, then
     # the fixed paths - see fix_cowork_firmware_paths_linux.nim)

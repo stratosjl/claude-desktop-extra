@@ -58,6 +58,7 @@ if [ ! -d "$APP_CONTENTS/.vite" ]; then
     echo "app.asar. Pass the extracted tree (e.g. ./tmp/extract/usr/lib/claude-desktop)"
     echo "as the second argument; without it a sibling ../extract/usr/lib/claude-desktop"
     echo "of app.asar.contents is probed, and if neither exists those patches SKIP."
+    echo "A packed resources/ion-dist.asar (v4.29.0+) is extracted to a temp dir."
     exit 1
 fi
 
@@ -160,6 +161,8 @@ SKIPPED=0
 declare -A STAGED=()
 declare -A STAGED_PASS=()
 declare -A STAGED_FAIL=()
+# packed nim-dir target (<deb tree>/<target>.asar) -> its one extract in $WORK_DIR
+declare -A ASAR_EXTRACT=()
 SEQ=0
 
 for patch_file in "${PATCH_FILES[@]}"; do
@@ -214,11 +217,37 @@ for patch_file in "${PATCH_FILES[@]}"; do
         # (tmp/app.asar.contents next to tmp/extract/), and only SKIP - not
         # FAIL - when neither is available: real builds exercise these
         # patches via build-patched-tarball.sh against the full tree.
+        # Since v4.29.0 the .deb packs resources/ion-dist as ion-dist.asar:
+        # a "<target>.asar" file is extracted once into $WORK_DIR and that
+        # extract is the pristine directory every patch on the target stages
+        # from (the shipped tree is never touched).
         if [ -z "$actual_target" ] || [ ! -d "$actual_target" ]; then
             sibling_tree="$(dirname "$APP_CONTENTS")/extract/usr/lib/claude-desktop"
             for tree in "$DEB_TREE" "$sibling_tree"; do
-                [ -n "$tree" ] && [ -d "$tree/$target" ] || continue
-                actual_target="$tree/$target"
+                [ -n "$tree" ] || continue
+                if [ -d "$tree/$target" ]; then
+                    actual_target="$tree/$target"
+                    break
+                fi
+                [ -f "$tree/$target.asar" ] || continue
+                if [ -z "${ASAR_EXTRACT[$tree/$target.asar]:-}" ]; then
+                    if ! command -v asar >/dev/null 2>&1; then
+                        echo "  Status: FAIL (asar CLI not found; needed to extract $tree/$target.asar)"
+                        FAILED=$((FAILED + 1))
+                        echo ""
+                        continue 2
+                    fi
+                    SEQ=$((SEQ + 1))
+                    ASAR_EXTRACT[$tree/$target.asar]="$WORK_DIR/asar-$SEQ/${target##*/}"
+                    if ! asar extract "$tree/$target.asar" "${ASAR_EXTRACT[$tree/$target.asar]}"; then
+                        echo "  Status: FAIL (asar extract of $tree/$target.asar failed)"
+                        FAILED=$((FAILED + 1))
+                        echo ""
+                        continue 2
+                    fi
+                fi
+                actual_target="${ASAR_EXTRACT[$tree/$target.asar]}"
+                echo "  Source: $tree/$target.asar (extracted)"
                 break
             done
         fi

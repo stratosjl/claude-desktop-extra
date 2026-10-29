@@ -39,6 +39,19 @@ main implements `fetchMentionOptions:(e,t)=>aPr(e,t??void 0)`, `mainView.js` sti
 `Resources_$_fetchMentionOptions`, and `file-index-worker/fileIndexWorker.js` contains
 `of this.index.search(` exactly once.
 
+**Local rows re-verified statically on v4.29.0 (2026-10-28, pristine extract):** the generic worker-host
+fork is unchanged in shape and still exactly one site (`index.chunk-Sq9qOqtc.js`, same chunk as
+`worker:{buildName:"file-index-worker",fileName:"fileIndexWorker.js"}`):
+`utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",...this.opts.env&&{env:this.opts.env()},...this.opts.disclaim&&!1})`,
+now followed by `a=this.opts.quietStdio===!0`. Only `frame-local-worker` sets `env:`/`disclaim:!0` (and
+`quietStdio:!0`); `file-index-worker` and `heavy-work-worker` set none of them. The other three fork sites
+keep their shapes (MCP host `fork(e,t,{...a,env:o})`, the shell extractor with a literal `serviceName`, the
+pty host `fork(t.MK("pty-host","ptyHostWorker.js")` in `index.chunk-D3Ciy7W9.js`); main implements
+`fetchMentionOptions:(e,t)=>lGr(e,t??void 0)`, `mainView.js` invokes `Resources_$_fetchMentionOptions` once, and
+`file-index-worker/fileIndexWorker.js` contains `of this.index.search(` exactly once. The local `ion-dist` SPA
+(3P Code tab) carries `"Filter files"` 2, `"Show file tree"` 5, `"Hide file tree"` 3, `data-perf-screen` 3,
+`"More options for ` 48, `onPreview:` 30. The DOM/fiber rows were not re-measured live.
+
 ## Anchors
 
 | Anchor | Used for | Measured value | If it moves |
@@ -106,7 +119,7 @@ at runtime never arrives).
 grep -alE 'buildName:["`]file-index-worker["`]' index*.js
 # 2. Every fork call site - the one with serviceName + stdio is OUR anchor (exactly one)
 grep -aoE 'utilityProcess\.fork\([^)]{0,160}\)' index*.js | sort -u
-#    3.6556.2, UNPATCHED (the generic host line is cut at the first ")" of this.opts.env()):
+#    3.6556.2 and 4.29.0, UNPATCHED (the generic host line is cut at the first ")" of this.opts.env()):
 #      utilityProcess.fork(r,[],{serviceName:t,stdio:"pipe",...this.opts.env&&{env:this.opts.env()   <- generic worker host (sub-patch B rewrites this)
 #      utilityProcess.fork(e,t,{...o,env:s})                    <- MCP host             (upstream already passes env)
 #      utilityProcess.fork(n,[],{serviceName:"Claude Desktop Shell Environment Extractor"})

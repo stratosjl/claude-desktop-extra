@@ -81,16 +81,21 @@ let forkEndStateRe =
 let limitsCtorReadRe = re2"""new [\w$.]+\([\w$]+\.loadLimits\)"""
 let limitsConfigReadRe = re2"""this\.config\.loadLimits\b"""
 
-# Sub-patch C. Group 0 = `new <id>.<id>({`, group 1 = zero or more simple
-# `key:value,` properties upstream places before the callback. Matches (v2.26454.0):
-#   this.diskTranscript=new fe.t({resolvesByKind:HF,onTranscriptTruncatedChanged:e=>{...
-#   this.transcriptReader=new n.t({onTranscriptTruncatedChanged:()=>{},skipMtimeTouchOnRead:!0})
-# (v2.19675.1 had no leading property on the first site.) `loadLimits:` goes right
-# after `({`, ahead of any such property.
+# Sub-patch C. Group 0 = `new <id>.<id>({`, group 1 = the `key:value,` properties
+# upstream places before the callback (empty, or starting with a key), as long as
+# none of them opens or closes a brace: that keeps the match inside the one object
+# literal whose own key is `onTranscriptTruncatedChanged:`. Matches (v4.29.0):
+#   this.diskTranscript=new gt.t({resolvesByKind:i$,isCopied:yD,copyOf:(e,t)=>this.vmTranscriptCopies.dirOf(e,t),onTranscriptTruncatedChanged:e=>{...
+#   this.transcriptReader=new a.t({onTranscriptTruncatedChanged:()=>{},skipMtimeTouchOnRead:!0})
+# (v2.19675.1 had no leading property on the first site; up to v3.6556.2 only
+# `resolvesByKind:<id>`.) The v4 arrow-function value is why the property values
+# are brace-free rather than identifier-only. `isCopied`/`copyOf` route Cowork VM
+# transcript copies through this same manager instance, so they need no site of
+# their own. `loadLimits:` goes right after `({`, ahead of any such property.
 let ctorRe =
-  re2"""(new [\w$.]+\(\{)((?:[\w$]+:[\w$.!]+,)*)onTranscriptTruncatedChanged:"""
+  re2"""(new [\w$.]+\(\{)((?:[\w$]+:[^{}]*?,)?)onTranscriptTruncatedChanged:"""
 let ctorEndRe =
-  re2"""new [\w$.]+\(\{loadLimits:globalThis\.__cdbTranscriptLimits\?\.\(\),(?:[\w$]+:[\w$.!]+,)*onTranscriptTruncatedChanged:"""
+  re2"""new [\w$.]+\(\{loadLimits:globalThis\.__cdbTranscriptLimits\?\.\(\),(?:[\w$]+:[^{}]*?,)?onTranscriptTruncatedChanged:"""
 
 proc forkEndStateCount(s: string): int =
   s.findAll(forkEndStateRe).len

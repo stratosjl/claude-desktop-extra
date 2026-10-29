@@ -18,7 +18,7 @@ Everything else - Chat, Cowork, Claude Code, Browser Tools, 3P inference - is An
 
 | Distro | Command |
 |--------|---------|
-| Arch / Manjaro | `yay -S claude-desktop-extra` ([AUR](https://aur.archlinux.org/packages/claude-desktop-extra); no AUR helper: [signed pacman repo](#arch-linux--manjaro-pacman-repository)) |
+| Arch / Manjaro ([Omarchy](https://omarchy.org), CachyOS, EndeavourOS and other Arch-based distros) | `yay -S claude-desktop-extra` ([AUR](https://aur.archlinux.org/packages/claude-desktop-extra); no AUR helper: [signed pacman repo](#arch-linux--manjaro-pacman-repository)) |
 | Debian / Ubuntu | `curl -fsSL https://patrickjaja.github.io/claude-desktop-extra/install.sh \| sudo bash && sudo apt install claude-desktop-extra` |
 | Fedora / RHEL | `curl -fsSL https://patrickjaja.github.io/claude-desktop-extra/install-rpm.sh \| sudo bash && sudo dnf install claude-desktop-extra` |
 | NixOS / Nix | `nix run github:patrickjaja/claude-desktop-extra` |
@@ -29,7 +29,7 @@ x86_64 and aarch64 are supported everywhere except Nix (x86_64 only). **Cowork**
 <a name="arch-linux--manjaro-pacman-repository"></a>
 <a id="install-pacman"></a>
 <details>
-<summary><b>Arch Linux / Manjaro (AUR or pacman repository)</b></summary>
+<summary><b>Arch Linux / Manjaro / Omarchy and other Arch-based distros (AUR or pacman repository)</b></summary>
 
 ```bash
 yay -S claude-desktop-extra              # or: paru -S claude-desktop-extra / Manjaro: pamac build claude-desktop-extra
@@ -96,7 +96,7 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). Cowork packages come in as `Recommends`; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_3.6556.2-5_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_4.29.0-1_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
@@ -111,7 +111,7 @@ sudo dnf install claude-desktop-extra
 
 Cowork packages come in as weak deps; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-3.6556.2-5.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-4.29.0-1.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>
@@ -132,7 +132,7 @@ Cowork tools (`qemu`, `virtiofsd`, OVMF) are baked into the closure (`.override 
 Works on standard and immutable distros (Bazzite, Silverblue/Kinoite, SteamOS, Universal Blue). The `claude://` handler for sign-in registers itself on first launch.
 
 ```bash
-wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/Claude_Desktop-3.6556.2-x86_64.AppImage
+wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/Claude_Desktop-4.29.0-x86_64.AppImage
 chmod +x Claude_Desktop-*-x86_64.AppImage && ./Claude_Desktop-*-x86_64.AppImage
 ```
 
@@ -216,7 +216,7 @@ Off by default; turn them on in Settings → Extra → Community. Details: [docs
 
 ## Computer Use
 
-Desktop automation (screenshot, click, type, scroll, teach mode), on for every account and every session type. The official build's own Linux Computer Use is a staged rollout that needs a RemoteDesktop portal (GNOME 46+, current Plasma) and skips wlroots; our bundled bridges take precedence and cover X11, XWayland, Sway / Hyprland / Niri, GNOME Wayland (PipeWire >= 1.0.5) and KDE Plasma 6.6+, with nothing to install. Details: [docs/computer-use.md](docs/computer-use.md), per-session matrix: [dependencies](docs/computer-use-dependencies.md).
+Desktop automation (screenshot, click, type, scroll, teach mode), on for every account and every session type. The official build's own Linux Computer Use is a staged rollout that needs a RemoteDesktop portal (GNOME 46+, current Plasma) and skips wlroots; our bundled bridges take precedence and cover X11, XWayland, Sway / Hyprland / Niri, GNOME Wayland (PipeWire >= 1.0.5) and KDE Plasma 6.6+, with nothing to install. Details: [docs/computer-use.md](docs/computer-use.md), per-session matrix: [dependencies](docs/computer-use-dependencies.md). An experimental switch in Settings → Extra → Community Features points it at a second display you start yourself (Xvfb, Xephyr or a headless sway), so Claude works there while you keep your desktop: [background display](docs/computer-use.md#computer-use-on-a-background-display-experimental).
 
 ## Custom Themes
 
@@ -248,7 +248,7 @@ Override Anthropic's server-side feature flags in `~/.config/Claude/claude-deskt
 
 ## Patches
 
-We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (17 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (7, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (37, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
+We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (16 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (7, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (36, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
 
 ## Command-line flags
 

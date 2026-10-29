@@ -31,7 +31,7 @@ The full distro, session-type, input/screenshot backend and per-bridge glibc tab
 
 cd patches && make -j"$(nproc)" && cd ..      # compile all Nim patches
 python3 scripts/check-upstream-absorbed.py tmp/app.asar.contents \
-  tmp/extract/usr/lib/claude-desktop/resources/ion-dist   # absorption probe (~11 s, pristine extract)
+  tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar   # absorption probe (~45 s, pristine extract)
 bash scripts/run-feature-tests.sh <community|core|linux>  # feature harnesses for the category you touched
 ./scripts/validate-patches.sh ./tmp/app.asar.contents
 node --check <patched.js>
@@ -201,8 +201,8 @@ Runtime logs are in `~/.config/Claude/logs/`. When 3P mode is active (an `infere
 
 ```
 patches/           # Nim patch sources (.nim) + Makefile, compiled to native binaries (ls patches/*/*.nim)
-patches/linux/     #   Linux compatibility - always on, not user-configurable (37)
-patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (17)
+patches/linux/     #   Linux compatibility - always on, not user-configurable (36)
+patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (16)
 patches/core/      #   Always-on infrastructure: Extra settings pages, theme engine, GrowthBook overrides, multi-profile (7)
 js/                # Shared JS snippets embedded by Nim patches via staticRead ("../../js/..." from a patch)
 scripts/           # Build, validation, and launcher scripts

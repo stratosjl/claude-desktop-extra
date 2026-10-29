@@ -55,7 +55,7 @@ sudo install -m 644 ~/.config/Claude-3p/configLibrary/*.json /etc/claude-desktop
 2. New top-level menu **Developer** appears. Click **Developer → Configure Third-Party Inference**.
 3. Pick your provider, fill credentials, save. The wizard writes the same JSON as Route C, into the same store as Route A.
 
-If the menu item opens an empty window, you're on a build before #57 landed (`ion-dist` directory missing). Update to v1.6259+ or use Route A.
+If the menu item opens an empty window, the wizard's pages are missing: they ship as `resources/ion-dist.asar` in the install directory (e.g. `/usr/lib/claude-desktop/resources/ion-dist.asar`), which must be a regular file; `main.log` then reports `the app's bundled web pages (ion-dist.asar) are missing or are not a regular file`. Reinstall the package (builds before v1.6259 did not ship the wizard at all), or use Route A.
 
 ## Route C: manual `managed-settings.json`
 

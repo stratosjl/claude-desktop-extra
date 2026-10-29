@@ -35,7 +35,12 @@ Exit codes: 0 = clean, 1 = ABSORBED/PARTIAL/P2 violation or expired exception,
 Usage:
   scripts/check-upstream-absorbed.py [--patches DIR] <app.asar.contents> [<ion-dist>]
   scripts/check-upstream-absorbed.py tmp/app.asar.contents \\
-      tmp/extract/usr/lib/claude-desktop/resources/ion-dist
+      tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar
+
+<ion-dist> is the 3P-config SPA the nim-dir patches target: the packed
+resources/ion-dist.asar the .deb ships since v4.29.0 (extracted here with the
+`asar` CLI), or an already extracted / pre-4.29.0 ion-dist directory. Without
+it those patches are reported NOT-PROBED; a path that is neither is an error.
 """
 
 import datetime
@@ -90,7 +95,7 @@ def main():
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     app_dir = Path(args[0]).resolve()
-    ion_dir = Path(args[1]).resolve() if len(args) == 2 else None
+    ion_arg = Path(args[1]).resolve() if len(args) == 2 else None
     build = app_dir / ".vite" / "build"
     if not build.is_dir():
         print(f"[ERROR] no .vite/build under {app_dir}", file=sys.stderr)
@@ -103,6 +108,36 @@ def main():
         )
         sys.exit(2)
 
+    with tempfile.TemporaryDirectory() as ion_td:
+        ion_dir = stage_ion_dist(ion_arg, Path(ion_td))
+        probe(patches_dir, app_dir, ion_dir)
+
+
+def stage_ion_dist(ion_arg: Path | None, scratch: Path) -> Path | None:
+    """Return a directory holding the pristine ion-dist SPA, or None if no
+    ion-dist argument was given. A packed ion-dist.asar is extracted into
+    `scratch`; a path that is neither an .asar file nor a directory exits 2."""
+    if ion_arg is None:
+        return None
+    if ion_arg.is_dir():
+        return ion_arg
+    if ion_arg.is_file() and ion_arg.suffix == ".asar":
+        if shutil.which("asar") is None:
+            print(f"[ERROR] `asar` CLI not found (needed to extract {ion_arg.name})", file=sys.stderr)
+            sys.exit(2)
+        out = scratch / "ion-dist"
+        r = subprocess.run(
+            ["asar", "extract", str(ion_arg), str(out)], capture_output=True, text=True
+        )
+        if r.returncode != 0 or not (out / "index.html").is_file():
+            print(f"[ERROR] could not extract {ion_arg}: {r.stderr.strip()}", file=sys.stderr)
+            sys.exit(2)
+        return out
+    print(f"[ERROR] ion-dist {ion_arg} is neither a directory nor an .asar file", file=sys.stderr)
+    sys.exit(2)
+
+
+def probe(patches_dir: Path, app_dir: Path, ion_dir: Path | None):
     rows = []  # (verdict, name, detail, idempotent: bool | None)
     by_target = {}
     for pf in ap.discover_patch_files(patches_dir):
@@ -114,8 +149,9 @@ def main():
             print(f"[ERROR] {binp} not compiled (cd patches && make)", file=sys.stderr)
             sys.exit(2)
         if ptype == "nim-dir":
-            if ion_dir is None or not ion_dir.is_dir():
-                rows.append(("NOT-PROBED", pf.name, ["pass the ion-dist dir"], None))
+            if ion_dir is None:
+                hint = "pass resources/ion-dist.asar (or an extracted ion-dist dir)"
+                rows.append(("NOT-PROBED", pf.name, [hint], None))
                 continue
             with tempfile.TemporaryDirectory() as td:
                 work = Path(td) / "ion-dist"

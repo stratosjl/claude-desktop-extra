@@ -30,11 +30,12 @@ A skill is more than a saved prompt:
 | `/fresh-upstream` | manual | you need a clean unpatched bundle to inspect |
 | `/debug` | manual | something is broken and you need the evidence |
 | `/comment` | manual | you want to reply to an issue reporter and ask for the evidence we still need |
+| `/check-issue` | manual | one or more bug reports should go from triage to a shipped, released fix (self-improving) |
 | `/test-native` | auto / manual | a report comes from a session type the host does not run (Wayland/sway, hidden workspaces, XWayland vs native), or a value must be measured inside the running app with an injected probe |
 
 ### How the skills connect
 
-The three **reference** skills (`/linux`, `/architecture`, `/3p`) hold durable domain knowledge and auto-inject; the six **action** skills consume them. The wiring is intentionally minimal - these are the links that earn their place:
+The three **reference** skills (`/linux`, `/architecture`, `/3p`) hold durable domain knowledge and auto-inject; the seven **action** skills consume them. The wiring is intentionally minimal - these are the links that earn their place:
 
 ```
 fresh-upstream ──▶ update ──▶ deploy        new-version pipeline
@@ -49,6 +50,7 @@ fresh-upstream ──▶ update ──▶ deploy        new-version pipeline
 - `debug` bottoms out at a patch/upstream cause → `/fresh-upstream` + `/update`.
 - `deploy` redirects version/patch work → `/update` (it only fires the pipeline).
 - `debug` runs out of local evidence → `/comment` asks the reporter for theirs; `deploy` ships a fix for an issue → `/comment` tells them what to upgrade to and what to send back.
+- `check-issue` drives a bug report end to end: `/test-native` to reproduce, `/deploy force` to release, `/comment` for every reporter reply. Its last step rewrites its own phases with what the run taught.
 - `/linux` ↔ `/architecture` link each other (complementary references); `/debug` cites both because, being manual-only, it won't auto-pull them and genuinely needs the CU cascade + Cowork backend context.
 
 ### `/linux` - Linux compatibility reference
@@ -101,4 +103,18 @@ fresh-upstream ──▶ update ──▶ deploy        new-version pipeline
 **What:** Reads the issue thread, then drafts a reply in the house voice: short, factual, friendly, one copy-pasteable command block, at most one bolded question. Prints the draft and stops; posts via `gh issue comment --body-file` only after you approve.
 **When:** A reporter needs an answer, or a release shipped something they should test.
 **Why:** The rules are the point - no attributing the cause to our own patches, no reproduction narratives, no speculation, no correcting their diagnosis unless they need it to gather the right data. The goal is that they send facts back, and everything that doesn't serve that gets deleted.
+
+### `/check-issue` - bug report to shipped fix
+**What:** Orchestrates the whole loop for one or more issues:
+- read the body, comments and `--diagnose` gists
+- parallel read-only investigations that answer "ours or upstream?" and reproduce on Xvfb or headless sway without touching your running app
+- a spec with a Linux-compatibility section, agreed with you
+- parallel implementers, with worktrees for shared files, then per-task and final reviews
+- the integration gate
+- a live check on the installed package
+- bridge repos pushed before the main repo, then commit, `force_rebuild` release, and `/comment`-voice replies that close the fixed issues
+
+Every run ends by folding its lessons back into the skill's own phases. Lessons are edited into the phases, not appended, and stale lines are pruned.
+**When:** New bug reports arrive that need a fix and a release, not just evidence (that is `/debug` + `/comment`).
+**Why:** The workflow has many traps that are easy to repeat: a chat has no Computer Use tools, `make` does not track `js/`, bridges must be pushed first, and an ask for data must be one action plus one command. The self-improve step keeps the next run from paying for them again.
 

@@ -156,10 +156,13 @@ printf '{"tag":"%%s","format":"rpm"}\n' "$cdb_tag" \
 chmod 0644 %{buildroot}/usr/lib/claude-desktop/resources/cdb-release.json
 
 # RHEL 9 / Rocky / Alma: qemu-kvm installs QEMU only as /usr/libexec/qemu-kvm,
-# but the Cowork probe and cowork-linux-helper look up qemu-system-<arch> on
-# PATH. The launcher appends this dir to PATH only when no qemu-system-<arch> is
-# on PATH and /usr/libexec/qemu-kvm exists, so Fedora's real qemu-system-* always
-# wins. Dangling (harmless) where qemu-kvm is not installed. The helper's qemu
+# but the Cowork probe looks for qemu-system-<arch>: $CLAUDE_QEMU_PATH, then
+# /usr/bin (upstream's only candidate since 4.29.0), then each PATH dir (our
+# fix_cowork_firmware_paths_linux fallback), and hands the hit to
+# cowork-linux-helper. The launcher appends this dir to PATH only when no
+# qemu-system-<arch> is on PATH and /usr/libexec/qemu-kvm exists, so Fedora's
+# real /usr/bin/qemu-system-* always wins. Dangling (harmless) where qemu-kvm is
+# not installed. The helper's qemu
 # command line (q35, vhost-vsock, vhost-user-fs, memfd backend) boots unchanged
 # on RHEL 9 qemu-kvm 10.1 (verified x86_64 on rockylinux:9, 2026-09-23).
 mkdir -p %{buildroot}/usr/lib/claude-desktop/qemu-shim

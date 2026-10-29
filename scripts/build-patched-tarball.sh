@@ -5,7 +5,7 @@
 # Anthropic now ships an official Linux .deb (amd64 + arm64) via the apt repo at
 # https://downloads.claude.ai/claude-desktop/apt/stable/ . It already bundles
 # Electron, chrome-sandbox, a Linux node-pty + @ant/claude-native binding, the
-# tray icons, ion-dist, fonts, cowork-linux-helper, virtiofsd and smol-bin.x64.img.
+# tray icons, ion-dist.asar, fonts, cowork-linux-helper, virtiofsd and smol-bin.x64.img.
 # We no longer download/verify Electron or rebuild node-pty for Linux — we ingest
 # the .deb, apply our Linux JS patches to app.asar, and repack into a distributable
 # tarball that the per-distro packagers (deb/rpm/appimage/nix/AUR) consume.
@@ -409,6 +409,49 @@ if ! grep -q '"desktopName": *"com.anthropic.Claude.desktop"' "$PKG_JSON"; then
 fi
 log_info "desktopName is upstream com.anthropic.Claude.desktop (no pin)"
 
+# ion-dist (the 3P-config SPA served on app://localhost): since v4.29.0 the .deb
+# ships it PACKED as resources/ion-dist.asar (upstream's main bundle joins
+# process.resourcesPath with "ion-dist.asar" when app.isPackaged, requires it to
+# be a regular file via original-fs lstat, and reads index.html etc. through the
+# asar-aware fs). Older releases shipped a plain resources/ion-dist/ directory.
+# Stage it as a directory here so the absorption probe and the nim-dir patches
+# see the same tree; an asar is extracted into the work dir (never the shipped
+# tree) and repacked to its upstream path after patching. Neither form present
+# is a hard failure: silently skipping would ship the SPA unpatched.
+ION_ASAR="$TREE_DIR/resources/ion-dist.asar"
+ION_UPSTREAM_DIR="$TREE_DIR/resources/ion-dist"
+if [ -e "$ION_ASAR" ] && [ -e "$ION_UPSTREAM_DIR" ]; then
+    log_error "upstream ships BOTH resources/ion-dist.asar and resources/ion-dist/ - re-audit which one the main bundle serves before patching either"
+    exit 1
+elif [ -e "$ION_ASAR" ]; then
+    if [ -L "$ION_ASAR" ] || [ ! -f "$ION_ASAR" ]; then
+        log_error "resources/ion-dist.asar is not a regular file (upstream lstat-checks it) - the .deb layout moved"
+        exit 1
+    fi
+    # The repack below writes every file into the archive; an upstream --unpack
+    # layout (ion-dist.asar.unpacked/ + "unpacked" header flags) would be lost.
+    if [ -e "$ION_ASAR.unpacked" ]; then
+        log_error "upstream ships resources/ion-dist.asar.unpacked - teach the ion-dist repack its --unpack layout before shipping"
+        exit 1
+    fi
+    ION_FORMAT=asar
+    ION_DIST_DIR="$WORK_DIR/ion-dist"
+    rm -rf "$ION_DIST_DIR"
+    log_info "Extracting ion-dist.asar..."
+    asar extract "$ION_ASAR" "$ION_DIST_DIR"
+elif [ -d "$ION_UPSTREAM_DIR" ]; then
+    ION_FORMAT=dir
+    ION_DIST_DIR="$ION_UPSTREAM_DIR"
+else
+    log_error "ion-dist not found in upstream resources (neither ion-dist.asar nor ion-dist/) - the .deb layout moved; re-audit the 3P-config SPA and the ion-dist patches"
+    exit 1
+fi
+if [ ! -f "$ION_DIST_DIR/index.html" ] || [ ! -d "$ION_DIST_DIR/assets/v1" ]; then
+    log_error "staged ion-dist ($ION_FORMAT) has no index.html or assets/v1/ - the SPA layout moved"
+    exit 1
+fi
+log_info "ion-dist staged from $ION_FORMAT: $(find "$ION_DIST_DIR" -type f | wc -l) files"
+
 # Compile Nim patches (native build or Docker fallback)
 log_info "Compiling Nim patches..."
 "$SCRIPT_DIR/compile-nim-patches.sh" "$PATCHES_DIR"
@@ -419,7 +462,7 @@ log_info "Compiling Nim patches..."
 # green while we carry a dead patch. Audit it, then git rm it.
 log_info "Probing for patches upstream already absorbed..."
 if ! python3 "$SCRIPT_DIR/check-upstream-absorbed.py" --patches "$PATCHES_DIR" \
-    "$APP_DIR/app.asar.contents" "$TREE_DIR/resources/ion-dist"; then
+    "$APP_DIR/app.asar.contents" "$ION_DIST_DIR"; then
     log_error "Absorption probe failed - see AGENTS.md Rule 4 (audit, then remove the patch)"
     exit 1
 fi
@@ -507,31 +550,70 @@ chmod +x "$TREE_DIR/resources/claude-ssh/claude-ssh-"* 2>/dev/null || true
 # Apply ion-dist patches: every `@patch-type: nim-dir` patch targeting
 # resources/ion-dist, in basename order like the orchestrator (the SPA has
 # content-hashed filenames, so each patch finds its target file by content).
-ION_DIST_DIR="$TREE_DIR/resources/ion-dist"
-if [ -d "$ION_DIST_DIR" ]; then
-    mapfile -t ION_DIST_PATCHES < <(
-        grep -l '^# @patch-target: resources/ion-dist$' "$PATCHES_DIR"/*/*.nim \
-            | xargs -r grep -l '^# @patch-type: nim-dir$' \
-            | awk -F/ '{print $NF "\t" $0}' | LC_ALL=C sort | cut -f2
-    )
-    if [ "${#ION_DIST_PATCHES[@]}" -eq 0 ]; then
-        log_error "no ion-dist (nim-dir) patches found under $PATCHES_DIR"
+# $ION_DIST_DIR was staged above (an extract of ion-dist.asar, or the upstream
+# directory itself on older releases).
+mapfile -t ION_DIST_PATCHES < <(
+    grep -l '^# @patch-target: resources/ion-dist$' "$PATCHES_DIR"/*/*.nim \
+        | xargs -r grep -l '^# @patch-type: nim-dir$' \
+        | awk -F/ '{print $NF "\t" $0}' | LC_ALL=C sort | cut -f2
+)
+if [ "${#ION_DIST_PATCHES[@]}" -eq 0 ]; then
+    log_error "no ion-dist (nim-dir) patches found under $PATCHES_DIR"
+    exit 1
+fi
+log_info "Applying ${#ION_DIST_PATCHES[@]} ion-dist patch(es)..."
+for src in "${ION_DIST_PATCHES[@]}"; do
+    bin="${src%.nim}"
+    if [ ! -x "$bin" ]; then
+        log_error "ion-dist patch binary not compiled: $bin (cd patches && make)"
         exit 1
     fi
-    log_info "Applying ${#ION_DIST_PATCHES[@]} ion-dist patch(es)..."
-    for src in "${ION_DIST_PATCHES[@]}"; do
-        bin="${src%.nim}"
-        if [ ! -x "$bin" ]; then
-            log_error "ion-dist patch binary not compiled: $bin (cd patches && make)"
-            exit 1
-        fi
-        if ! "$bin" "$ION_DIST_DIR"; then
-            log_error "ion-dist patch failed: $(basename "$src")"
-            exit 1
-        fi
-    done
-else
-    log_warn "ion-dist not found in upstream resources - skipping"
+    if ! "$bin" "$ION_DIST_DIR"; then
+        log_error "ion-dist patch failed: $(basename "$src")"
+        exit 1
+    fi
+done
+
+# Repack the patched SPA to upstream's own path (resources/ion-dist.asar) so the
+# tree stays verbatim apart from the archive's contents. No --unpack: upstream
+# ships none (guarded above). Electron's asar integrity fuse does not cover this
+# archive on Linux and nothing in the main bundle hash-checks it; @electron/asar
+# writes fresh per-file integrity entries into the header anyway.
+if [ "$ION_FORMAT" = asar ]; then
+    log_info "Repacking ion-dist.asar..."
+    ION_FILES="$(find "$ION_DIST_DIR" -type f | wc -l)"
+    rm -f "$WORK_DIR/ion-dist.asar"
+    asar pack "$ION_DIST_DIR" "$WORK_DIR/ion-dist.asar"
+    # Read the new archive back: it must list index.html and every staged file,
+    # and flag nothing as unpacked. `asar list --is-pack` prints
+    # "pack   : /path" or "unpack : /path" per entry (directories included).
+    ION_LIST="$WORK_DIR/ion-dist.list"
+    if ! asar list --is-pack "$WORK_DIR/ion-dist.asar" > "$ION_LIST"; then
+        log_error "repacked ion-dist.asar is not readable by asar"
+        exit 1
+    fi
+    if grep -q '^unpack ' "$ION_LIST"; then
+        log_error "repacked ion-dist.asar flags unpacked files (none expected)"
+        exit 1
+    fi
+    if ! grep -qx 'pack *: /index.html' "$ION_LIST"; then
+        log_error "repacked ion-dist.asar has no /index.html"
+        exit 1
+    fi
+    ION_MISSING="$(LC_ALL=C comm -23 \
+        <(cd "$ION_DIST_DIR" && find . -type f | sed 's|^\.||' | LC_ALL=C sort) \
+        <(sed -n 's/^pack *: //p' "$ION_LIST" | LC_ALL=C sort) | wc -l)"
+    if [ "$ION_MISSING" -ne 0 ]; then
+        log_error "repacked ion-dist.asar is missing $ION_MISSING of $ION_FILES staged files"
+        exit 1
+    fi
+    mv -f "$WORK_DIR/ion-dist.asar" "$ION_ASAR"
+    if [ -L "$ION_ASAR" ] || [ ! -f "$ION_ASAR" ]; then
+        log_error "resources/ion-dist.asar is not a regular file after the repack"
+        exit 1
+    fi
+    rm -rf "$ION_DIST_DIR" "$ION_LIST"
+    log_info "ion-dist.asar repacked: $ION_FILES files, $(du -h "$ION_ASAR" | cut -f1)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

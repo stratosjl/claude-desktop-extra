@@ -1,36 +1,51 @@
 #!/usr/bin/env node
-// RHEL-family Cowork: the launcher puts our qemu shim dir on PATH only when the
-// app's own qemu lookup would fail and RHEL's qemu-kvm is installed.
+// Cowork's QEMU lookup on Linux: the app-side probe (our patch) and the
+// launcher-side RHEL shim.
 //
 // WHY THIS EXISTS
 // ---------------
-// Upstream's Cowork probe walks process.env.PATH for `qemu-system-x86_64`
-// (`qemu-system-aarch64` on arm64), checking X_OK on each `<dir>/<name>`; the
-// native cowork-linux-helper then execs that same name. RHEL 9 / Rocky / Alma
-// ship QEMU only as /usr/libexec/qemu-kvm (package qemu-kvm-core), so the probe
-// reports "Cowork requires QEMU" even with qemu-kvm installed. Booted
-// 2026-09-23 on rockylinux:9 (qemu-kvm 10.1.0-17.el9_8.5) through a
-// `qemu-system-x86_64 -> /usr/libexec/qemu-kvm` symlink: the helper's exact
-// command line (-machine q35,accel=kvm, vhost-vsock-pci, vhost-user-fs-pci,
-// memory-backend-memfd, -sandbox on) runs unchanged and the guest reports ready.
+// The Cowork capability probe needs an executable qemu-system-x86_64
+// (qemu-system-aarch64 on arm64); without one Cowork is "unsupported". The
+// resolved absolute path is passed to cowork-linux-helper, which execs it.
+// Up to 3.6556.2 upstream walked process.env.PATH for the name. From 4.29.0 it
+// only checks /usr/bin/qemu-system-<arch>, which loses every QEMU elsewhere:
+// RHEL's qemu-kvm (via our rpm shim), NixOS (${qemu}/bin), /usr/local/bin.
+// patches/linux/fix_cowork_firmware_paths_linux sub-patch D restores the lookup
+// as: CLAUDE_QEMU_PATH (absolute), then upstream's /usr/bin path, then
+// <dir>/qemu-system-<arch> for each absolute PATH dir, first X_OK hit wins.
+//
+// RHEL 9 / Rocky / Alma ship QEMU only as /usr/libexec/qemu-kvm (package
+// qemu-kvm-core). Booted 2026-09-23 on rockylinux:9 (qemu-kvm
+// 10.1.0-17.el9_8.5) through a `qemu-system-x86_64 -> /usr/libexec/qemu-kvm`
+// symlink: the helper's exact command line (-machine q35,accel=kvm,
+// vhost-vsock-pci, vhost-user-fs-pci, memory-backend-memfd, -sandbox on) runs
+// unchanged and the guest reports ready.
 //
 // The rpm ships /usr/lib/claude-desktop/qemu-shim/qemu-system-<arch> symlinks.
-// The launcher appends that dir to PATH, and only when all of these hold:
+// The launcher appends that dir to PATH (where the patched probe's PATH step
+// finds it), and only when all of these hold:
 //   - no executable qemu-system-<arch> is on PATH (a real QEMU always wins,
 //     so Fedora/Arch/Debian behavior is unchanged),
 //   - /usr/libexec/qemu-kvm is executable,
 //   - the shim exists (only the rpm ships it).
 //
-// This harness extracts the real function from the launcher and runs it
-// against scratch directories, and pins the rpm spec + the launcher call site.
+// Q1-Q3 extract the launcher function and run it against scratch directories,
+// and pin the rpm spec + the launcher call site. Q4-Q7 run the compiled patch
+// over upstream's 4.29.0 probe shapes, execute the patched probe against
+// scratch directories with the real fs, and check that the launcher's
+// --diagnose replica (_cowork_qemu_probe) resolves the same path.
 //
 // Exit codes follow the repo convention: 0 = PASS, 3 = SKIP, other = FAIL.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, symlinkSync } from "node:fs";
+import {
+  readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, symlinkSync,
+  accessSync, constants as fsConstants, promises as fsp,
+} from "node:fs";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..", "..");
@@ -122,7 +137,7 @@ check("shim already on PATH (relaunch) -> unchanged",
 check("empty PATH entries are skipped, shim appended",
   run(`::${base}`, "x86_64"), `::${base}:${shim}`);
 
-console.log("Q2: launcher call site");
+console.log("\nQ2: launcher call site");
 const pathExport = launcherSrc.indexOf('\nexport PATH="$_claude_path"\n');
 // Both PATH and _claude_path: the systemd-run scope exec re-sets PATH from
 // _claude_path (--setenv=PATH=...), so updating PATH alone loses the shim there.
@@ -138,7 +153,7 @@ check("scope exec takes PATH from _claude_path (why the call updates it)",
 check("_claude_path is not reassigned after the shim call",
   call > 0 && !/\n\s*_claude_path=/.test(launcherSrc.slice(call + 2)), true);
 
-console.log("Q3: rpm spec ships the shim");
+console.log("\nQ3: rpm spec ships the shim");
 for (const a of ["x86_64", "aarch64"]) {
   const re = new RegExp(
     `%ifarch ${a}\\n(?:.*\\n){0,4}?ln -s /usr/libexec/qemu-kvm %\\{buildroot\\}/usr/lib/claude-desktop/qemu-shim/qemu-system-${a}\\n`);
@@ -154,10 +169,170 @@ for (const [a, fedora] of [["x86_64", "qemu-system-x86"], ["aarch64", "qemu-syst
   check(`spec Recommends (${fedora} or qemu-kvm) under %ifarch ${a}`, re.test(specSrc), true);
 }
 
+// ---------------------------------------------------------------- patch D
+// Upstream's 4.29.0 probe, verbatim shapes (index.chunk-Sq9qOqtc.js). The
+// firmware/virtiofsd arrays are here because the patch requires all four of its
+// sub-patches. `a` (node:fs) and `_` (node:fs/promises, interop-wrapped) are the
+// chunk's own module bindings; the sandbox supplies them with the real fs.
+const FIXTURE = `"use strict";
+var GUn=process.arch==="arm64"?"/usr/bin/qemu-system-aarch64":"/usr/bin/qemu-system-x86_64",KUn=process.arch==="arm64"?["/usr/share/AAVMF/AAVMF_CODE.fd"]:["/usr/share/OVMF/OVMF_CODE_4M.fd","/usr/share/OVMF/OVMF_CODE.fd"],qUn=["/usr/libexec/virtiofsd","/usr/bin/virtiofsd"];async function QUn(e,t=a.constants.R_OK){for(let n of e)try{return await _.default.access(n,t),n}catch{}return null}function rWn(){return(async()=>{let[t,n,r]=await Promise.all([QUn([GUn],a.constants.X_OK),QUn(KUn),QUn(qUn)]);return{qemuPath:t,firmwarePath:n,virtiofsdPath:r}})()}
+globalThis.__fixture={rWn};
+`;
+// 3.6556.2: PATH walk, no /usr/bin constant.
+const OLD_FIXTURE = FIXTURE
+  .replace(/var GUn=[^,]+,/, 'var GUn=process.arch==="arm64"?"qemu-system-aarch64":"qemu-system-x86_64",')
+  .replace("QUn([GUn],a.constants.X_OK)", "bIn(GUn)");
+
+const PATCH_BIN = join(repo, "patches", "linux", "fix_cowork_firmware_paths_linux");
+let patchBin = true;
+try {
+  accessSync(PATCH_BIN, fsConstants.X_OK);
+} catch {
+  patchBin = false;
+}
+
+function runPatch(file) {
+  try {
+    return { status: 0, out: execFileSync(PATCH_BIN, [file], { encoding: "utf8", stdio: "pipe" }) };
+  } catch (e) {
+    return { status: typeof e.status === "number" ? e.status : -1, out: String(e.stdout || "") + String(e.stderr || "") };
+  }
+}
+
+// Scratch host: a fake /usr/bin (the patched literal is pointed at it), an
+// override binary, PATH dirs with a real QEMU, the RHEL shim, a non-executable
+// copy, a dir whose name contains ',' and one reached through a relative entry.
+const fakeUsrBin = join(scratch, "fake-usr-bin");
+const overrideExe = join(scratch, "override", "my-qemu");
+writeExe(overrideExe);
+const overrideNoExec = join(scratch, "override", "noexec-qemu");
+writeExe(overrideNoExec, 0o644);
+const commaDir = join(scratch, "a,b");
+writeExe(join(commaDir, "qemu-system-x86_64"));
+const usrBinX = join(fakeUsrBin, "qemu-system-x86_64");
+const usrBinA = join(fakeUsrBin, "qemu-system-aarch64");
+
+function setUsrBin(present) {
+  rmSync(fakeUsrBin, { recursive: true, force: true });
+  mkdirSync(fakeUsrBin, { recursive: true });
+  if (present) {
+    writeExe(usrBinX);
+    writeExe(usrBinA);
+  }
+}
+
+async function probeJs(src, arch, env) {
+  const sandbox = { process: { arch, env }, a: { constants: fsConstants }, _: { default: fsp }, Promise };
+  vm.runInNewContext(src, vm.createContext(sandbox));
+  return (await sandbox.__fixture.rWn()).qemuPath;
+}
+
+function probeSh(arch, env) {
+  let script;
+  try {
+    script = `${fn("_cowork_qemu_probe")}\n_cowork_qemu_probe "$1" "$2" "$3" "$4"`;
+  } catch (e) {
+    return `ERROR: ${e.message}`;
+  }
+  const bin = arch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
+  const r = spawnSync(BASH, ["-c", script, "x", bin, env.PATH ?? "", env.CLAUDE_QEMU_PATH ?? "", fakeUsrBin], {
+    env: { PATH: "/usr/bin:/bin" }, encoding: "utf8",
+  });
+  if (r.status === 1 && r.stdout === "") return null;
+  if (r.status !== 0) return `EXIT ${r.status}: ${r.stderr}`;
+  return r.stdout.replace(/\n$/, "");
+}
+
+if (!patchBin) {
+  console.log(`\nQ4-Q7: SKIP (${PATCH_BIN.slice(repo.length + 1)} is not compiled; run: cd patches && make -j"$(nproc)")`);
+} else {
+  console.log("\nQ4: sub-patch D applies to the 4.29.0 probe");
+  const file = join(scratch, "index.js");
+  writeFileSync(file, FIXTURE);
+  const r1 = runPatch(file);
+  check("patch exits 0", r1.status, 0);
+  check("patch reports no failure", /\[FAIL\]/.test(r1.out), false);
+  check("first run never says 'already' (absorption probe would read PARTIAL)", /already/i.test(r1.out), false);
+  check("sub-patch D reports its injection", /\[OK\] qemu candidates: injected/.test(r1.out), true);
+  const patched = readFileSync(file, "utf8");
+  check("patched fixture passes node --check",
+    spawnSync(process.execPath, ["--check", file], { encoding: "utf8" }).status, 0);
+  check("exactly one __cdbQemuCandidates", patched.split("function __cdbQemuCandidates(").length - 1, 1);
+  check("upstream's single-candidate call is gone", patched.includes("QUn([GUn],"), false);
+  check("upstream's /usr/bin constant is kept", patched.includes('"/usr/bin/qemu-system-x86_64"'), true);
+
+  console.log("\nQ5: patched probe order (real fs, scratch dirs)");
+  const src = patched
+    .replace('"/usr/bin/qemu-system-x86_64"', JSON.stringify(usrBinX))
+    .replace('"/usr/bin/qemu-system-aarch64"', JSON.stringify(usrBinA));
+  const shimX = join(shim, "qemu-system-x86_64");
+  const shimA = join(shim, "qemu-system-aarch64");
+  const realX = join(realQemuBin, "qemu-system-x86_64");
+  const realA = join(realQemuBin, "qemu-system-aarch64");
+  // [label, usrBin present, arch, env, expected]
+  const cases = [
+    ["override wins over /usr/bin and PATH", true, "x64",
+      { CLAUDE_QEMU_PATH: overrideExe, PATH: realQemuBin }, overrideExe],
+    ["non-executable override falls through to /usr/bin", true, "x64",
+      { CLAUDE_QEMU_PATH: overrideNoExec, PATH: realQemuBin }, usrBinX],
+    ["relative override is ignored", false, "x64",
+      { CLAUDE_QEMU_PATH: "override/my-qemu", PATH: realQemuBin }, realX],
+    ["/usr/bin preferred over PATH", true, "x64", { PATH: realQemuBin }, usrBinX],
+    ["/usr/bin preferred over PATH (arm64)", true, "arm64", { PATH: realQemuBin }, usrBinA],
+    ["no /usr/bin: PATH fallback finds the RHEL shim", false, "x64", { PATH: `${sysBin}:${shim}` }, shimX],
+    ["no /usr/bin: PATH fallback finds the RHEL shim (arm64)", false, "arm64", { PATH: `${sysBin}:${shim}` }, shimA],
+    ["first executable PATH hit wins", false, "x64", { PATH: `${realQemuBin}:${shim}` }, realX],
+    ["non-executable PATH entry skipped", false, "x64", { PATH: `${noExecBin}:${shim}` }, shimX],
+    ["trailing slash in PATH dir normalized", false, "x64", { PATH: `${shim}//` }, shimX],
+    ["relative and empty PATH entries skipped", false, "x64",
+      { PATH: `::${relative(process.cwd(), realQemuBin)}:${shim}` }, shimX],
+    ["PATH dir containing ',' skipped (helper rejects ',' and '=')", false, "x64",
+      { PATH: `${commaDir}:${shim}` }, shimX],
+    ["nothing found -> null", false, "x64", { PATH: `${sysBin}:/nonexistent` }, null],
+    ["unset PATH, no /usr/bin -> null", false, "x64", {}, null],
+  ];
+  const results = [];
+  for (const [label, usrBin, arch, env, expected] of cases) {
+    setUsrBin(usrBin);
+    const got = await probeJs(src, arch, env);
+    check(label, got, expected);
+    results.push([label, usrBin, arch, env, got]);
+  }
+
+  console.log("\nQ6: idempotency and fail-loud");
+  const again = join(scratch, "again.js");
+  writeFileSync(again, patched);
+  const r2 = runPatch(again);
+  check("second run exits 0", r2.status, 0);
+  check("second run changes nothing", readFileSync(again, "utf8") === patched, true);
+  check("second run asserts D positively", /\[OK\] qemu candidates:.*already present/.test(r2.out), true);
+  const old = join(scratch, "old.js");
+  writeFileSync(old, OLD_FIXTURE);
+  check("3.6556.2 shape (PATH walk, no /usr/bin constant) -> exit 1", runPatch(old).status, 1);
+  const two = join(scratch, "two.js");
+  writeFileSync(two, FIXTURE.replace("QUn(KUn)", "QUn([GUn],a.constants.X_OK)"));
+  check("two probe calls -> exit 1", runPatch(two).status, 1);
+  const half = join(scratch, "half.js");
+  writeFileSync(half, patched.replace("__cdbQemuCandidates", "__cdbQemuCandidatez"));
+  check("marker altered (not our end state) -> exit 1", runPatch(half).status, 1);
+
+  console.log("\nQ7: launcher --diagnose replica resolves the same path");
+  for (const [label, usrBin, arch, env, got] of results) {
+    setUsrBin(usrBin);
+    check(`_cowork_qemu_probe: ${label}`, probeSh(arch, env), got);
+  }
+  check("--diagnose calls _cowork_qemu_probe with CLAUDE_QEMU_PATH",
+    launcherSrc.includes('_qemu_path="$(_cowork_qemu_probe "$_qemu_bin" "${PATH:-}" "${CLAUDE_QEMU_PATH:-}")"'), true);
+}
+
 rmSync(scratch, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log("FAIL:", failures.join("; "));
   process.exit(1);
+}
+if (!patchBin) {
+  console.log("SKIP (launcher checks passed; patch checks need the compiled patch)");
+  process.exit(3);
 }
 console.log("PASS");

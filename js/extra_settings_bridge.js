@@ -74,16 +74,6 @@
       return ipcRenderer.invoke("cdb-flags:unset", id);
     },
 
-    // Cowork glow. set() takes only the fixed strings "pulse"/"calm"; the main
-    // side re-validates and rejects anything else, so the page cannot smuggle a
-    // stylesheet or an arbitrary opacity through here.
-    glowRead: function () {
-      return ipcRenderer.invoke("cdb-glow:read");
-    },
-    glowSet: function (mode) {
-      return ipcRenderer.invoke("cdb-glow:set", String(mode));
-    },
-
     // Theme picker (Ctrl+Shift+T). The window and the hotkey are owned by
     // patches/community/add_feature_theme_picker.nim; these two channels only
     // read and persist the pref, which that patch re-reads on every press.
@@ -301,6 +291,37 @@
     },
     deploySaveRaw: function (text) {
       return ipcRenderer.invoke("cdb-deploy:save-raw", String(text));
+    },
+
+    // Computer Use on a background display (issue #300). The key lives in our
+    // settings file and the executor reads it at every Computer Use start; all
+    // channels are owned by the settings patch. set() takes {enabled, kind,
+    // display} only - never an env map, which only a hand-edited file may carry.
+    // probe/thumbnail/test take a kind ("x11"/"wlroots") and a display; the
+    // main side re-validates both and refuses the user's own desktop. An empty
+    // kind/display in test() means the configured display.
+    cuBackgroundRead: function () {
+      return ipcRenderer.invoke("cdb-cubg:read");
+    },
+    cuBackgroundSet: function (cfg) {
+      return ipcRenderer.invoke("cdb-cubg:set", cfg && typeof cfg === "object" ? {
+        enabled: cfg.enabled === true, kind: String(cfg.kind || ""), display: String(cfg.display || "")
+      } : {});
+    },
+    cuBackgroundCandidates: function () {
+      return ipcRenderer.invoke("cdb-cubg:candidates");
+    },
+    cuBackgroundProbe: function (kind, display) {
+      return ipcRenderer.invoke("cdb-cubg:probe", String(kind || ""), String(display || ""));
+    },
+    cuBackgroundThumbnail: function (kind, display) {
+      return ipcRenderer.invoke("cdb-cubg:thumbnail", String(kind || ""), String(display || ""));
+    },
+    cuBackgroundTest: function (kind, display) {
+      return ipcRenderer.invoke("cdb-cubg:test", String(kind || ""), String(display || ""));
+    },
+    cuBackgroundTools: function () {
+      return ipcRenderer.invoke("cdb-cubg:tools");
     },
 
     // Open one of the files this package writes, or show it in the file manager.

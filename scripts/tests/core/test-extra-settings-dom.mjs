@@ -325,8 +325,7 @@ async function featuresPanel(featuresItem) {
     ok(!!rs && rs.classList.contains("cdbx-hide"), "a hidden Restart now next to the switch: " + label);
   });
   [
-    "show the Code tab's side panels as tabs instead of a split layout",
-    "calm the Cowork glow"
+    "show the Code tab's side panels as tabs instead of a split layout"
   ].forEach(function (label) {
     const sw = panel.querySelector('.cdbx-switch[aria-label="' + label + '"]');
     ok(!!sw, "renders the live row: " + label);
@@ -775,16 +774,6 @@ async function featuresPanel(featuresItem) {
   featuresItem.click();
   await sleep(200);
 
-  const glow = panel.querySelector(".cdbx-switch[aria-label='calm the Cowork glow']");
-  ok(!!glow, "the Cowork glow switch renders in the Community Features panel");
-  if (glow) {
-    ok(glow.getAttribute("aria-checked") === "false", "the glow switch reflects mode 'pulse'");
-    ok(!glow.disabled, "the glow switch is enabled when the .jsonc does not set it");
-    glow.click();
-    await sleep(60);
-    ok(glow.getAttribute("aria-checked") === "true", "clicking the glow switch turns it on");
-  }
-
   // The theme picker: the only switch that is on with nothing on disk, because
   // the shortcut is how a fresh install finds the themes at all.
   const pickSel = ".cdbx-switch[aria-label='open the theme gallery with Ctrl+Shift+T']";
@@ -882,8 +871,8 @@ async function featuresPanel(featuresItem) {
     ok(visible().join(",") === "Shortcuts",
        "a note match works too: " + visible().join(","));
 
-    await type("motion");
-    ok(visible().join(",") === "Motion", "so does a section match: " + visible().join(","));
+    await type("source control");
+    ok(visible().join(",") === "Source control", "so does a section match: " + visible().join(","));
 
     await type("no such feature");
     ok(visible().length === 0, "a needle nothing matches hides every row");
@@ -973,6 +962,243 @@ async function featuresPanel(featuresItem) {
 // The Models panel: providers and models drawn from the bridge's state, the
 // forms that write them back, and the write-only key. Every assertion is
 // observable DOM or a recorded bridge call.
+// Computer Use on a background display (issue #300): the Experimental row and
+// the setup page behind its Set up button. Pinned here: the row only exists
+// with the whole cuBackground* bridge, a .jsonc lock makes the row AND the page
+// read-only, the user's own desktop is listed but never selectable or probed,
+// and previews are taken only on request.
+async function cubgPanel(featuresItem) {
+  const SW = '.cdbx-switch[aria-label="let Computer Use work on a background display instead of your desktop"]';
+  const base = window.__cubgBase;
+  async function remount() {
+    document.getElementById("row-account").click();
+    await sleep(20);
+    featuresItem.click();
+    await sleep(50);
+    return document.querySelector(".cdbx-panel");
+  }
+  async function openSetup(panel) {
+    const sw = panel.querySelector(SW);
+    const btn = sw && Array.prototype.filter.call(sw.closest(".cdbx-row").querySelectorAll(".cdbx-btn"),
+      function (b) { return b.textContent === "Set up"; })[0];
+    ok(!!btn, "the row carries a Set up button");
+    if (!btn) return null;
+    btn.click();
+    await sleep(60);
+    return document.querySelector(".cdbx-panel .cdbx-cubg");
+  }
+
+  window.__cubgState = Object.assign({}, base);
+  let panel = await remount();
+  let sw = panel.querySelector(SW);
+  ok(!!sw, "renders the background display row");
+  if (!sw) return;
+  let row = sw.closest(".cdbx-row");
+  const badge = row.querySelector(".cdbx-id .cdbx-exp");
+  ok(!!badge && badge.textContent === "Experimental", "the title carries the Experimental badge");
+  ok(row.querySelector(".cdbx-id").firstChild.textContent === "Computer Use on a background display", "titled Computer Use on a background display");
+  ok(/next Computer Use start/.test(row.querySelector(".cdbx-note").textContent), "the note says it applies from the next Computer Use start");
+  ok(row.querySelector(".cdbx-state").textContent === "off - no display chosen yet (Set up)",
+     "state with nothing chosen: " + row.querySelector(".cdbx-state").textContent);
+  ok(!sw.disabled, "the switch is usable when the .jsonc does not lock it");
+
+  const restartOf = function (r) {
+    return Array.prototype.filter.call(r.querySelectorAll(".cdbx-row-aside .cdbx-btn"),
+      function (x) { return x.textContent === "Restart now"; })[0] || null;
+  };
+  const rs0 = restartOf(row);
+  ok(!rs0 || rs0.classList.contains("cdbx-hide"), "off KDE: no Restart now on the row");
+
+  // A KDE session that started in kwin mode: the row is a restart row.
+  window.__cubgState = Object.assign({}, base, { config: { enabled: false, kind: "x11", display: ":99" },
+    startedWith: { enabled: false, kwinMode: true, kdeWayland: true, restartOnChange: true } });
+  panel = await remount();
+  sw = panel.querySelector(SW);
+  row = sw.closest(".cdbx-row");
+  const rs = restartOf(row);
+  ok(!!rs && rs.classList.contains("cdbx-hide"), "kwin session, nothing flipped: Restart now present but hidden");
+  sw.click();
+  await sleep(30);
+  ok(!!rs && !rs.classList.contains("cdbx-hide") && /after a restart/.test(row.querySelector(".cdbx-state").textContent),
+     "kwin session: flipping on shows Restart now and says after a restart: " + row.querySelector(".cdbx-state").textContent);
+  sw.click();
+  await sleep(30);
+  ok(!!rs && rs.classList.contains("cdbx-hide"), "and flipping back hides it again");
+  window.__cubgState = Object.assign({}, base, { enabled: true, config: { enabled: true, kind: "x11", display: ":99" },
+    startedWith: { enabled: false, kwinMode: true, kdeWayland: true, restartOnChange: true } });
+  panel = await remount();
+  const pg = await openSetup(panel);
+  ok(/takes effect after a restart/.test(row.querySelector(".cdbx-note").textContent) &&
+     !/next Computer Use start/.test(row.querySelector(".cdbx-note").textContent),
+     "kwin session: the row note says a restart, not the next Computer Use start");
+  ok(!!pg && /takes effect after a restart/.test(document.querySelector(".cdbx-panel .cdbx-sub").textContent),
+     "kwin session: so does the setup page intro");
+  ok(!!pg && !!pg.querySelector(".cdbx-cubg-restart") &&
+     Array.prototype.some.call(pg.querySelectorAll(".cdbx-cubg-restart .cdbx-btn"), function (x) { return x.textContent === "Restart now"; }),
+     "kwin session, saved differs from start: the setup page offers Restart now");
+  window.__cubgCalls = { set: [], thumb: [], probe: [], test: 0 };
+
+  // Partial install: one channel missing in the preload -> no row at all.
+  const savedProbe = window.cdbExtra.cuBackgroundProbe;
+  delete window.cdbExtra.cuBackgroundProbe;
+  panel = await remount();
+  ok(!panel.querySelector(SW) && !/background display/.test(panel.textContent),
+     "an older preload without the whole cuBackground* bridge gets no row");
+  window.cdbExtra.cuBackgroundProbe = savedProbe;
+
+  // The downstream Windows build: the main side answers "Linux only".
+  window.__cubgState = { ok: false, error: "Computer Use on a background display is Linux only" };
+  panel = await remount();
+  ok(!panel.querySelector(SW) && !/background display/.test(panel.textContent) &&
+     !/Computer Use$/m.test(Array.prototype.map.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return n.textContent; }).join("\n")),
+     "a 'Linux only' read hides the row and its section heading");
+
+  // Locked by the hand-edited .jsonc: switch disabled, page read-only.
+  window.__cubgState = Object.assign({}, base, { enabled: true, lockedByJsonc: true, source: "jsonc",
+    config: { enabled: true, kind: "x11", display: ":99" }, path: "/home/u/.config/Claude/claude-desktop-extra.jsonc" });
+  panel = await remount();
+  sw = panel.querySelector(SW);
+  ok(!!sw && sw.disabled && sw.getAttribute("aria-checked") === "true", "locked: the switch shows on and is disabled");
+  ok(!!sw && /set in claude-desktop-extra\.jsonc$/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent),
+     "locked: the state line names the file: " + (sw ? sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent : ""));
+  let page = await openSetup(panel);
+  ok(!!page, "Set up opens the setup page in the same panel");
+  if (page) {
+    ok(!!page.querySelector(".cdbx-cubg-locked") && /read-only/.test(page.querySelector(".cdbx-cubg-locked").textContent),
+       "locked: the page says it is read-only and why");
+    const lp = page.querySelector(".cdbx-cubg-locked .cdbx-pathlink");
+    ok(!!lp && lp.textContent.endsWith("claude-desktop-extra.jsonc"), "locked: and links the .jsonc");
+    const picks = page.querySelectorAll(".cdbx-cubg-select");
+    ok(picks.length === 5 && Array.prototype.every.call(picks, function (b) { return b.disabled; }),
+       "locked: every Select is disabled (" + picks.length + ")");
+    ok(!Array.prototype.some.call(page.querySelectorAll(".cdbx-btn"), function (b) { return b.textContent === "Turn off"; }),
+       "locked: no Turn off button");
+  }
+
+  // Unlocked, nothing chosen.
+  window.__cubgState = Object.assign({}, base);
+  window.__cubgCalls = { set: [], thumb: [], probe: [], test: 0 };
+  panel = await remount();
+  page = await openSetup(panel);
+  if (!page) return;
+  ok(document.querySelector(".cdbx-panel .cdbx-h1").textContent.indexOf("Computer Use on a background display") === 0 &&
+     !!document.querySelector(".cdbx-panel .cdbx-h1 .cdbx-exp"), "the page heading carries the badge too");
+  ok(/Display 1 is your desktop/.test(document.querySelector(".cdbx-panel .cdbx-sub").textContent) &&
+     /You start display 2 yourself/.test(document.querySelector(".cdbx-panel .cdbx-sub").textContent),
+     "the intro explains display 1 vs display 2 and who starts it");
+  const own = page.querySelector('.cdbx-cubg-cand[data-display=":0"]');
+  ok(!!own && /your desktop/.test(own.textContent), "the own desktop is listed and labelled");
+  ok(!!own && !own.querySelector(".cdbx-cubg-select") && !own.querySelector(".cdbx-cubg-preview"),
+     "the own desktop has no Select and no preview");
+  ok(window.__cubgCalls.probe.indexOf(":0") < 0, "the own desktop is never probed: " + window.__cubgCalls.probe.join(","));
+  ok(window.__cubgCalls.thumb.length === 0, "opening the page takes no preview");
+  const c99 = page.querySelector('.cdbx-cubg-cand[data-display=":99"]');
+  ok(!!c99 && /1280x800, 1 output, supported, window manager: Xfwm4/.test(c99.textContent),
+     "a candidate shows the probe: " + (c99 ? c99.querySelector(".cdbx-state").textContent : ""));
+  ok(!!c99 && c99.querySelectorAll(".cdbx-cubg-restr li").length === 2, "and the restrictions as text");
+  const weston = page.querySelector('.cdbx-cubg-cand[data-display="wayland-weston"]');
+  ok(!!weston && weston.querySelector(".cdbx-cubg-select").disabled && /not supported/.test(weston.textContent),
+     "an unsupported display cannot be selected and says why");
+  ok(/Not running/.test(page.querySelector('.cdbx-cubg-cand[data-display=":97"]').textContent), "a dead socket reads Not running");
+  ok(page.querySelector(".cdbx-cubg-test").disabled, "Test is disabled until a display is chosen");
+  ok(/from the next Computer Use start/.test(document.querySelector(".cdbx-panel .cdbx-sub").textContent),
+     "off KDE: the intro says from the next Computer Use start");
+
+  // Remote-supplied strings (bridge errors, WM/compositor names, restriction
+  // text) are text, never markup.
+  const evil = page.querySelector('.cdbx-cubg-cand[data-display=":66"]');
+  ok(!!evil && evil.textContent.indexOf('<img src=x onerror="window.__xss=1">bridge said no') >= 0 &&
+     evil.textContent.indexOf("<scr" + "ipt>window.__xss=2</scr" + "ipt>Evil WM") >= 0 &&
+     evil.textContent.indexOf('<img src=y onerror="window.__xss=3">restriction') >= 0,
+     "a probe's reason, WM name and restriction show as literal text");
+  ok(!!evil && !evil.querySelector("img, script, b") && window.__xss === undefined, "and create no element and run nothing");
+
+  // Busy is busy: not "not supported", Select stays usable.
+  const busyRow = page.querySelector('.cdbx-cubg-cand[data-display=":67"]');
+  ok(!!busyRow && /^Busy - /.test(busyRow.querySelector(".cdbx-state").textContent) && !busyRow.querySelector(".cdbx-cubg-select").disabled &&
+     !/not supported/.test(busyRow.textContent), "a busy probe reads Busy - press Refresh, Select not disabled: " + (busyRow ? busyRow.querySelector(".cdbx-state").textContent : ""));
+
+  // Copy: the clipboard API when it works, else the text is selected.
+  const firstPre = page.querySelector(".cdbx-cubg-pre");
+  const firstCopy = page.querySelector(".cdbx-cubg-copy");
+  const copied = [];
+  Object.defineProperty(navigator, "clipboard", { configurable: true, get: function () {
+    return { writeText: function (t) { copied.push(t); return Promise.resolve(); } }; } });
+  firstCopy.click();
+  await sleep(10);
+  ok(copied.length === 1 && copied[0] === firstPre.textContent && document.querySelector(".cdbx-toast").textContent === "Copied",
+     "Copy writes the exact command to the clipboard");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, get: function () {
+    return { writeText: function () { return Promise.reject(new Error("denied")); } }; } });
+  window.getSelection().removeAllRanges();
+  firstCopy.click();
+  await sleep(10);
+  ok(window.getSelection().toString() === firstPre.textContent && /press Ctrl\+C/.test(document.querySelector(".cdbx-toast").textContent),
+     "a refused clipboard selects the command instead and says so");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, get: function () { return undefined; } });
+  window.getSelection().removeAllRanges();
+  firstCopy.click();
+  await sleep(10);
+  ok(window.getSelection().toString() === firstPre.textContent, "no clipboard API at all: selected as well");
+
+  // Recipes: built for what is installed.
+  const recipes = page.querySelectorAll(".cdbx-cubg-recipe");
+  ok(recipes.length === 5, "five recipes (" + recipes.length + ")");
+  const codes = Array.prototype.map.call(page.querySelectorAll(".cdbx-cubg-pre"), function (p) { return p.textContent; });
+  ok(/^Xvfb :100 /.test(codes[0] || "") && /DISPLAY=:100 xfwm4 &$/.test(codes[0] || ""),
+     "the Xvfb recipe skips display numbers in use and uses the installed WM: " + JSON.stringify(codes[0]));
+  ok(/WLR_BACKENDS=headless WLR_RENDERER=pixman/.test(codes[2] || ""), "the headless sway recipe");
+  ok(!/Install /.test(recipes[0].textContent) && /Install Arch: xorg-server-xephyr/.test(recipes[1].textContent),
+     "a missing tool names its packages, an installed one does not");
+  ok(Array.prototype.every.call(recipes, function (r) { return !!r.querySelector(".cdbx-cubg-copy"); }), "every recipe has a Copy button");
+
+  // Narrow dialog: nothing pushes the panel wider than itself.
+  const pnl = document.querySelector(".cdbx-panel");
+  const oldW = pnl.style.width;
+  pnl.style.width = "300px";
+  await sleep(10);
+  ok(pnl.scrollWidth <= pnl.clientWidth + 1, "no horizontal overflow at 300 px (" + pnl.scrollWidth + " > " + pnl.clientWidth + ")");
+  pnl.style.width = oldW;
+
+  // Preview on demand.
+  c99.querySelector(".cdbx-cubg-preview").click();
+  await sleep(30);
+  ok(window.__cubgCalls.thumb.join(",") === ":99", "Show preview takes exactly one screenshot of that display");
+  ok(!!c99.querySelector(".cdbx-cubg-shot img.cdbx-cubg-img"), "and shows it");
+
+  // Select -> the exact bridge call, then the page redraws with it chosen.
+  c99.querySelector(".cdbx-cubg-select").click();
+  await sleep(60);
+  ok(window.__cubgCalls.set.join("|") === '{"enabled":true,"kind":"x11","display":":99"}',
+     "Select calls cuBackgroundSet({enabled, kind, display}): " + window.__cubgCalls.set.join("|"));
+  page = document.querySelector(".cdbx-panel .cdbx-cubg");
+  const status = page && page.querySelector(".cdbx-cubg-status");
+  ok(!!status && /^On - running: 1280x800/.test(status.textContent), "the status line reads the chosen display: " + (status ? status.textContent : ""));
+  const test = page && page.querySelector(".cdbx-cubg-test");
+  ok(!!test && !test.disabled, "Test is enabled once a display is chosen");
+  if (test) {
+    test.click();
+    await sleep(30);
+    ok(window.__cubgCalls.test === 1 && page.querySelectorAll(".cdbx-cubg-steps li").length === 3 &&
+       !!page.querySelector(".cdbx-cubg-testout img"), "Test shows its three steps and the screenshot");
+    ok(page.querySelectorAll(".cdbx-cubg-testout img").length === 1 && window.__xss === undefined &&
+       page.querySelector(".cdbx-cubg-steps").textContent.indexOf('<img src=z onerror="window.__xss=4">') >= 0,
+       "a step detail with markup shows as text");
+  }
+
+  // Not running while on: the fail-closed explanation is visible.
+  window.__cubgState = Object.assign({}, base, { enabled: true, config: { enabled: true, kind: "x11", display: ":97" } });
+  document.querySelector(".cdbx-cubg-refresh").click();
+  await sleep(60);
+  const st2 = document.querySelector(".cdbx-panel .cdbx-cubg-status");
+  ok(!!st2 && /not running/.test(st2.textContent) && /refuses to act/.test(st2.textContent) && st2.classList.contains("cdbx-warn"),
+     "on but not running: the status says Computer Use refuses: " + (st2 ? st2.textContent : ""));
+
+  document.querySelector(".cdbx-cubg-back").click();
+  await sleep(40);
+  ok(!!document.querySelector(".cdbx-panel " + SW), "Back returns to the feature list");
+}
+
 async function modelsPanel(modelsItem) {
   window.__cmConfig = { ok: true, enabled: true, configured: true, lockedByJsonc: false, source: "default",
     surfaces: ["ccd", "code"], models: 2, webSearch: "claude-deepseek-flash", webSearchLocked: false,
@@ -1414,7 +1640,7 @@ async function flagsPanel(flagsItem) {
   ok(panel.querySelector(".cdbx-h1").textContent === "Anthropic Features",
      "the heading spells the full name out even though the nav row says Anthropic: " +
      panel.querySelector(".cdbx-h1").textContent);
-  ok(!panel.querySelector(".cdbx-switch[aria-label='calm the Cowork glow']"),
+  ok(!panel.querySelector(".cdbx-switch[aria-label=\"show the Code tab's side panels as tabs instead of a split layout\"]"),
      "our own switches stayed behind in Community Features");
 
   // The restart notice speaks only for these flags, which is why it lives here.
@@ -1665,8 +1891,8 @@ async function themesPanel(themesItem) {
   themesItem.click();
   await sleep(80);
   ok(!!document.querySelector(".cdbx-sections"), "the Themes panel renders sections");
-  ok(!document.querySelector(".cdbx-panel .cdbx-switch[aria-label='calm the Cowork glow']"),
-     "the Cowork glow switch is NOT in the Themes panel");
+  ok(!document.querySelector(".cdbx-panel .cdbx-switch[aria-label=\"show the Code tab's side panels as tabs instead of a split layout\"]"),
+     "the panel tabs switch is NOT in the Themes panel");
 
   const secs = sections();
   ok(labels() === "Your themes:1 | Gaming:3 | Common:5 | More:1",
@@ -2077,6 +2303,7 @@ async function run() {
     if (kind === "real") {
       await themesPanel(items[0]);
       await featuresPanel(items[1]);
+      await cubgPanel(items[1]);
       await modelsPanel(items[2]);
       await flagsPanel(items[3]);
       await deployPanel(items[4]);
@@ -2408,6 +2635,28 @@ window.__overlays = [
   { name: "my-own", displayName: "My-own", hidden: false, source: "custom" },
   { name: "my-neon", displayName: "My-neon", hidden: false, source: "custom" }
 ];
+// Computer Use on a background display: :0 is the own desktop (never probed),
+// :97 a dead socket, :99 a supported Xvfb, wayland-weston unsupported.
+window.__cubgBase = { ok: true, present: false, enabled: false, config: null, valid: true, error: null, envKeys: [],
+  lockedByJsonc: null, source: "default", path: "/home/u/.config/Claude/claude-desktop-extra.json", own: { display: ":0", wayland: null } };
+window.__cubgState = Object.assign({}, window.__cubgBase);
+window.__cubgCalls = { set: [], thumb: [], probe: [], test: 0 };
+window.__cubgProbe = function (k, d) {
+  if (d === ":99") return { ok: true, kind: k, display: d, running: true, supported: true, reason: null,
+    screens: [{ id: "screen", width: 1280, height: 800 }], size: { width: 1280, height: 800 }, windows: 2,
+    wm: { present: true, name: "Xfwm4", via: "xprop" }, clipboard: { tool: "xclip" },
+    restrictions: [{ id: "single-instance", text: "Firefox already runs on your desktop." }, { id: "teach", text: "Teach mode is not available on a background display." }] };
+  if (d === ":66") return { ok: true, kind: k, display: d, running: true, supported: false,
+    reason: "<img src=x onerror=\\"window.__xss=1\\">bridge said no", screens: [{ id: "<b>out</b>", width: 640, height: 480 }],
+    size: { width: 640, height: 480 }, windows: 0, wm: { present: true, name: "<scr" + "ipt>window.__xss=2</scr" + "ipt>Evil WM" },
+    restrictions: [{ id: "x", text: "<img src=y onerror=\\"window.__xss=3\\">restriction" }] };
+  if (d === ":67") return { ok: true, kind: k, display: d, running: null, supported: null, busy: true,
+    reason: "busy - too many checks at once, refresh in a moment", restrictions: [] };
+  if (d === "wayland-weston") return { ok: true, kind: k, display: d, running: true, supported: false,
+    reason: "the compositor does not offer zwlr_virtual_pointer_v1", screens: [{ id: "X", width: 800, height: 600 }],
+    size: { width: 800, height: 600 }, windows: null, wm: { present: true, name: null }, restrictions: [] };
+  return { ok: true, kind: k, display: d, running: false, supported: false, reason: "not running: Connection refused", restrictions: [] };
+};
 window.cdbExtra = {
   themesList: stub({ ok: true, entries: window.__themes, active: "mario",
     configPath: "/home/u/.config/Claude/claude-desktop-extra.jsonc",
@@ -2442,8 +2691,6 @@ window.cdbExtra = {
     window.__relaunchCalls++;
     return Promise.resolve({ ok: true });
   },
-  glowRead: stub({ ok: true, mode: "pulse", opacity: 0.55, defaultOpacity: 0.55, lockedByJsonc: null }),
-  glowSet: stub({ ok: true, mode: "calm", windows: 1, path: "/tmp/x.json" }),
   panelTabsRead: function () { return Promise.resolve(window.__panelTabsState); },
   panelTabsSet: function (enabled) {
     window.__panelTabsCalls.push(enabled);
@@ -2536,6 +2783,38 @@ window.cdbExtra = {
     return Promise.resolve({ ok: true, opened: "/tmp/" + name, mode: how === "folder" ? "folder" : "file" });
   },
   deploySaveRaw: stub({ ok: true, path: "/tmp/cfg.json" }),
+  cuBackgroundRead: function () { return Promise.resolve(window.__cubgState); },
+  cuBackgroundSet: function (cfg) {
+    window.__cubgCalls.set.push(JSON.stringify(cfg));
+    if (cfg.display) window.__cubgState = Object.assign({}, window.__cubgState, { present: true, enabled: cfg.enabled,
+      config: { enabled: cfg.enabled, kind: cfg.kind, display: cfg.display } });
+    return Promise.resolve({ ok: true, config: window.__cubgState.config, valid: true, envDropped: false });
+  },
+  cuBackgroundCandidates: function () {
+    return Promise.resolve({ ok: true, own: { display: ":0", wayland: null }, candidates: [
+      { kind: "x11", display: ":0", own: true, selectable: false, label: "your desktop" },
+      { kind: "x11", display: ":97", own: false, selectable: true, label: "X11 display :97" },
+      { kind: "x11", display: ":66", own: false, selectable: true, label: "X11 display :66" },
+      { kind: "x11", display: ":67", own: false, selectable: true, label: "X11 display :67" },
+      { kind: "x11", display: ":99", own: false, selectable: true, label: "X11 display :99" },
+      { kind: "wlroots", display: "wayland-weston", own: false, selectable: true, label: "Wayland socket wayland-weston" }] });
+  },
+  cuBackgroundProbe: function (k, d) { window.__cubgCalls.probe.push(d); return Promise.resolve(window.__cubgProbe(k, d)); },
+  cuBackgroundThumbnail: function (k, d) {
+    window.__cubgCalls.thumb.push(d);
+    return Promise.resolve({ ok: true, dataUrl: "data:image/png;base64,iVBORw0KGgo=", width: 480, height: 300 });
+  },
+  cuBackgroundTest: function () {
+    window.__cubgCalls.test++;
+    return Promise.resolve({ ok: true, display: ":99", dataUrl: "data:image/png;base64,iVBORw0KGgo=", steps: [
+      { name: "screens", ok: true, ms: 3, detail: "1280x800" }, { name: "screenshot", ok: true, ms: 30, detail: "1280x800" },
+      { name: "pointer-move", ok: true, ms: 3, detail: "640,400<img src=z onerror=\\"window.__xss=4\\">" }] });
+  },
+  cuBackgroundTools: function () {
+    return Promise.resolve({ ok: true, tools: { Xvfb: "/usr/bin/Xvfb", Xephyr: null, sway: "/usr/bin/sway", labwc: null,
+      xfwm4: "/usr/bin/xfwm4", openbox: null, i3: null, x11vnc: null, wayvnc: null, xclip: "/usr/bin/xclip", xsel: null,
+      "wl-copy": null, "wl-paste": null, xprop: "/usr/bin/xprop" } });
+  },
   diag: function (m) { diags.push(String(m)); return Promise.resolve({ ok: true }); }
 };
 </script>
@@ -2590,9 +2869,10 @@ for (const [name, fixture] of scenarios) {
   try {
     // Virtual time, so the budget costs no wall clock: it only has to cover the
     // sum of the driver's sleep() calls in the longest scenario.
+    // 15 s since the background-display setup page tests (issue #300).
     dump = execFileSync(CHROMIUM, [
       "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
-      "--window-size=1000,700", "--virtual-time-budget=10000",
+      "--window-size=1000,700", "--virtual-time-budget=15000",
       "--dump-dom", "file://" + file
     ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {

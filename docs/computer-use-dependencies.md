@@ -21,6 +21,11 @@
 > <a id="custom-screenshot-command"></a>
 > **Custom screenshot command:** set `COWORK_SCREENSHOT_CMD` to override auto-detection. Placeholders: `{FILE}`, `{X}`, `{Y}`, `{W}`, `{H}`. Example: `COWORK_SCREENSHOT_CMD='spectacle -b -n -r -o {FILE}'`
 
+<a id="background-display"></a>
+## Optional tools for a background display
+
+[Computer Use on a background display](computer-use.md#computer-use-on-a-background-display-experimental) needs nothing from this package's dependencies, and the bundled `x11-bridge` or `wlroots-bridge` serves display 2 whatever your host session is. The tools below are optional and yours to install: an X server to run display 2 (`Xvfb` or `Xephyr`) or a headless wlroots compositor (`sway`, `labwc`), a window manager on an X display 2 (`openbox`, `xfwm4`), `xclip` or `xsel` (X display) or `wl-clipboard` (Wayland display) so Claude's clipboard actions work there, and `x11vnc` or `wayvnc` to watch it. Without a clipboard tool, clipboard read and write are refused in this mode. `COWORK_SCREENSHOT_CMD` runs with display 2's environment in this mode.
+
 <a id="bridge-not-working"></a>
 ## When the bundled bridge cannot talk to your session
 
