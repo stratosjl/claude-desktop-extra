@@ -8,7 +8,9 @@ refuses to load an app.asar whose header hash differs. After repacking a patched
 app.asar, the record has to name the new hash. It is a fixed-length hex string in
 a JSON blob inside the PE resources, so it is rewritten in place: the PE layout is
 unchanged, only Anthropic's Authenticode signature stops matching. The same goes
-for any other archive the resource lists (Electron checks only listed ones).
+for every other archive below the exe's folder: with the fuse on, Electron aborts
+when it opens one that has no record or a stale one (shell/common/asar/archive.cc
+and archive_win.cc; it compares the record names lowercased).
 
 Usage:
   asar_integrity.py header-hash <app.asar>
@@ -16,11 +18,14 @@ Usage:
   asar_integrity.py fuses <claude.exe>
   asar_integrity.py records <claude.exe>         # archives the exe holds a record for
   asar_integrity.py fix-exe <claude.exe> <original asar> <patched asar> [<name>]
+  asar_integrity.py verify <claude.exe> <app dir>  # every record matches its archive
 
-<name> is the archive's path below resources\\ (default app.asar). fix-exe
-refuses unless the exe holds exactly one integrity record for resources\\<name>
-and that record names the ORIGINAL asar's hash: a positive check that we read
-the format right before writing anything.
+<name> is the archive's path below resources\\ as the exe spells it (default
+app.asar). fix-exe refuses unless the exe holds exactly one integrity record for
+resources\\<name> and that record names the ORIGINAL asar's hash: a positive
+check that we read the format right before writing anything. verify is the
+end-state check: each record names the header hash of the archive it is for
+(found below <app dir> regardless of case, as Electron matches it).
 """
 import hashlib
 import json
@@ -54,7 +59,7 @@ def record_re(name: str) -> re.Pattern:
     # JSON escapes the separator: resources\app.asar is stored as resources\\app.asar.
     file = re.escape(name.replace("/", "\\").replace("\\", "\\\\").encode())
     return re.compile(
-        rb'\{"file":"resources\\\\' + file + rb'","alg":"SHA256","value":"([0-9a-f]{64})"\}'
+        rb'\{"file":"resources\\\\' + file + rb'","alg":"SHA256","value":"([0-9a-fA-F]{64})"\}'
     )
 
 
@@ -128,7 +133,7 @@ def fix_exe(exe: Path, original: Path, patched: Path, name: str = "app.asar") ->
             f"[FAIL] {exe.name}: {len(found)} integrity records for "
             f"resources\\{name}, expected 1 - re-audit the exe's INTEGRITY resource"
         )
-    old_value = found[0].group(1).decode()
+    old_value = found[0].group(1).decode().lower()
     want_old = header_hash(original)
     if old_value != want_old:
         raise SystemExit(
@@ -147,6 +152,29 @@ def fix_exe(exe: Path, original: Path, patched: Path, name: str = "app.asar") ->
     print(f"  [OK] {exe.name}: {name} integrity {old_value[:12]}... -> {new_value[:12]}...")
 
 
+def verify(exe: Path, app_dir: Path) -> None:
+    data = exe.read_bytes()
+    by_key = {
+        str(f.relative_to(app_dir)).replace("/", "\\").lower(): f
+        for f in app_dir.rglob("*") if f.is_file()
+    }
+    names = records(data)
+    if not names:
+        raise SystemExit(f"[FAIL] {exe.name}: no integrity records")
+    for name in names:
+        value = record_re(name).search(data).group(1).decode().lower()
+        f = by_key.get(("resources\\" + name).lower())
+        if f is None:
+            raise SystemExit(f"[FAIL] {exe.name}: a record names resources\\{name}, which is not in the app")
+        got = header_hash(f)
+        if got != value:
+            raise SystemExit(
+                f"[FAIL] {exe.name}: the record for resources\\{name} names {value[:12]}..., "
+                f"but {f.relative_to(app_dir)} hashes to {got[:12]}... - Electron would abort loading it"
+            )
+        print(f"  [OK] {exe.name}: resources\\{name} matches its record ({got[:12]}...)")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[0] == "header-hash":
         print(header_hash(Path(argv[1])))
@@ -157,6 +185,8 @@ def main(argv: list[str]) -> int:
             print(f"{k}={v}")
     elif len(argv) >= 2 and argv[0] == "records":
         print("\n".join(records(Path(argv[1]).read_bytes())))
+    elif len(argv) >= 3 and argv[0] == "verify":
+        verify(Path(argv[1]), Path(argv[2]))
     elif len(argv) in (4, 5) and argv[0] == "fix-exe":
         fix_exe(Path(argv[1]), Path(argv[2]), Path(argv[3]), *argv[4:])
     else:

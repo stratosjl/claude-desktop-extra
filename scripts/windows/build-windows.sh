@@ -116,7 +116,8 @@ RES="$APP_TREE/resources"
 [ -f "$APP_TREE/claude.exe" ] && [ -f "$RES/app.asar" ] || die "not a Claude Desktop package: claude.exe or resources/app.asar missing"
 cp "$RES/app.asar" "$WORK/original.asar"
 
-log "Fuses: $(python3 -I "$SCRIPT_DIR/asar_integrity.py" fuses "$APP_TREE/claude.exe" | tr '\n' ' ')"
+FUSES="$(python3 -I "$SCRIPT_DIR/asar_integrity.py" fuses "$APP_TREE/claude.exe")" || die "cannot read claude.exe's fuses"
+log "Fuses: $(tr '\n' ' ' <<< "$FUSES")"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" unpacked "$WORK/original.asar" > "$WORK/unpacked.before"
 
 mkdir -p "$WORK/app"
@@ -138,7 +139,7 @@ python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 # build-patched-tarball.sh. Since v4.29.0 it ships packed as
 # resources/ion-dist.asar (before, as a resources/ion-dist folder): the archive
 # is extracted, patched and repacked to its place, and its record in the exe's
-# integrity resource rewritten if the exe has one (step 4). The Linux-only ion
+# integrity resource rewritten like app.asar's (step 4). The Linux-only ion
 # fix (fix_ion_dist_linux) stays out.
 ION_ASAR="$RES/ion-dist.asar"
 if [ -e "$ION_ASAR" ] && [ -e "$RES/ion-dist" ]; then
@@ -219,20 +220,26 @@ rm -rf "$RES/app.asar" "$RES/app.asar.unpacked"
 mv "$WORK/app/app.asar" "$RES/app.asar"
 mv "$WORK/app/app.asar.unpacked" "$RES/app.asar.unpacked"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" fix-exe "$APP_TREE/claude.exe" "$WORK/original.asar" "$RES/app.asar"
-# Electron checks only the archives the integrity resource lists. A repacked
-# ion-dist.asar that is listed needs its record rewritten like app.asar's.
+# With the fuse on, Electron also aborts when it opens any other archive below
+# the exe's folder that has no record or a stale one (it matches the record
+# names lowercased). A repacked ion-dist.asar needs its record rewritten too,
+# under the exe's own spelling of the name.
 records="$(python3 -I "$SCRIPT_DIR/asar_integrity.py" records "$APP_TREE/claude.exe")" ||
     die "cannot read claude.exe's integrity records"
 log "claude.exe integrity records: $(tr '\n' ' ' <<< "$records")"
 if [ "$ION_FORMAT" = asar ]; then
-    if grep -qxF 'ion-dist.asar' <<< "$records"; then
+    ion_rec="$(grep -ixF 'ion-dist.asar' <<< "$records" || true)"
+    if [ -n "$ion_rec" ]; then
+        [ "$(wc -l <<< "$ion_rec")" -eq 1 ] || die "claude.exe has several integrity records for ion-dist.asar"
         block_integrity "$ION_ASAR" || die "the repacked ion-dist.asar has no per-file integrity"
         python3 -I "$SCRIPT_DIR/asar_integrity.py" fix-exe "$APP_TREE/claude.exe" \
-            "$WORK/original-ion-dist.asar" "$ION_ASAR" ion-dist.asar
-    else
-        log "claude.exe has no integrity record for ion-dist.asar: left unchecked, as in the official build"
+            "$WORK/original-ion-dist.asar" "$ION_ASAR" "$ion_rec"
+    elif grep -qx 'EnableEmbeddedAsarIntegrityValidation=1' <<< "$FUSES"; then
+        die "claude.exe has no integrity record for resources\\ion-dist.asar, but with its integrity fuse on Electron aborts on an archive without one - re-audit the package"
     fi
 fi
+# End state: every record names the header hash of the archive it is for.
+python3 -I "$SCRIPT_DIR/asar_integrity.py" verify "$APP_TREE/claude.exe" "$APP_TREE"
 
 # The Squirrel updater and its shortcut stub only work inside Squirrel's own
 # install layout; this build is portable.
