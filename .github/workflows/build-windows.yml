@@ -5,7 +5,7 @@ name: Build Windows
 # copy of the sources with scripts/windows/upstream-overlay.patch applied),
 # integrity hash rewritten, zipped with an installer script.
 #
-# Runs on PRs that touch the Windows build, by hand, and from the daily
+# Runs on PRs that touch the Windows build, by hand, and from the scheduled
 # upstream-sync.yml (workflow_call) when upstream or Anthropic's Windows
 # version moved.
 #

@@ -121,12 +121,14 @@ This fork follows [patrickjaja/claude-desktop-extra](https://github.com/patrickj
   Custom models need no overlay any more: upstream took the fork's Windows changes for them (the `win32` gate and the 8.3 short path in [patrickjaja/claude-desktop-extra#295](https://github.com/patrickjaja/claude-desktop-extra/pull/295), the router accepting `claude.exe` in [#296](https://github.com/patrickjaja/claude-desktop-extra/pull/296)).
 
   So syncing master with upstream never conflicts. If upstream rewrites one of those lines, `prepare-sources.sh` fails loudly instead.
-- **Daily automation:** the **Upstream Sync** workflow (`.github/workflows/upstream-sync.yml`) runs every morning:
+- **Automation:** the **Upstream Sync** workflow (`.github/workflows/upstream-sync.yml`) runs every 6 hours (04:51, 10:51, 16:51 and 22:51 UTC):
   1. syncs master with GitHub's "Sync fork";
   2. compares Anthropic's current Windows version with the newest `windows-v` release;
-  3. when either moved, runs Build Windows with `publish`.
+  3. when either moved, or an "Automatic update failed" issue is still open, runs Build Windows with `publish`.
 
-  A failed check publishes nothing. The failure is reported in an issue (when Issues are enabled on the repo, otherwise in the run summary; GitHub also emails failed scheduled runs), with a ready-to-paste prompt for fixing it with Claude. A later successful run closes that issue.
+  A failed check publishes nothing. The failure is reported in an issue (when Issues are enabled on the repo, otherwise in the run summary; GitHub also emails failed scheduled runs), with a ready-to-paste prompt for fixing it with Claude. While that issue is open, every run retries the build, so a fix merged to master ships on the next run, and a failure that persists comments on the issue at most once a day. A successful run closes the issue.
+
+  The upstream **Version Check** workflow is for the Linux packages, which this fork does not publish; it is disabled in the Actions tab (a repository setting, so the sync does not turn it back on). New Windows versions are found by Upstream Sync.
 - **Workflow files:** syncing upstream commits that change `.github/workflows/` needs a token with the workflow permission. Add a fine-grained personal access token as the `SYNC_TOKEN` repository secret (this repository only; Contents and Workflows: read and write).
 - **Changing the overlay:**
   1. run `scripts/windows/prepare-sources.sh /tmp/src`;

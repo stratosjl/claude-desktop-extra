@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copy this repo's tracked files to DEST and apply the Windows overlay there.
 #
-# The fork never edits upstream files in place (that is what keeps the daily
+# The fork never edits upstream files in place (that is what keeps the scheduled
 # upstream sync conflict-free). The upstream files the Windows build needs
 # changed - the win32 gates of the shipped features, the Windows Settings ->
 # Extra nav and Community list, Windows fixes (diff views git resolution,
