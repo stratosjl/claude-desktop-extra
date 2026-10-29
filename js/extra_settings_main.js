@@ -341,7 +341,7 @@
     };
   }
 
-  // The managed-config key catalog of Claude Desktop v3.6556.2 (196 keys), read out of the
+  // The managed-config key catalog of Claude Desktop v4.29.0 (198 keys), read out of the
   // bundle's own schema (flat key, zod leaf type, scopes, title). Upstream drives
   // its 3P Setup wizard from that schema; we cannot reach it from here (it is
   // module-scoped in index.pre.js), so this is a PINNED COPY and is therefore
@@ -554,6 +554,9 @@
       label: "Max tokens per window" },
     { key: "inferenceTokenWindowHours", kind: "int", group: "limits", scope: "3p",
       label: "Token cap window (h)", max: 720 },
+    { key: "inferenceTokenWarningPercent", kind: "int", group: "limits", scope: "3p", max: 100, dflt: 75,
+      label: "Token limit warning (%)",
+      note: "Percentage of the token cap at which the app warns the user, 1 to 100; upstream's default is 75 and it only offers it once Max tokens per window is set (upstream gates this @next, v4.29.0)." },
 
     { key: "chatSessionRetentionDays", kind: "int", group: "limits", scope: "3p", max: 3650,
       label: "Chat retention period (days)",
@@ -578,6 +581,9 @@
       note: "Which home surface the app opens on. Upstream's own wizard offers only standard and off since v2.31226.0; simple and no-vm are still accepted values." },
     { key: "scheduledTasksEnabled", kind: "bool", group: "sandbox", scope: "3p",
       label: "Allow scheduled tasks" },
+    { key: "userFileUploadsEnabled", kind: "bool", group: "sandbox", scope: "3p", dflt: true,
+      label: "Allow file attachments",
+      note: "Self-hosted sessions only: off makes the host refuse attached files and tells the app to disable attaching (upstream gates this @next, v4.29.0)." },
     { key: "keepAwakeEnabled", kind: "bool", group: "sandbox", scope: "3p", dflt: true,
       label: "Allow keep awake",
       note: "Off means Claude never prevents sleep and hides the keep-awake switches in Settings, the Scheduled page and the Code tab; applies to a running app (available since v2.7032.0)." },
@@ -589,10 +595,10 @@
       note: "Replaces the built-in default shortcut with an accelerator such as Ctrl+Alt+K, or off for none; a value upstream does not accept is logged and the built-in default applies. Applies to a running app (available since v3.1623.0)." },
     { key: "quickEntryScreenshotsEnabled", kind: "bool", group: "sandbox", scope: "3p", dflt: true,
       label: "Allow Quick Entry screenshots of the screen and other apps",
-      note: "macOS-only upstream (attaches a window or screen-area picture, asks for the Screen Recording permission); no effect on Linux (upstream gates this @next)." },
+      note: "macOS-only upstream (attaches a window or screen-area picture, asks for the Screen Recording permission); no effect on Linux (available since v3.6556.1)." },
     { key: "quickEntryFileSharingEnabled", kind: "bool", group: "sandbox", scope: "3p", dflt: true,
       label: "Allow Quick Entry sharing of files open in other apps",
-      note: "macOS-only upstream (finds the file through the Accessibility permission); no effect on Linux (upstream gates this @next)." },
+      note: "macOS-only upstream (finds the file through the Accessibility permission); no effect on Linux (available since v3.6556.1)." },
     { key: "chatAdvancedFileAnalysisEnabled", kind: "bool", group: "sandbox", scope: "3p",
       label: "Advanced file analysis in Chat" },
     { key: "autoModeEnabled", kind: "bool", group: "sandbox", scope: "3p", label: "Cowork Auto mode" },
@@ -809,10 +815,10 @@
       label: "Auto-update enforcement window (h)", max: 72 },
     { key: "installedUpdateEnforcementEnabled", kind: "bool", group: "telemetry", scope: "both",
       label: "Restart to apply installed updates",
-      note: "Only while Block auto-updates is on: when a newer version is installed while the app is open and nobody relaunches within the window below, the app restarts itself; on Linux any replacement of the app counts. Set it where Block auto-updates is set. Applies to a running app (upstream gates this @next)." },
+      note: "Only while Block auto-updates is on: when a newer version is installed while the app is open and nobody relaunches within the window below, the app restarts itself; on Linux any replacement of the app counts. Set it where Block auto-updates is set. Applies to a running app (available since v3.6556.1)." },
     { key: "installedUpdateEnforcementHours", kind: "int", group: "telemetry", scope: "both", max: 72,
       label: "Installed-update enforcement window (h)",
-      note: "Hours of open, awake app time before that restart; blank means 72 and then waits for the computer to be idle, a number restarts once it elapses. No effect unless the restart above is on (upstream gates this @next)." },
+      note: "Hours of open, awake app time before that restart; blank means 72 and then waits for the computer to be idle, a number restarts once it elapses. No effect unless the restart above is on (available since v3.6556.1)." },
     { key: "deploymentOrganizationUuid", kind: "text", group: "telemetry", scope: "3p",
       label: "Organization UUID" },
     { key: "endUserAttribution", kind: "bool", group: "telemetry", scope: "3p", label: "End-user attribution",

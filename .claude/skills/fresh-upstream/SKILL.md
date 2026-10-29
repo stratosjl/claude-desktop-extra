@@ -51,8 +51,8 @@ Goal: a pristine unpatched bundle in `./tmp/` so patch work compares against the
    ```
    - Unpatched main bundle: `./tmp/app.asar.contents/.vite/build/index.js`
    - Renderer bundles: `./tmp/app.asar.contents/.vite/renderer/*/assets/*.js`
-   - ion-dist (3P-config SPA): `./tmp/extract/usr/lib/claude-desktop/resources/ion-dist/`
-   - i18n: `./tmp/extract/usr/lib/claude-desktop/resources/*.json`
+   - ion-dist (3P-config SPA): packed as `./tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar` since v4.29.0 (a plain `ion-dist/` dir before); read it with `asar extract ./tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar ./tmp/ion-dist`
+   - i18n: `./tmp/app.asar.contents/resources/i18n/*.json` (inside app.asar since v4.29.0)
 
 6. **Sanity check** and report:
    ```bash

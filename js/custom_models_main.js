@@ -1316,7 +1316,9 @@
   // Sub-patch D, at the start of configureSSHSpawn(options, ...): an SSH (or
   // WSL) session runs its CLI on another host, where the preload is not. The
   // Code session env it starts from is the one cliEnv() fed, and the remote
-  // spawner forwards every CLAUDE_*/ANTHROPIC_* variable - so the model
+  // spawner forwards CLAUDE_*/ANTHROPIC_* variables (since v4.29.0 through an
+  // allowlist that still includes the model slots, e.g. ANTHROPIC_MODEL and
+  // CLAUDE_CODE_SUBAGENT_MODEL) - so the model
   // slots we set would name ids nothing routes there. Take back what
   // cliEnv() added: the remote session is exactly upstream's, and without
   // CDB_CUSTOM_MODELS_JSON sub-patch C hands it no sub-agent type either.

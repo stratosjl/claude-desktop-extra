@@ -95,9 +95,10 @@ touch patches/core/add_growthbook_overrides.nim && (cd patches && make)
 CI runs `scripts/check-jsonc-template-sync.sh` (no `--write`) and fails if the docs catalog drifts from the shipped template.
 
 ## Step 5 - ion-dist SPA audit
-Read `baseline/ION.md`. ion-dist is in the `.deb`'s resources, not inside `app.asar`:
+Read `baseline/ION.md`. ion-dist is in the `.deb`'s resources, not inside `app.asar`. Since v4.29.0 it ships packed as `resources/ion-dist.asar` (the build extracts it, patches the extract and repacks it in place); extract it once for the audit:
 ```bash
-ION=./tmp/extract/usr/lib/claude-desktop/resources/ion-dist
+asar extract ./tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar ./tmp/ion-dist
+ION=./tmp/ion-dist
 ls "$ION/index.html" && du -sh "$ION" && find "$ION" -name '*.js' | wc -l   # vs baseline: big swing = refactor
 grep -l 'org-plugins' "$ION/assets/v1/"*.js                                  # config chunk (hash changes every release)
 grep -aoE 'mountPath:\{.{0,200}\}' "$ION/assets/v1/"*.js                     # a linux key here = maybe upstreamed

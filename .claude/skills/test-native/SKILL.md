@@ -181,8 +181,8 @@ Copy the shape of `patches/linux/fix_popout_menus_wayland.nim` +
    keep an env escape hatch for the winner if it is cheap.
 
 Remember what the 1P main view is: **remote claude.ai code**. A patch on
-`resources/ion-dist` only reaches 3P mode (`app://localhost`); run-time
-injection reaches both.
+`resources/ion-dist` (shipped packed as `resources/ion-dist.asar`) only reaches
+3P mode (`app://localhost`); run-time injection reaches both.
 
 ### Reading the data
 

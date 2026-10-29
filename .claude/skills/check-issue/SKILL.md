@@ -103,7 +103,7 @@ The integration worker (sonnet):
 
 ```bash
 touch patches/linux/<embedding>.nim && (cd patches && make -j"$(nproc)")
-python3 scripts/check-upstream-absorbed.py tmp/app.asar.contents tmp/extract/usr/lib/claude-desktop/resources/ion-dist
+python3 scripts/check-upstream-absorbed.py tmp/app.asar.contents tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar
 bash scripts/check-patch-sibling-noop.sh
 bash scripts/run-feature-tests.sh linux   # plus core and community
 python3 scripts/apply_patches.py patches <scratch copy of tmp/app.asar.contents>
@@ -137,7 +137,7 @@ Use the `/comment` voice for every comment:
 - name the fix and the **release** in bold
 - no blame on our patches
 - no internals and no speculation
-- for a new UI feature, attach screenshots with a rectangle around what is new. Upload them as release assets (`gh release upload`) and embed those URLs. Check every PNG for personal data (names, avatar, sidebar, paths, other windows) before uploading.
+- for a new UI feature, attach screenshots with a rectangle around what is new. The maintainer wants them as attachments of the comment itself. `gh` cannot upload those, so a worker uses claude-in-chrome with the maintainer's GitHub session to drag them into the comment editor. Release assets (`gh release upload` plus embedded URLs) are only a fallback; ask before using them. Check every PNG for personal data (names, avatar, sidebar, paths, other windows) before uploading.
 
 **Asking for more data.** Give one action plus one copy-paste command, and end with "empty output is fine too" when that is true. Never ask them to look for strings themselves. Never explain what each line would mean. `claude-desktop --diagnose` is the default collector, but never ask for it again when the thread already has one. Use a targeted `grep` only when the evidence is not in `--diagnose`, which does not include `claude-patches.log`.
 

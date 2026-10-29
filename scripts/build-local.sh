@@ -3,7 +3,7 @@
 # Local build script for claude-desktop-extra (cross-distro).
 #
 # Ingests the OFFICIAL Claude Desktop Linux .deb (which already bundles Electron,
-# node-pty, chrome-sandbox, tray icons, ion-dist, ...), applies the Linux JS
+# node-pty, chrome-sandbox, tray icons, ion-dist.asar, ...), applies the Linux JS
 # patches, builds a pre-patched tarball, then produces an Arch package with
 # makepkg and optionally installs it.
 #

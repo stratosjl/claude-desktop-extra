@@ -31,7 +31,7 @@ The full distro, session-type, input/screenshot backend and per-bridge glibc tab
 
 cd patches && make -j"$(nproc)" && cd ..      # compile all Nim patches
 python3 scripts/check-upstream-absorbed.py tmp/app.asar.contents \
-  tmp/extract/usr/lib/claude-desktop/resources/ion-dist   # absorption probe (~11 s, pristine extract)
+  tmp/extract/usr/lib/claude-desktop/resources/ion-dist.asar   # absorption probe (~45 s, pristine extract)
 bash scripts/run-feature-tests.sh <community|core|linux>  # feature harnesses for the category you touched
 ./scripts/validate-patches.sh ./tmp/app.asar.contents
 node --check <patched.js>

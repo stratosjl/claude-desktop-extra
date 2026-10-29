@@ -603,8 +603,11 @@ proc apply*(input: string): string =
     # v1.26832.0: the trailing callback became a method call (`e.nn()`) and the
     # event name a backtick literal. Capture the whole emit-and-callback tail and
     # re-emit it verbatim instead of reconstructing it.
+    # v4.29.0 added a take counter between the assignment and the emit:
+    # `return this.exclusiveHolder=e,this.exclusiveTakes++,this.emit(...)`.
+    # Allow (and keep verbatim) zero or more `this.<field>++,` steps there.
     let pat =
-      re"""(return this\.exclusiveHolder=([\w$]+),)(this\.emit\(["`]cuLockChanged["`],\{holder:\2\}\),[\w$]+(?:\.[\w$]+)*\(\),!0)"""
+      re"""(return this\.exclusiveHolder=([\w$]+),(?:this\.[\w$]+\+\+,)*)(this\.emit\(["`]cuLockChanged["`],\{holder:\2\}\),[\w$]+(?:\.[\w$]+)*\(\),!0)"""
     let n = replaceFirst(
       content,
       pat,

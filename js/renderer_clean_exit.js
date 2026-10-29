@@ -3,17 +3,20 @@
  * fix_renderer_clean_exit_reload.nim inlines this expression once, as a
  * statement in front of upstream's main-webview reason filter, in the chunk
  * that holds the filter, the unresponsive watchdog and the render-process-gone
- * handler. It installs three globals; each is defined with ||= so a second
+ * handler. It installs two globals; each is defined with ||= so a second
  * evaluation keeps the first instance (and its state).
  *
- * Upstream's reason filter (v3.6556.2 names Q3n / J3n / CN, re-minified every
- * release) first asks J3n(), which takes one "we crashed it ourselves" token;
+ * Upstream's reason filter (v4.29.0 names Wnr / znr / XN, re-minified every
+ * release) first asks znr(), which takes one "we crashed it ourselves" token;
  * with a token it drops every reason, without one it drops clean-exit and a
- * `killed` while quitting. The unresponsive watchdog adds a token (q3n) each
- * time it calls forcefullyCrashRenderer on the main view and then reloads.
- * CN() is upstream's own quitting predicate. (Spelled out in words on purpose:
- * this comment is inlined into the bundle and must not match the patch's own
- * anchors.)
+ * `killed` while quitting. The unresponsive watchdog adds a token each time it
+ * starts a kill attempt on the main view; the token expires 10 s after the
+ * attempt, or 5 min later while upstream's recovery reload is pending. That
+ * attempt also arms upstream's 30 s re-check, which reloads the view again
+ * when no page committed (at most 3 times per 5 min, then its error card).
+ * XN() is upstream's own quitting predicate.
+ * (Spelled out in words on purpose: this comment is inlined into the bundle
+ * and must not match the patch's own anchors.)
  *
  * 1. __cdbCleanExitRecoverable(details, isQuitting)       (#287, sub-patch A)
  *    Asked in the filter's clean-exit term. On Linux the main view's renderer
@@ -24,38 +27,33 @@
  *    upstream behavior: suppressed, no reload spin). The timestamps live in
  *    globalThis.__cdbCleanExitReloads so DevTools can inspect or reset them.
  *
- * 2. __cdbWatchdogKillRecoverable(details, isQuitting)    (#299, sub-patch C)
- *    Replaces the `!1` of the token branch. On Linux Electron's
- *    forcefullyCrashRenderer() is an IPC asking the renderer to crash itself,
- *    a no-op when the renderer is hung; every watchdog attempt still leaves a
- *    token, and the leftover tokens made upstream drop the real death that
- *    follows (no reload, no error overlay, blank window). Returns true on
- *    Linux while the app is not quitting, so the event takes upstream's own
- *    path: 300 ms `killed` grace, telemetry, 3-per-5-min reload cap with its
- *    error overlay, reload. No rate limit of our own. A clean-exit is not
- *    something the watchdog produces, so it gets the #287 verdict (1.).
- *
- * 3. __cdbHungKillEscalate(webContents)                   (#299, sub-patch D)
- *    Called right before upstream's forcefullyCrashRenderer(). Records the
- *    renderer pid; after 5 s, if the WebContents is neither destroyed nor
+ * 2. __cdbHungKillEscalate(webContents)                   (#299, sub-patch D)
+ *    Called right before upstream's crash request, after upstream's own spare
+ *    check decided to kill. On Linux Electron sends that request to the
+ *    renderer, which crashes itself on its IO thread: that works while only
+ *    the renderer's main thread is hung, and does nothing when the whole
+ *    renderer process is stalled (IO thread blocked too). This helper records
+ *    the renderer pid; after 5 s, if the WebContents is neither destroyed nor
  *    crashed, still has the same renderer pid and no `responsive` event
  *    arrived since, it asks the main frame to evaluate `1` (a liveness probe,
  *    2 s timeout). Electron's `responsive` can lag well behind a renderer that
  *    resumed, so a probe that answers cancels the kill. Only when it times out
  *    or rejects, and the guards above still hold, the renderer gets SIGKILL
  *    (about 7 s after the crash request at most). Electron then reports it
- *    gone (reason killed) and 2. hands it to upstream's reload path. One
- *    `responsive` listener per WebContents (WeakSet) cancels a pending kill,
- *    and one probe at most is in flight per WebContents. Never throws.
+ *    gone (reason killed); the attempt's token is still pending, so upstream's
+ *    filter drops that event, and the 30 s re-check armed by the same attempt
+ *    reloads the view into a new renderer. One `responsive` listener per
+ *    WebContents (WeakSet) cancels a pending kill, and one probe at most is in
+ *    flight per WebContents. Never throws.
  *
- * All three are Linux only (process.platform), with no session, compositor or
+ * Both are Linux only (process.platform), with no session, compositor or
  * GPU gating. One [cdb-renderer] line per decision goes to claude-patches.log
  * via __cdbDiag.
  * Comments are block comments only: the expression is inlined into a minified
  * line, where a // comment would swallow the code after it.
  */
 (function () {
-  /*__cdb_clean_exit_reload_v2__*/
+  /*__cdb_clean_exit_reload_v3__*/
   var MAX_RELOADS = 3;
   var WINDOW_MS = 10 * 60 * 1000;
   var ESCALATE_MS = 5000;
@@ -95,22 +93,6 @@
       tag + ": not app-initiated, handing it to the reload path (" + reloads.length + "/" +
         MAX_RELOADS + " in " + WINDOW_MS / 60000 + " min)"
     );
-    return true;
-  };
-
-  globalThis.__cdbWatchdogKillRecoverable ||= function (details, isQuitting) {
-    if (!details || process.platform !== "linux") return false;
-    if (details.reason === "clean-exit") {
-      return globalThis.__cdbCleanExitRecoverable(details, isQuitting);
-    }
-    var tag =
-      "main view " + details.reason + " (exitCode " + details.exitCode +
-      ") with a watchdog kill token pending";
-    if (quittingNow(isQuitting)) {
-      log(tag + ": app is quitting, leaving it suppressed");
-      return false;
-    }
-    log(tag + ": handing it to upstream's reload path");
     return true;
   };
 

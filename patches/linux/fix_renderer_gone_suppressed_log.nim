@@ -19,90 +19,138 @@ import regex
 # Literal substring of the injected log line; absent from the fresh bundle.
 const AppliedMarker = "Main webview render process gone (suppressed)"
 
+proc logCall(logger, details: string): string =
+  logger & """.info("Main webview render process gone (suppressed): %o",{reason:""" &
+    details & ".reason,exitCode:" & details & ".exitCode})"
+
+# Every early `return` of the handler's guards, in either spelling:
+#   `)return;`           -> `){<log>;return}`
+#   `{<body>;return}`    -> `{<body>;<log>;return}`
+proc addLogs(guards, log: string): string =
+  guards.replace(
+    re2"""\)return;|([{;])return\}""",
+    proc(m: RegexMatch2, s: string): string =
+      if m.group(0).a < 0 or m.group(0).len == 0:
+        "){" & log & ";return}"
+      else:
+        s[m.group(0)] & log & ";return}",
+  )
+
+# The main-webview handler head, and the log line that pins it.
+let headRe =
+  re2"""\.on\(["`]render-process-gone["`],\(?async\(([\w$]+),([\w$]+)\)=>\{"""
+const HandledLog = "Main webview render process gone: %o"
+
 proc apply*(input: string): string =
-  if input.count(AppliedMarker) == 2:
-    # Our log line sits in front of both early returns of the one handler.
-    echo "  [OK] suppressed renderer-gone log: already applied"
-    return input
+  # Idempotency: positive end-state. Between the main-webview handler's head
+  # and upstream's own log line, every early `return` is preceded by our log
+  # call, and our log call appears nowhere else.
+  if input.count(AppliedMarker) > 0:
+    let h = input.find(HandledLog)
+    var heads: seq[RegexMatch2] = @[]
+    let winStart = max(0, h - 3000)
+    let win =
+      if h > 0:
+        input[winStart ..< h]
+      else:
+        ""
+    if h > 0 and input.count(HandledLog) == 1:
+      for m in win.findAll(headRe):
+        heads.add m
+    if heads.len > 0:
+      let seg = win[heads[^1].boundaries.b + 1 .. ^1]
+      let returns = seg.count("return")
+      let logged = seg.count(AppliedMarker & """: %o",{reason:""")
+      # each log call sits directly in front of its `return`
+      let loggedReturns = seg.count(".exitCode});return}")
+      if returns >= 2 and logged == returns and loggedReturns == returns and
+          input.count(AppliedMarker) == logged:
+        echo "  [OK] suppressed renderer-gone log: already applied (" & $logged &
+          " early returns logged)"
+        return input
+    echo "  [FAIL] '" & AppliedMarker &
+      "' present but not in front of every early return of the main-webview handler; re-audit"
+    quit(1)
 
   # Shape history of the handler's suppression decision:
   #   <= v1.24012.9: inline early-return branch
   #     .on("render-process-gone",async(i,r)=>{if(KG>0||r.reason==="killed"||...){...;return}if(D.info("Main webview render process gone: %o
   #   v1.26832.0 - v1.30096.1: one hoisted predicate ANDed into a single condition
-  #     e.on(`render-process-gone`,async(t,a)=>{if(Ia(a)&&!(a.reason===`killed`&&(await ...))&&!e.isDestroyed()){if(o.o.info(`Main webview render process gone: %o
-  #   v1.32352.1: the single condition is SPLIT into an early-return guard, an
-  #   interposed `let` (timing/context capture), and a second if; the async
-  #   arrow gained wrapping parens:
-  #     e.on(`render-process-gone`,(async(t,r)=>{if(!XNn(r))return;let i=CPn();if(!(r.reason===`killed`&&(await new Promise((e=>setTimeout(e,WNn))),e.isDestroyed()||pI()))&&!e.isDestroyed()){if(D.info(`Main webview render process gone: %o
-  #   v1.37937.0: same shape, but the interposed `let` gained a SECOND
-  #   declarator - `let i=ONt(),a=hOt();` (was `let i=CPn();`). `a` is a cached
-  #   main-view heap sample read only for the handled path's telemetry payload,
-  #   so it adds no control flow; the capture below just accepts a
-  #   comma-separated run of call-initialised declarators and re-emits it
-  #   verbatim, preserving its position before the killed-wait `await`.
-  #   v1.46388.2: the second condition is INVERTED into a second early-return
-  #   guard and the handled path is no longer nested in an if-block; the log
-  #   call follows the guard directly:
+  #   v1.32352.1: SPLIT into an early-return guard, an interposed `let`, and a second if
+  #   v1.37937.0: the interposed `let` gained a second declarator
+  #   v1.46388.2: the second condition became a second early-return guard:
   #     e.on("render-process-gone",(async(t,i)=>{if(!T6t(i))return;let a=Q6t(),o=FWt();if(i.reason==="killed"&&(await new Promise((e=>setTimeout(e,_6t))),e.isDestroyed()||XA())||e.isDestroyed())return;N.info("Main webview render process gone: %o",i);
+  #   v2.31226.0: the first guard runs a call first - `if(II(e),!aBn(n))return;`
+  #   v4.29.0: a bare call statement sits between the first guard and the `let`,
+  #   and the second guard is split into two block guards that end the hang-kill
+  #   recovery before returning:
+  #     e.on("render-process-gone",(async(t,n)=>{if($B(e),!Wnr(n))return;d();let r=l(),i=nV(e),s=wV(),c=kVn();
+  #       if(n.reason==="killed"&&(await new Promise((e=>setTimeout(e,Onr))),e.isDestroyed()||XN())){p("abandoned");return}
+  #       if(e.isDestroyed()){p("abandoned");return}P.info("Main webview render process gone: %o",n),...
+  #     p() logs only while a hang-kill recovery is in progress, so these deaths
+  #     still leave no trace in main.log otherwise (#128).
   #
-  # Either early return is a suppressed death that stays silent -- the gap
-  # #128 is about. Both guards gain a log line before their `return`; the
-  # conditions themselves are re-emitted verbatim (the `await` inside the
-  # second one stays where it was, in the enclosing async arrow), so which
-  # deaths get reloaded is unchanged.
-  #   v2.31226.0: the first guard is a comma expression that runs a call before
-  #   the predicate - `if(II(e),!aBn(n))return;`. Leading calls are captured and
-  #   re-emitted in front of the predicate, so they still run first on every
-  #   death; nothing else moved.
+  # Every early return is a suppressed death that stays silent -- the gap #128
+  # is about. Each gains a log line right before its `return`; the guard
+  # conditions, their bodies, the bare calls and the `let` are re-emitted
+  # verbatim (the `await` stays where it was, in the enclosing async arrow), so
+  # which deaths get reloaded is unchanged.
   #
-  # The second condition is captured as a run of non-brace characters, spelled
-  # as three concatenated runs because the regex library caps a repetition
-  # range at 100 (and nesting the bound blows up NFA construction at compile
-  # time). ~100 chars in v1.46388.2, so 300 is the headroom. Excluding braces
+  # The guard run after the `let` is one or more `if(<cond>)return;` or
+  # `if(<cond>){<body>return}` statements. A condition is a run of non-brace
+  # characters, spelled as three concatenated runs because the regex library
+  # caps a repetition range at 100; ~85 chars in v4.29.0. Excluding braces
   # bounds the match so it cannot run into the telemetry object literal that
   # follows the log call.
   #
   # The trailing `.info(<q>Main webview render process gone: %o` both pins this
-  # site (22 render-process-gone mentions exist; only this one logs that
+  # site (50 render-process-gone mentions exist; only this one logs that
   # message) and captures the logger identifier (dotted namespace tolerated).
-  # Count policy: exactly 1 (one main-webview registration in v2.7032.0). A
-  # second copy means upstream duplicated the handler and the site needs a
-  # re-audit; 0 means upstream changed the code. Both fail loudly.
+  # Count policy: exactly 1. A second copy means upstream duplicated the
+  # handler and the site needs a re-audit; 0 means upstream changed the code.
+  # Both fail loudly.
   let pattern =
-    re2"""(\.on\(["`]render-process-gone["`],\(?async\(([\w$]+),([\w$]+)\)=>\{)if\(((?:[\w$]+(?:\.[\w$]+)*\([^()]*\),)*)!([\w$]+)\(([\w$]+)\)\)return;(let [\w$]+=[\w$]+(?:\.[\w$]+)*\([^()]*\)(?:,[\w$]+=[\w$]+(?:\.[\w$]+)*\([^()]*\))*;)if\(([^{}]{1,100}[^{}]{0,100}[^{}]{0,100})\)return;(([\w$]+(?:\.[\w$]+)*)\.info\(["`]Main webview render process gone: %o)"""
+    re2"""(\.on\(["`]render-process-gone["`],\(?async\(([\w$]+),([\w$]+)\)=>\{)(if\(((?:[\w$]+(?:\.[\w$]+)*\([^()]*\),)*)!([\w$]+)\(([\w$]+)\)\)return;)((?:[\w$]+(?:\.[\w$]+)*\([^()]*\);)*)(let [\w$]+=[\w$]+(?:\.[\w$]+)*\([^()]*\)(?:,[\w$]+=[\w$]+(?:\.[\w$]+)*\([^()]*\))*;)((?:if\([^{}]{1,100}[^{}]{0,100}[^{}]{0,100}\)(?:return;|\{[^{}]{0,100}return\}))+)(([\w$]+(?:\.[\w$]+)*)\.info\(["`]Main webview render process gone: %o)"""
   var count = 0
+  var guardCount = 0
   result = input.replace(
     pattern,
     proc(m: RegexMatch2, s: string): string =
-      # group(0) prefix incl. arrow params; group(1) is the (unused) event arg.
+      # group(0) head incl. arrow params; group(1) is the (unused) event arg.
+      let head = s[m.group(0)]
       let details = s[m.group(2)] # RenderProcessGoneDetails
-      let guardPre = s[m.group(3)]
-        # calls run before the predicate (`II(e),`) -- kept verbatim
-      let pred = s[m.group(4)] # hoisted "should we handle this?" predicate
-      let predArg = s[m.group(5)] # what the guard passes to the predicate
-      let letStmt = s[m.group(6)] # interposed `let x=f();` -- kept verbatim
-      let cond = s[m.group(7)] # second guard (killed-after-wait / destroyed)
-      let tail = s[m.group(8)] # the handled path's own `<logger>.info(...` call
-      let logger = s[m.group(9)] # module-level logger
-      if predArg != details:
-        # Guard checks something other than the event details -- shape drifted;
-        # re-emit the match untouched so count stays 0 and we fail loudly.
-        return
-          s[m.group(0)] & "if(" & guardPre & "!" & pred & "(" & predArg & "))return;" &
-          letStmt & "if(" & cond & ")return;" & tail
+      let firstGuard = s[m.group(3)] # `if(<calls>,!<pred>(<details>))return;`
+      let predArg = s[m.group(6)] # what the first guard passes to the predicate
+      let bareCalls = s[m.group(7)] # `d();` -- kept verbatim
+      let letStmt = s[m.group(8)] # interposed `let x=f(),...;` -- kept verbatim
+      let guards = s[m.group(9)] # the killed-grace / destroyed guards
+      let tail = s[m.group(10)] # the handled path's own `<logger>.info(...` call
+      let logger = s[m.group(11)] # module-level logger
+      let whole = s[m.boundaries]
+      let ifs = firstGuard.count("if(") + guards.count("if(")
+      let rets = firstGuard.count("return") + guards.count("return")
+      if predArg != details or ifs != rets:
+        # The guard checks something other than the event details, or a guard
+        # has other than one return -- shape drifted; re-emit untouched so
+        # count stays 0 and we fail loudly.
+        return whole
       inc count
-      let logCall =
-        logger & """.info("Main webview render process gone (suppressed): %o",{reason:""" &
-        details & ".reason,exitCode:" & details & ".exitCode})"
-      s[m.group(0)] & "if(" & guardPre & "!" & pred & "(" & predArg & ")){" & logCall &
-        ";return}" & letStmt & "if(" & cond & "){" & logCall & ";return}" & tail,
+      guardCount = ifs
+      let log = logCall(logger, details)
+      head & addLogs(firstGuard, log) & bareCalls & letStmt & addLogs(guards, log) & tail,
   )
   if count != 1:
-    if "Main webview render process gone" in input:
-      echo "  [INFO] Found 'Main webview render process gone' in file but pattern didn't match exactly once"
+    if HandledLog in input:
+      echo "  [INFO] Found '" & HandledLog &
+        "' in file but pattern didn't match exactly once"
     echo "  [FAIL] suppressed renderer-gone pattern: " & $count & " matches, expected 1"
     quit(1)
-  echo "  [OK] suppressed renderer-gone log: 1 match"
+  if result.count(AppliedMarker) != guardCount:
+    echo "  [FAIL] suppressed renderer-gone log: " & $result.count(AppliedMarker) &
+      " log call(s) injected for " & $guardCount & " early return(s)"
+    quit(1)
+  echo "  [OK] suppressed renderer-gone log: 1 match (" & $guardCount &
+    " early returns logged)"
 
 when isMainModule:
   if paramCount() != 1:

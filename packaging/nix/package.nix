@@ -37,18 +37,23 @@
 , claude-code ? null    # auto-resolved by callPackage if in nixpkgs
 # Cowork agent workspace VM (also requires /dev/kvm + kvm group membership).
 # The app's capability probe needs THREE tools (issue #177):
-#   - qemu-system-x86_64 on PATH            -> qemu (--prefix PATH)
+#   - qemu-system-<arch>                    -> qemu (CLAUDE_QEMU_PATH + --prefix PATH)
 #   - OVMF UEFI CODE+VARS firmware          -> OVMF (CLAUDE_OVMF_CODE_PATH)
 #   - a system virtiofsd                    -> virtiofsd (CLAUDE_VIRTIOFSD_PATH)
 # The bundled resources/virtiofsd does NOT count: the probe only uses the
 # bundled copy on Ubuntu 22.x (os-release gate), and NixOS can't exec it anyway
-# (foreign ld-linux interpreter). The CLAUDE_* env vars are honored by our
-# fix_cowork_firmware_paths_linux patch from release 1.18286.0 on; on older
+# (foreign ld-linux interpreter). The probe looks for QEMU at CLAUDE_QEMU_PATH,
+# then /usr/bin/qemu-system-<arch> (upstream's only candidate since 4.29.0,
+# never present on NixOS), then on PATH; the PATH step is our patch's fallback,
+# so the wrapper sets CLAUDE_QEMU_PATH and keeps the PATH prefix for anything
+# else that runs qemu by name. The CLAUDE_* env vars are honored by our
+# fix_cowork_firmware_paths_linux patch from release 1.18286.0 on
+# (CLAUDE_QEMU_PATH from 4.29.0); on older
 # pinned tarballs they are ignored and the workarounds are: add `pkgs.virtiofsd`
 # to `environment.systemPackages` (the probe checks the resulting
 # /run/current-system/sw/bin/virtiofsd, PR #178) and expose OVMF at a probed
 # /usr/share path via systemd.tmpfiles / an activation-script symlink.
-, qemu ? null           # provides qemu-system-x86_64 for the Cowork VM
+, qemu ? null           # provides qemu-system-<arch> for the Cowork VM
 , virtiofsd ? null      # system virtiofsd (bundled one is Ubuntu-22-only)
 , OVMF ? null           # UEFI firmware; OVMF.fd output must ship CODE+VARS pair
 , socat ? null          # Claude Code shell sandbox (with bubblewrap); faster Quick Entry toggle
@@ -62,9 +67,9 @@
 
 let
   # Updated automatically by CI (build-and-release.yml) on each release.
-  version = "3.6556.2"; # pkgver: always the upstream Claude Desktop version
-  pkgrel = "7"; # Arch-style release counter: bumped on re-releases of the same upstream version, reset to 1 on version bumps
-  hash = "sha256-QDPtt3xFvLdGj66GS5K7LS/B18dxRYq3Y/yBNgt7Cwc=";
+  version = "4.29.0"; # pkgver: always the upstream Claude Desktop version
+  pkgrel = "1"; # Arch-style release counter: bumped on re-releases of the same upstream version, reset to 1 on version bumps
+  hash = "sha256-b7MbCS3StPO9IuMLIksfxn4pl35kKlJMAfGyi1jTkJc=";
   # Every release publishes under its own tag (v<version> for pkgrel 1,
   # v<version>-<pkgrel> for re-releases) and its assets are never overwritten
   # afterwards, so this URL is immutable and a pinned flake.lock keeps fetching
@@ -325,6 +330,7 @@ stdenvNoCC.mkDerivation {
       ${lib.optionalString (glib != null) "--prefix PATH : ${glib}/bin"} \
       ${lib.optionalString (nodejs != null) "--prefix PATH : ${nodejs}/bin"} \
       ${lib.optionalString (qemu != null) "--prefix PATH : ${qemu}/bin"} \
+      ${lib.optionalString (qemu != null) "--set-default CLAUDE_QEMU_PATH ${qemu}/bin/${if stdenvNoCC.hostPlatform.isAarch64 then "qemu-system-aarch64" else "qemu-system-x86_64"}"} \
       --suffix PATH : ${lib.makeBinPath [ python3 xdg-utils ]} \
       ${lib.optionalString (virtiofsd != null) "--set-default CLAUDE_VIRTIOFSD_PATH ${virtiofsd}/bin/virtiofsd"} \
       ${lib.optionalString (OVMF != null) "--set-default CLAUDE_OVMF_CODE_PATH ${OVMF.fd}/FV/${if stdenvNoCC.hostPlatform.isAarch64 then "AAVMF_CODE.fd" else "OVMF_CODE.fd"}"} \

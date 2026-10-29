@@ -297,7 +297,10 @@ def main():
                 (patch_file, nim_bin)
             )
         elif ptype == "nim-dir":
-            # Handled separately by build script (e.g., ion-dist patches)
+            # Handled separately by build-patched-tarball.sh: the ion-dist
+            # patches target resources/ion-dist, which the .deb ships packed as
+            # resources/ion-dist.asar since v4.29.0; the build extracts it,
+            # runs these patches on the extract and repacks it in place.
             pass
         elif ptype == "python":
             # Legacy fallback — shouldn't happen after migration

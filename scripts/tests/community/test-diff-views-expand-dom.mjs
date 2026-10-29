@@ -47,6 +47,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unescapeHtml } from "../lib/unescape-html.mjs";
+import { openIonDist } from "../lib/ion-dist.mjs";
 import vm from "node:vm";
 import Module from "node:module";
 
@@ -453,7 +454,7 @@ async function run() {
     ok(kid.querySelectorAll("polyline").length === 2,
        "the fallback draws two carets, so a missing glyph is still VISIBLE");
     skip("the icon-FONT branch was not exercised: no Anthropicons woff2 was supplied " +
-         "(tmp/extract*/usr/lib/claude-desktop/resources/ion-dist/assets/v1/*.woff2), or the " +
+         "(tmp/extract*/usr/lib/claude-desktop/resources/ion-dist.asar, assets/v1/*.woff2), or the " +
          "in-page probe rejected it. NOT verified: that U+E02C/U+E028 really draw ink, that " +
          "the glyph span keeps upstream's .ico class, and that the font-family is also set " +
          "INLINE. Extract the official .deb into tmp/extract to exercise it.");
@@ -792,16 +793,21 @@ async function run() {
 // The real icon font, if this checkout has an extract. Without it the suite can
 // only prove the fallback - which is the important half: a missing glyph must
 // leave a VISIBLE icon, because this font draws nothing at all for an unmapped
-// codepoint.
+// codepoint. The SPA is resources/ion-dist.asar since v4.29.0 (a plain
+// resources/ion-dist/ dir before), so the font is read through openIonDist()
+// and handed to the page as a data: URL; FONT is that URL, or null.
 const FONT = (() => {
   try {
-    const hits = globSync("tmp/extract*/usr/lib/claude-desktop/resources/ion-dist/assets/v1/*.woff2",
-                          { cwd: ROOT });
-    for (const rel of hits) {
-      const abs = join(ROOT, rel);
-      // Anthropicons is the one with the .ico rule; pick by size band and let
-      // the in-page probe decide - a wrong guess simply fails the upgrade.
-      if (readFileSync(abs).length > 20000) return abs;
+    const trees = globSync("tmp/extract*/usr/lib/claude-desktop", { cwd: ROOT }).sort();
+    for (const rel of trees) {
+      const ion = openIonDist(join(ROOT, rel));
+      if (!ion) continue;
+      for (const name of ion.list("assets/v1").filter((f) => f.endsWith(".woff2")).sort()) {
+        const bytes = ion.read("assets/v1/" + name);
+        // Anthropicons is the one with the .ico rule; pick by size band and let
+        // the in-page probe decide - a wrong guess simply fails the upgrade.
+        if (bytes.length > 20000) return "data:font/woff2;base64," + bytes.toString("base64");
+      }
     }
   } catch {}
   return null;
@@ -816,7 +822,7 @@ function html(fixture, run, font) {
   .filelist { display: block; }
   .epitaxy-panel-subheader { display: block; width: 100%; }
 </style>
-${font ? `<style>@font-face{font-family:Anthropicons-Variable;src:url(file://${font})format("woff2-variations");font-weight:400 700;font-display:block}
+${font ? `<style>@font-face{font-family:Anthropicons-Variable;src:url(${font})format("woff2-variations");font-weight:400 700;font-display:block}
 .ico{font-family:Anthropicons-Variable;font-size:16px;font-weight:400;line-height:1}</style>` : ""}
 </head><body>
 ${fixture}
@@ -992,7 +998,7 @@ let fail = mainFail;
 const skipped = [];
 if (!FONT) {
   console.log("note: no Anthropicons woff2 found under " +
-    "tmp/extract*/usr/lib/claude-desktop/resources/ion-dist/assets/v1/ - " +
+    "tmp/extract*/usr/lib/claude-desktop/resources/ion-dist.asar (assets/v1/) - " +
     "the icon scenario will report its font branch as SKIPPED");
 }
 for (const [name, fx, run, font] of scenarios) {

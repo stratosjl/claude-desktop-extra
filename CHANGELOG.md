@@ -2,9 +2,20 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-10-28
+
+### Upstream v4.29.0
+
+- **Cowork finds QEMU again on RHEL 9, Rocky, Alma and NixOS.** v4.29.0 only accepts `/usr/bin/qemu-system-<arch>` and no longer searches `$PATH`, so Cowork said "requires QEMU" where QEMU lives elsewhere (RHEL's `qemu-kvm` through our shim, the Nix store, `/usr/local/bin`). `fix_cowork_firmware_paths_linux` now tries `CLAUDE_QEMU_PATH`, then `/usr/bin`, then `$PATH`; the Nix package sets `CLAUDE_QEMU_PATH`, and `--diagnose` reports the same order.
+- **The third-party setup window is patched again.** v4.29.0 ships it as `resources/ion-dist.asar` instead of a directory; the build now extracts, patches and repacks it, and a missing or unexpected layout fails the build instead of skipping both ion-dist patches.
+- **Hung window: upstream now reloads by itself.** v4.29.0 expires the watchdog's tokens and re-checks 30 s after a kill attempt, so a renderer death after an attempt no longer leaves the window blank until quit; our hand-off of that death to the reload path (`fix_renderer_clean_exit_reload` sub-patch C) is retired. The SIGKILL fallback stays: on Linux the kill attempt asks the renderer to crash itself, which does nothing when the whole renderer process is stalled. The clean-exit reload (#287) and the log line for suppressed deaths (`fix_renderer_gone_suppressed_log`) stay too; upstream still drops both silently.
+- **Re-fitted to v4.29.0:** Computer Use lock acquire (`fix_computer_use_linux`), the remaining renderer sub-patches, and transcript limits (`add_feature_transcript_limits`, which now also covers Cowork VM transcript copies through the same reader).
+- **Extra -> Deployment** lists the new managed keys `inferenceTokenWarningPercent` and `userFileUploadsEnabled`.
+- **Audited:** feature flags (635 -> 672), platform gates (no new macOS/Windows-only feature that Linux lacks), built-in MCP servers, and the deployment-key, custom-models, quick-open and panel-tabs anchors. Locale files and `claude-browser-shim.js` moved into `app.asar` upstream; nothing of ours reads them.
+
 ## 2026-10-27
 
-### Computer Use on a background display - Experimental (#300)
+### Computer Use on a background display - Experimental (thanks @Konakonai, #300)
 
 - **New Community switch "Computer Use on a background display"** (Settings -> Extra -> Community Features) points Linux Computer Use at a second display you start yourself - Xvfb or Xephyr (via `x11-bridge`), or a headless or nested sway or labwc (via `wlroots-bridge`) - so Claude works there while you keep your desktop. The setup page lists the displays it finds with size, a live preview and the restrictions that apply, gives copy-paste recipes, and has a Test button. The setting is the `computerUseBackgroundDisplay` key (`enabled`, `kind`, `display`, and an `env` map you edit by hand) in `claude-desktop-extra.jsonc`, per profile. Off by default; off is today's behavior. A change applies from Claude's next Computer Use action. Details, recipes and limits: [docs/computer-use.md](docs/computer-use.md#computer-use-on-a-background-display-experimental).
 - **Fails closed.** While the switch is on and display 2 is not running, every Computer Use action is refused; it never falls back to your desktop. Single-instance apps already running on your desktop open there, and Claude is told so. The teach overlay is unavailable in this mode, and KDE Plasma 6.6+ needs a restart to switch. Headless GNOME or KWin, weston, cage and Hyprland/niri headless are not supported targets.
@@ -12,7 +23,7 @@ All notable changes to the claude-desktop-extra packages will be documented in t
 
 ### Computer Use: fixes for every session
 
-- **`wlroots-bridge`: ctrl, alt and shift combos are sent as real modifiers** on wlroots compositors and niri (measured on Sway; `ctrl+c` used to arrive as a plain `c`); the first input is no longer lost on a seat with no keyboard or pointer yet, and held modifiers are released when the bridge is terminated.
+- **`wlroots-bridge`: ctrl, alt and shift combos are sent as real modifiers** on wlroots compositors and niri (measured on Sway; `ctrl+c` used to arrive as a plain `c`); the first input is no longer lost on a seat with no keyboard or pointer yet, and held modifiers are released when the bridge is terminated (thanks @Konakonai, wlroots-bridge#3).
 - **`x11-bridge`: `frontmost-app` answers `null` when no window has focus**, and the window list works on window managers without `_NET_CLIENT_LIST_STACKING` (xfwm4).
 - **Zoom and screenshots recover after a monitor is plugged or unplugged:** a "display not found" answer re-reads the screen list and retries once. Covered by the new `test-cu-screens-invalidate.mjs`.
 - **`open_application` no longer sleeps synchronously** while it waits for the app's window to appear.

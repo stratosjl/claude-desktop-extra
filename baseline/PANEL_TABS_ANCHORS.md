@@ -32,6 +32,17 @@ LOCAL `resources/ion-dist` SPA, which on v2.26454.0 carries `tiles-shell` (5), `
 `elevation:"panel"` (11), `epitaxy-pane-close-control` (5) and `epitaxy.sidePaneStore.v1`, so a 3P-mode
 anchor can be grepped there.
 
+**Desktop-side preconditions re-verified statically on v4.29.0 (2026-10-28, pristine extract):** the nine
+remote anchors (`data-pane-root`, `epitaxy-view-panel`, `tiles-shell`, `tiles-handle`,
+`epitaxy-pane-close-control`, `sidePaneStore`, `tileLayoutBySession`, `expandedTile`, `tileId`) still have
+zero occurrences anywhere in the extracted `app.asar`; `.vite/build/mainView.js` still opens with
+`"use strict";` and contains one `require("electron")`; the main bundle routes `"/epitaxy"` (6) and
+`"/epitaxy/"` (1). The local `resources/ion-dist` SPA (3P Code tab) carries `tiles-shell` (6),
+`"data-pane-root":""` (4), `elevation:"panel"` (15), `epitaxy-pane-close-control` (6), `tiles-handle` (13),
+`epitaxy.sidePaneStore.v1` (9), `tileLayoutBySession` (30) and `expandedTile` (29), and no
+`epitaxy-view-panel` (0, consistent with the 1P note above). The 1P DOM/fiber anchors (A1-A3 and the table
+below) need the live console recipes and were not measured on 4.29.0.
+
 Everything else the panel-tabs feature reaches into remote claude.ai markup or its React
 fiber. Re-validate this list on every upstream bump: a green build proves the Nim
 patterns still matched the bundle, **not** that these DOM/fiber anchors still exist -

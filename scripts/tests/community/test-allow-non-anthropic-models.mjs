@@ -20,13 +20,14 @@
  * gateway validator, fed by window.desktopBootFeatures.
  */
 import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync,
-         readdirSync, copyFileSync, accessSync, constants } from "node:fs";
+         readdirSync, accessSync, constants } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import Module from "node:module";
+import { openIonDist } from "../lib/ion-dist.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const MODULE_PATH = join(ROOT, "js/allow_non_anthropic_models.js");
@@ -353,13 +354,14 @@ if (!binRunnable) {
 }
 
 // --- Part D: the ion-dist half (Setup window SPA), patched by its own binary --
-// Copies the pristine ion-dist SPA, applies add_feature_allow_non_anthropic_models_ion,
+// Copies the pristine ion-dist SPA's assets/v1/*.js (from resources/ion-dist.asar
+// since v4.29.0, or a pre-4.29.0 resources/ion-dist/ dir), applies add_feature_allow_non_anthropic_models_ion,
 // checks the single splice, evals the real patched validator with
 // desktopBootFeatures carrying / lacking the switch, node --checks the file,
 // re-runs for idempotency, and checks a fixture without the site fails loud.
 {
   const ION_BIN = join(ROOT, "patches/community/add_feature_allow_non_anthropic_models_ion");
-  const ION_SRC = join(ROOT, "tmp/extract/usr/lib/claude-desktop/resources/ion-dist");
+  const ION_SRC = openIonDist(join(ROOT, "tmp/extract/usr/lib/claude-desktop"));
   const ION_MARK = "/*cdb-mb:ion-validator*/";
   const ION_GUARD = '(globalThis.desktopBootFeatures?.cdbAllowNonAnthropicModels?.status==="supported")';
   let ionRunnable = false;
@@ -376,15 +378,14 @@ if (!binRunnable) {
     ok(refused, "ion: an SPA without the gateway validator fails loud");
     rmSync(fdir, { recursive: true, force: true });
 
-    if (!existsSync(join(ION_SRC, "assets/v1"))) {
+    if (!ION_SRC) {
       console.log("  skip real ion-dist (no extract under tmp/extract/)");
     } else {
       const dir = mkdtempSync(join(tmpdir(), "cdb-mb-ion-"));
       const v1 = join(dir, "assets/v1");
       execFileSync("mkdir", ["-p", v1]);
-      const srcV1 = join(ION_SRC, "assets/v1");
-      const jsFiles = readdirSync(srcV1).filter((f) => f.endsWith(".js"));
-      for (const f of jsFiles) copyFileSync(join(srcV1, f), join(v1, f));
+      const jsFiles = ION_SRC.list("assets/v1").filter((f) => f.endsWith(".js"));
+      for (const f of jsFiles) writeFileSync(join(v1, f), ION_SRC.read("assets/v1/" + f));
       const before = Object.fromEntries(jsFiles.map((f) => [f, readFileSync(join(v1, f), "utf8")]));
       const out = execFileSync(ION_BIN, [dir], { encoding: "utf8" });
       ok(/\[PASS\]/.test(out) && !/\[FAIL\]/.test(out), "ion: binary applies cleanly to the pristine SPA: " + out.trim().split("\n").pop());
