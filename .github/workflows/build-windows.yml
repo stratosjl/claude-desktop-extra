@@ -99,10 +99,11 @@ jobs:
           set -euo pipefail
           src="$RUNNER_TEMP/src"
           scripts/windows/prepare-sources.sh "$src"
-          node "$src/scripts/tests/community/test-custom-models-main.mjs"
-          node "$src/scripts/tests/windows/test-windows-profiles.mjs"
-          # The runner image ships Google Chrome, which this test finds itself.
-          node "$src/scripts/tests/core/test-extra-settings-dom.mjs"
+          make -C "$src/patches" -j"$(nproc)" >/dev/null
+          # Upstream's harnesses for every feature the Windows build ships, plus
+          # the Windows ones, all on the overlaid code. The DOM suites find the
+          # runner image's Google Chrome themselves.
+          for cat in core community windows; do bash "$src/scripts/run-feature-tests.sh" "$cat"; done
 
       - name: Build
         id: build
@@ -147,10 +148,28 @@ jobs:
           if (-not (Test-Path $exe)) { throw "not installed: $exe" }
           if (-not (Test-Path $lnk)) { throw "no profile shortcut: $lnk" }
 
+          # A theme set in the profile's config, so the theme engine has to load one.
+          $ud = Join-Path $env:APPDATA 'Claude-ci'
+          New-Item -ItemType Directory -Force -Path $ud | Out-Null
+          [IO.File]::WriteAllText((Join-Path $ud 'claude-desktop-extra.json'), '{"activeTheme":"nord"}', (New-Object Text.UTF8Encoding $false))
+
           $p = Start-Process -FilePath $exe -ArgumentList '--profile=ci' -PassThru
-          $log = Join-Path $env:APPDATA 'Claude-ci\logs\claude-patches.log'
-          $deadline = (Get-Date).AddSeconds(90)
-          $want = @("profile 'ci' (requested)", '[custom-models] installed (main)')
+          $log = Join-Path $ud 'logs\claude-patches.log'
+          $deadline = (Get-Date).AddSeconds(120)
+          # One startup line per feature the Windows build ships.
+          $want = @(
+            "profile 'ci' (requested)",
+            '[ExtraSettings] Extra settings area armed',
+            '[custom-models] installed (main)',
+            '[cdb-models] installed',
+            '[CustomThemes] Active theme: nord',
+            '[ThemePicker] Ctrl+Shift+T armed',
+            '[cdb-devtools] installed',
+            '[DiffViews] installed (main)',
+            '[files-quick-open] installed (main)',
+            '[panel-tabs] installed (main)',
+            '[transcript-limits] installed (main)'
+          )
           do {
             Start-Sleep -Seconds 5
             $text = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
@@ -185,7 +204,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="windows-v${VERSION}"
-          notes="Portable Windows 11 build of Claude Desktop ${VERSION} with custom models and profiles. Unzip and run Install.cmd. See docs/windows.md."
+          notes="Portable Windows 11 build of Claude Desktop ${VERSION} with the claude-desktop-extra extras: profiles, themes, custom models, Code tab extras and more (Settings > Extra). Unzip and run Install.cmd. See docs/windows.md."
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber dist/*.zip dist/*.sha256
           else

@@ -116,7 +116,8 @@ RES="$APP_TREE/resources"
 [ -f "$APP_TREE/claude.exe" ] && [ -f "$RES/app.asar" ] || die "not a Claude Desktop package: claude.exe or resources/app.asar missing"
 cp "$RES/app.asar" "$WORK/original.asar"
 
-log "Fuses: $(python3 -I "$SCRIPT_DIR/asar_integrity.py" fuses "$APP_TREE/claude.exe" | tr '\n' ' ')"
+FUSES="$(python3 -I "$SCRIPT_DIR/asar_integrity.py" fuses "$APP_TREE/claude.exe")" || die "cannot read claude.exe's fuses"
+log "Fuses: $(tr '\n' ' ' <<< "$FUSES")"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" unpacked "$WORK/original.asar" > "$WORK/unpacked.before"
 
 mkdir -p "$WORK/app"
@@ -133,9 +134,59 @@ make -C "$SRC/patches" -j"$(nproc)" >/dev/null
 log "Applying the Windows patch set"
 python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 
+# ion-dist (the third-party inference setup window) is not inside app.asar:
+# its `@patch-type: nim-dir` patches run on a folder, as in
+# build-patched-tarball.sh. Since v4.29.0 it ships packed as
+# resources/ion-dist.asar (before, as a resources/ion-dist folder): the archive
+# is extracted, patched and repacked to its place, and its record in the exe's
+# integrity resource rewritten like app.asar's (step 4). The Linux-only ion
+# fix (fix_ion_dist_linux) stays out.
+ION_ASAR="$RES/ion-dist.asar"
+if [ -e "$ION_ASAR" ] && [ -e "$RES/ion-dist" ]; then
+    die "the package has both resources/ion-dist.asar and resources/ion-dist/ - re-audit which one the app serves"
+elif [ -e "$ION_ASAR" ]; then
+    { [ -f "$ION_ASAR" ] && [ ! -L "$ION_ASAR" ]; } || die "resources/ion-dist.asar is not a regular file"
+    # The repack writes every file into the archive: an --unpack layout would be lost.
+    [ ! -e "$ION_ASAR.unpacked" ] || die "resources/ion-dist.asar.unpacked exists - teach the repack its --unpack layout"
+    ION_FORMAT=asar
+    ION_DIR="$WORK/ion-dist"
+    cp "$ION_ASAR" "$WORK/original-ion-dist.asar"
+    "${ASAR[@]}" extract "$ION_ASAR" "$ION_DIR"
+elif [ -d "$RES/ion-dist" ]; then
+    ION_FORMAT=dir
+    ION_DIR="$RES/ion-dist"
+else
+    die "neither resources/ion-dist.asar nor resources/ion-dist/ in the package - the layout moved; re-audit the ion-dist patches"
+fi
+[ -f "$ION_DIR/index.html" ] && [ -d "$ION_DIR/assets/v1" ] ||
+    die "the staged ion-dist ($ION_FORMAT) has no index.html or assets/v1/ - the setup window's layout moved"
+WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
+for p in "${WINDOWS_ION_PATCHES[@]}"; do
+    grep -q '^# @patch-type: nim-dir$' "$SRC/patches/$p.nim" || die "$p is not a nim-dir patch"
+    log "Applying $p to ion-dist ($ION_FORMAT)"
+    "$SRC/patches/$p" "$ION_DIR" || die "ion-dist patch failed: $p"
+done
+if [ "$ION_FORMAT" = asar ]; then
+    log "Repacking ion-dist.asar"
+    "${ASAR[@]}" pack "$ION_DIR" "$WORK/ion-dist.asar"
+    # Read it back: every staged file packed (`asar list --is-pack` prints
+    # "pack   : /path" or "unpack : /path"), none unpacked, index.html there.
+    "${ASAR[@]}" list --is-pack "$WORK/ion-dist.asar" > "$WORK/ion-dist.list" ||
+        die "the repacked ion-dist.asar does not read back"
+    if grep -q '^unpack ' "$WORK/ion-dist.list"; then die "the repacked ion-dist.asar flags unpacked files"; fi
+    grep -qx 'pack *: /index.html' "$WORK/ion-dist.list" || die "the repacked ion-dist.asar has no /index.html"
+    missing="$(LC_ALL=C comm -23 \
+        <(cd "$ION_DIR" && find . -type f | sed 's|^\.||' | LC_ALL=C sort) \
+        <(sed -n 's/^pack *: //p' "$WORK/ion-dist.list" | LC_ALL=C sort) | wc -l)"
+    [ "$missing" -eq 0 ] || die "the repacked ion-dist.asar is missing $missing of the staged files"
+    mv -f "$WORK/ion-dist.asar" "$ION_ASAR"
+    rm -rf "$ION_DIR"
+fi
+
 log "Validating JavaScript syntax"
 bad=0
-for js in "$WORK/app/app.asar.contents/.vite/build/"*.js; do
+for js in "$WORK/app/app.asar.contents/.vite/build/"*.js "$WORK/app/app.asar.contents/.vite/build/"*-worker/*.js; do
+    [ -f "$js" ] || continue
     node --check "$js" 2>/dev/null || { echo "  syntax error: $(basename "$js")" >&2; bad=1; }
 done
 [ "$bad" = 0 ] || die "patched JavaScript does not parse"
@@ -152,21 +203,43 @@ log "Repacking app.asar"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" unpacked "$WORK/app/app.asar" > "$WORK/unpacked.after"
 diff -u "$WORK/unpacked.before" "$WORK/unpacked.after" >&2 ||
     die "the repacked asar unpacks a different set of files than the official one"
-# Electron also checks every file it reads from the archive against its block
-# hashes, so each file entry must carry them.
-node -e '
-  const h = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-  let n = 0, missing = 0;
-  (function walk(d) { for (const e of Object.values(d.files || {})) {
-    if (e.files) walk(e); else if (!e.unpacked && !e.link) { n++; if (!e.integrity || !e.integrity.hash) missing++; } } })(h);
-  if (!n || missing) { console.error("integrity blocks missing on " + missing + " of " + n + " files"); process.exit(1); }
-' <(python3 -I -c 'import sys,struct;f=open(sys.argv[1],"rb");_,_,_,n=struct.unpack("<4I",f.read(16));sys.stdout.write(f.read(n).decode())' "$WORK/app/app.asar") ||
-    die "the repacked asar has no per-file integrity"
+# Electron also checks every file it reads from a checked archive against its
+# block hashes, so each file entry must carry them.
+block_integrity() {
+    node -e '
+      const h = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let n = 0, missing = 0;
+      (function walk(d) { for (const e of Object.values(d.files || {})) {
+        if (e.files) walk(e); else if (!e.unpacked && !e.link) { n++; if (!e.integrity || !e.integrity.hash) missing++; } } })(h);
+      if (!n || missing) { console.error("integrity blocks missing on " + missing + " of " + n + " files"); process.exit(1); }
+    ' <(python3 -I -c 'import sys,struct;f=open(sys.argv[1],"rb");_,_,_,n=struct.unpack("<4I",f.read(16));sys.stdout.write(f.read(n).decode())' "$1")
+}
+block_integrity "$WORK/app/app.asar" || die "the repacked asar has no per-file integrity"
 
 rm -rf "$RES/app.asar" "$RES/app.asar.unpacked"
 mv "$WORK/app/app.asar" "$RES/app.asar"
 mv "$WORK/app/app.asar.unpacked" "$RES/app.asar.unpacked"
 python3 -I "$SCRIPT_DIR/asar_integrity.py" fix-exe "$APP_TREE/claude.exe" "$WORK/original.asar" "$RES/app.asar"
+# With the fuse on, Electron also aborts when it opens any other archive below
+# the exe's folder that has no record or a stale one (it matches the record
+# names lowercased). A repacked ion-dist.asar needs its record rewritten too,
+# under the exe's own spelling of the name.
+records="$(python3 -I "$SCRIPT_DIR/asar_integrity.py" records "$APP_TREE/claude.exe")" ||
+    die "cannot read claude.exe's integrity records"
+log "claude.exe integrity records: $(tr '\n' ' ' <<< "$records")"
+if [ "$ION_FORMAT" = asar ]; then
+    ion_rec="$(grep -ixF 'ion-dist.asar' <<< "$records" || true)"
+    if [ -n "$ion_rec" ]; then
+        [ "$(wc -l <<< "$ion_rec")" -eq 1 ] || die "claude.exe has several integrity records for ion-dist.asar"
+        block_integrity "$ION_ASAR" || die "the repacked ion-dist.asar has no per-file integrity"
+        python3 -I "$SCRIPT_DIR/asar_integrity.py" fix-exe "$APP_TREE/claude.exe" \
+            "$WORK/original-ion-dist.asar" "$ION_ASAR" "$ion_rec"
+    elif grep -qx 'EnableEmbeddedAsarIntegrityValidation=1' <<< "$FUSES"; then
+        die "claude.exe has no integrity record for resources\\ion-dist.asar, but with its integrity fuse on Electron aborts on an archive without one - re-audit the package"
+    fi
+fi
+# End state: every record names the header hash of the archive it is for.
+python3 -I "$SCRIPT_DIR/asar_integrity.py" verify "$APP_TREE/claude.exe" "$APP_TREE"
 
 # The Squirrel updater and its shortcut stub only work inside Squirrel's own
 # install layout; this build is portable.
@@ -178,7 +251,21 @@ rm -f "$APP_TREE/squirrel.exe" "$APP_TREE/claude_ExecutionStub.exe"
 NAME="claude-desktop-extra-$VERSION-windows-$ARCH"
 STAGE="$WORK/$NAME"
 mkdir -p "$STAGE"
-mv "$APP_TREE" "$STAGE/app"
+
+# The app goes in as app.zip, which Install-ClaudeExtra.ps1 unpacks straight
+# into its install folder. Unpacked by Explorer instead, its deepest files
+# (ion-dist fonts) would sit under the user's download folder plus our folder
+# names and pass Windows' 260-character path limit ("Error 0x80010135: Path
+# too long"). The installer folder is short and known, so cap the app's own
+# paths here: %LOCALAPPDATA%\Programs\Claude Desktop Extra\app.new\ is about 70
+# characters for a typical user name.
+MAX_REL_PATH=150
+longest="$(cd "$APP_TREE" && find . -type f | sed 's|^\./||' \
+    | awk 'length($0) > n { n = length($0); p = $0 } END { print n "\t" p }')"
+[ "${longest%%$'\t'*}" -le "$MAX_REL_PATH" ] \
+    || die "app path longer than $MAX_REL_PATH characters, too close to Windows' path limit: ${longest#*$'\t'}"
+( cd "$APP_TREE" && zip -qr -X "$STAGE/app.zip" . )
+rm -rf "$APP_TREE"
 cp "$PKG_DIR/Install-ClaudeExtra.ps1" "$PKG_DIR/Install.cmd" "$STAGE/"
 sed 's/$/\r/' "$PKG_DIR/README-Windows.txt" > "$STAGE/README-Windows.txt"
 {
@@ -193,6 +280,7 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 ZIP="$OUT_DIR/$NAME.zip"
 rm -f "$ZIP"
-( cd "$WORK" && zip -qr -X "$ZIP" "$NAME" )
+# -n .zip: app.zip is already compressed; store it as is.
+( cd "$WORK" && zip -qr -X -n .zip "$ZIP" "$NAME" )
 ( cd "$OUT_DIR" && sha256sum "$NAME.zip" > "$NAME.zip.sha256" )
 log "Built $ZIP ($(du -h "$ZIP" | cut -f1))"

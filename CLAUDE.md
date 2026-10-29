@@ -2,7 +2,7 @@
 
 @AGENTS.md
 
-AGENTS.md is upstream's (patrickjaja/claude-desktop-extra) and is kept byte-identical to it. This file adds what is specific to this fork: an experimental **Windows 11 build** with custom models and multiple profiles. User guide and build details: [docs/windows.md](docs/windows.md).
+AGENTS.md is upstream's (patrickjaja/claude-desktop-extra) and is kept byte-identical to it. This file adds what is specific to this fork: an experimental **Windows 11 build** with multiple profiles and the core and community extras (all but the Linux window handling and the Quick Entry socket). User guide and build details: [docs/windows.md](docs/windows.md).
 
 ## Rule: never edit upstream files in place
 
@@ -35,10 +35,11 @@ Check before committing: `git diff --diff-filter=M upstream/master...HEAD --stat
 scripts/windows/prepare-sources.sh /tmp/src
 node /tmp/src/scripts/tests/community/test-custom-models-main.mjs
 node /tmp/src/scripts/tests/windows/test-windows-profiles.mjs
+node /tmp/src/scripts/tests/windows/test-windows-feature-gates.mjs
 node /tmp/src/scripts/tests/core/test-extra-settings-dom.mjs   # needs Chromium
 scripts/windows/build-windows.sh --out dist                   # Node 24+, Nim + regex, asar
 ```
 
-The real proof is the **Build Windows** smoke-test job: it installs the zip on a Windows runner and boots `claude.exe --profile=ci`.
+The real proof is the **Build Windows** smoke-test job: it installs the zip on a Windows runner, boots `claude.exe --profile=ci` and waits for one startup line per shipped feature in `claude-patches.log`. A feature added to the Windows build gets its line added there, its row added to `WINDOWS_ROWS` in the overlay, and its module to `test-windows-feature-gates.mjs`.
 
 Known red check: `Build & Release / check-version` fails on this fork because it has no Linux releases. The fork does not publish Linux packages.
