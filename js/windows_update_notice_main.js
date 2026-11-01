@@ -56,18 +56,17 @@
     return 0;
   }
 
-  // The newest published windows-v release as {v, tag, url}, or null. A release
-  // whose page is not on this repo is skipped: its URL is what "Open download
-  // page" opens.
+  // The newest published windows-v release as {v, tag, url}, or null. The page
+  // "Open download page" opens is built from the tag, which TAG_RE has
+  // checked, never taken from the API's html_url.
   function newestRelease(list) {
     var best = null;
     (Array.isArray(list) ? list : []).forEach(function (r) {
       if (!r || r.draft || r.prerelease || typeof r.tag_name !== "string") return;
       var m = TAG_RE.exec(r.tag_name);
       if (!m) return;
-      if (typeof r.html_url !== "string" || r.html_url.indexOf(PAGE_PREFIX) !== 0) return;
       var v = [Number(m[1]), Number(m[2]), Number(m[3])];
-      if (!best || compare(v, best.v) > 0) best = { v: v, tag: r.tag_name, url: r.html_url };
+      if (!best || compare(v, best.v) > 0) best = { v: v, tag: r.tag_name, url: PAGE_PREFIX + "tag/" + r.tag_name };
     });
     return best;
   }
@@ -100,7 +99,7 @@
     if (busy) return Promise.resolve();
     busy = true;
     var installed = String(_app.getVersion());
-    return fetchReleases().then(function (list) {
+    return Promise.resolve().then(fetchReleases).then(function (list) {
       var cur = parseVersion(installed);
       var n = newestRelease(list);
       if (!cur) { log("installed version " + installed + " is not X.Y.Z; not comparing"); return; }

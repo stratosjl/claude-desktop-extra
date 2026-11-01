@@ -6,8 +6,9 @@
  *
  * Runs the real module with electron shimmed (app.whenReady, getVersion,
  * net.fetch answering a canned GitHub release list, dialog, shell) and
- * process.platform "win32", in a temporary userData. Timers are captured, not
- * run: each check is started through globalThis.__cdbWinUpdate.check().
+ * process.platform "win32", in a temporary userData. Timers are captured with
+ * their callbacks and run by hand: the startup timer is fired once to prove the
+ * path the app takes, the other checks call globalThis.__cdbWinUpdate.check().
  */
 import { readFileSync, mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,9 +52,9 @@ function load(opts) {
     require: (m) => (m === "electron" ? electron : Module.createRequire(import.meta.url)(m)),
     process: { platform: o.platform, env: o.env },
     console, JSON, String, Number, Array, Promise, Error, AbortController,
-    setTimeout: (fn, ms) => { calls.timeouts.push(ms); return { unref() {} }; },
+    setTimeout: (fn, ms) => { calls.timeouts.push({ fn, ms }); return { unref() {} }; },
     clearTimeout: () => {},
-    setInterval: (fn, ms) => { calls.intervals.push(ms); return { unref() {} }; },
+    setInterval: (fn, ms) => { calls.intervals.push({ fn, ms }); return { unref() {} }; },
     __cdbDiag: (m) => calls.logs.push(String(m))
   };
   sandbox.globalThis = sandbox;
@@ -81,8 +82,48 @@ for (const platform of ["linux", "darwin"]) {
   const m = load({ userData: freshUserData(), answer: releases([]) });
   await tick();
   ok(m.calls.logs.some((l) => l.startsWith("[win-update] armed")), "logs the armed line the smoke test waits for");
-  ok(m.calls.timeouts.includes(60000), "first check 60 s after ready");
+  ok(m.calls.timeouts.some((t) => t.ms === 60000), "first check 60 s after ready");
   ok(m.calls.fetch.length === 0, "nothing fetched at startup itself");
+}
+
+// --- the path the app takes: the startup timer, then the 12 h interval ---------------
+{
+  const m = load({ userData: freshUserData(), answer: releases([rel("windows-v4.5100.2")]) });
+  await tick();
+  m.calls.timeouts.find((t) => t.ms === 60000).fn();
+  await tick(); await tick();
+  ok(m.calls.fetch.length === 1 && m.calls.dialog.length === 1, "the startup timer runs a check (one fetch, the dialog)");
+  const every = m.calls.intervals.find((t) => t.ms === 12 * 60 * 60 * 1000);
+  ok(!!every, "and starts the 12 h interval");
+  m.setAnswer(releases([rel("windows-v4.5100.2"), rel("windows-v4.6000.0")]));
+  every.fn();
+  await tick(); await tick();
+  ok(m.calls.fetch.length === 2 && m.calls.dialog.length === 2 && m.calls.dialog[1].message.includes("4.6000.0"),
+     "the interval runs the next check");
+}
+
+// --- overlapping checks, and the fetch timeout ---------------------------------------------
+{
+  const m = load({ userData: freshUserData(), answer: releases([]) });
+  await tick();
+  const a = m.check(), b = m.check();
+  await Promise.all([a, b]);
+  ok(m.calls.fetch.length === 1, "a check started while one runs does not fetch again");
+  const init = m.calls.fetch[0].init;
+  const abort = m.calls.timeouts.find((t) => t.ms === 15000);
+  ok(init && init.signal && init.signal.aborted === false && !!abort, "the fetch carries a signal and a 15 s timeout");
+  abort.fn();
+  ok(init.signal.aborted === true, "the timeout aborts the fetch");
+}
+
+// --- the page opened is built from the tag, never the API's html_url ---------------------------
+{
+  const evil = "https://github.com/stratosjl/claude-desktop-extra/releases/../../../evil/repo/releases/download/v1/setup.exe";
+  const m = load({ userData: freshUserData(), answer: releases([rel("windows-v5.0.0", { html_url: evil })]) });
+  await tick();
+  await m.check();
+  ok(m.calls.dialog.length === 1 && m.calls.opened.length === 1 && m.calls.opened[0] === PAGE + "windows-v5.0.0",
+     "a forged html_url is ignored: the release page is built from the tag");
 }
 
 // --- CDB_UPDATE_NOTICE=0 ----------------------------------------------------------------
@@ -136,7 +177,7 @@ for (const [label, list] of [
   ["older version", [rel("windows-v4.29.0")]],
   ["only drafts and prereleases are newer", [rel("windows-v4.4212.0"), rel("windows-v5.0.0", { draft: true }), rel("windows-v5.1.0", { prerelease: true })]],
   ["only Linux tags are newer", [rel("v5.0.0"), rel("v5.0.0-2")]],
-  ["a newer release whose page is not on this repo", [rel("windows-v5.0.0", { html_url: "https://example.com/windows-v5.0.0" })]],
+  ["a tag that only looks like ours", [rel("windows-v5.0.0/../../x"), rel("windows-v5.0"), rel("xwindows-v5.0.0")]],
   ["an empty list", []],
   ["not a list", { message: "Not Found" }]
 ]) {
