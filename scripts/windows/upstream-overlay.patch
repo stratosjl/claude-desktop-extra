@@ -292,7 +292,7 @@ index 6a0a445..014f9cc 100644
    globalThis.__cdbTranscriptLimitsMain = true;
  
 diff --git a/patches/Makefile b/patches/Makefile
-index 3b57d3b..f587074 100644
+index 3b57d3b..1b8f0c4 100644
 --- a/patches/Makefile
 +++ b/patches/Makefile
 @@ -1,9 +1,10 @@
@@ -316,12 +316,15 @@ index 3b57d3b..f587074 100644
  BINS := $(SRCS:.nim=)
  
  ifeq ($(strip $(SRCS)),)
-@@ -144,5 +145,8 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
+@@ -144,5 +145,11 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
  # .jsonc template at runtime.
  core/add_growthbook_overrides: ../js/growthbook_overrides.js
  
 +# Windows build only: profile selection and sign-in callback routing.
 +windows/add_windows_profiles: ../js/windows_profiles_main.js
++
++# Windows build only: the notice that a newer windows-v release is out.
++windows/add_windows_update_notice: ../js/windows_update_notice_main.js
 +
  clean:
  	@rm -rf $(BINS) .nimcache
@@ -388,7 +391,7 @@ index ede612a..38a4dbf 100644
  var __cdb_readCfg=function(p){var r=__cdb_readRaw(p);if(r===null)return null;try{return JSON.parse(__cdb_stripJsonc(r))}catch(e){__cdb_parseFailed=true;__cdb_log("Error parsing "+p+": "+e.message);return null}};
  // One theme per file from themes.d/. A file is either the theme object itself (name =
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
-index a0e9aaf..5eb8236 100644
+index a0e9aaf..64e9e9f 100644
 --- a/scripts/apply_patches.py
 +++ b/scripts/apply_patches.py
 @@ -11,7 +11,11 @@ target location.
@@ -413,7 +416,7 @@ index a0e9aaf..5eb8236 100644
 +# prefix injections then land ahead of the others). Pinned like
 +# EXPECTED_PATCH_COUNT.
 +WINDOWS_SUBDIR = "windows"
-+EXPECTED_WINDOWS_PATCH_COUNT = 1
++EXPECTED_WINDOWS_PATCH_COUNT = 2
 +# Shared patches the Windows build carries: every core and community feature
 +# except Linux window handling (window controls, native titlebar, window
 +# transparency), the Quick Entry socket and the Linux profile launcher's URL
@@ -516,7 +519,7 @@ index a0e9aaf..5eb8236 100644
      nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
  
 diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
-index 9d86671..50d0d56 100755
+index 9d86671..2a7fde7 100755
 --- a/scripts/run-feature-tests.sh
 +++ b/scripts/run-feature-tests.sh
 @@ -1,5 +1,5 @@
@@ -556,7 +559,7 @@ index 9d86671..50d0d56 100755
 +# lines so that upstream adding a harness does not break this overlay.
 +if [ "$ENFORCE_COUNT" = true ]; then
 +    CATEGORIES+=(windows)
-+    EXPECTED_TEST_HARNESSES=$((EXPECTED_TEST_HARNESSES + 2))
++    EXPECTED_TEST_HARNESSES=$((EXPECTED_TEST_HARNESSES + 3))
 +fi
 +
  if ! command -v node >/dev/null 2>&1; then

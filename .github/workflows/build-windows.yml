@@ -9,9 +9,9 @@ name: Build Windows
 # upstream-sync.yml (workflow_call) when upstream or Anthropic's Windows
 # version moved.
 #
-# Built on Linux like every other package, then booted on a real Windows runner:
-# a broken integrity hash or a patch that throws at startup shows up there, not
-# on a user's machine.
+# Built on Linux like every other package, then booted on real Windows runners
+# (x64 and arm64): a broken integrity hash or a patch that throws at startup
+# shows up there, not on a user's machine.
 
 on:
   workflow_dispatch:
@@ -45,7 +45,8 @@ on:
       - 'scripts/windows/**'
       - 'packaging/windows/**'
       - 'patches/windows/**'
-      - 'js/windows_profiles_main.js'
+      - 'js/windows_*.js'
+      - 'scripts/tests/windows/**'
       - 'js/custom_models_*.js'
       - 'js/extra_settings_*.js'
       - 'scripts/apply_patches.py'
@@ -128,11 +129,22 @@ jobs:
 
   smoke-test:
     needs: build
-    runs-on: windows-latest
+    # Each architecture boots on its own Windows: arm64 on GitHub's Windows 11
+    # Arm runner (free for public repositories).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    name: smoke-test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: windows-x64
+          name: windows-${{ matrix.arch }}
           path: dist
 
       - name: Install and boot a test profile
@@ -168,7 +180,8 @@ jobs:
             '[DiffViews] installed (main)',
             '[files-quick-open] installed (main)',
             '[panel-tabs] installed (main)',
-            '[transcript-limits] installed (main)'
+            '[transcript-limits] installed (main)',
+            '[win-update] armed'
           )
           do {
             Start-Sleep -Seconds 5

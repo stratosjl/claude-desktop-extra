@@ -24,13 +24,14 @@ Check before committing: `git diff --diff-filter=M upstream/master...HEAD --stat
 
 | Path | What |
 |---|---|
-| `scripts/windows/build-windows.sh` | Download + verify the official Windows `.nupkg`, patch, repack, rewrite the asar integrity hash in `claude.exe`, zip |
+| `scripts/windows/build-windows.sh` | Download + verify the official Windows `.nupkg`, run the absorption probe on the Windows set, patch, repack, rewrite the asar integrity records in `claude.exe`, zip |
 | `scripts/windows/prepare-sources.sh`, `scripts/windows/upstream-overlay.patch` | The fork's edits to upstream files, applied at build time |
 | `scripts/windows/asar_integrity.py` | asar header hash, fuses, the exe integrity record (Windows enforces it; Linux does not) |
 | `patches/windows/add_windows_profiles.nim`, `js/windows_profiles_main.js` | `--profile=NAME` and sign-in callback routing, injected into `index.pre.js` |
+| `patches/windows/add_windows_update_notice.nim`, `js/windows_update_notice_main.js` | Once-per-version dialog when a newer `windows-v` release is out (the build has no updater), appended to `index.pre.js` |
 | `packaging/windows/` | `Install.cmd`, `Install-ClaudeExtra.ps1`, `README-Windows.txt` |
 | `scripts/tests/windows/` | Windows harnesses; run them on a prepared copy (the overlaid upstream tests too) |
-| `.github/workflows/build-windows.yml` | Build x64 + arm64, boot x64 on a Windows runner, publish `windows-v<version>` (`--latest=false`) |
+| `.github/workflows/build-windows.yml` | Build x64 + arm64, boot each on a Windows runner of its architecture, publish `windows-v<version>` (`--latest=false`) |
 | `.github/workflows/upstream-sync.yml` | Every 6 hours: sync master, rebuild + publish when upstream or Anthropic's Windows version moved (or while a failure issue is open), report failures |
 
 ## Checks for a Windows change
@@ -40,10 +41,11 @@ scripts/windows/prepare-sources.sh /tmp/src
 node /tmp/src/scripts/tests/community/test-custom-models-main.mjs
 node /tmp/src/scripts/tests/windows/test-windows-profiles.mjs
 node /tmp/src/scripts/tests/windows/test-windows-feature-gates.mjs
+node /tmp/src/scripts/tests/windows/test-windows-update-notice.mjs
 node /tmp/src/scripts/tests/core/test-extra-settings-dom.mjs   # needs Chromium
 scripts/windows/build-windows.sh --out dist                   # Node 24+, Nim + regex, asar
 ```
 
-The real proof is the **Build Windows** smoke-test job: it installs the zip on a Windows runner, boots `claude.exe --profile=ci` and waits for one startup line per shipped feature in `claude-patches.log`. A feature added to the Windows build gets its line added there, its row added to `WINDOWS_ROWS` in the overlay, and its module to `test-windows-feature-gates.mjs`.
+The real proof is the **Build Windows** smoke-test job: for x64 and for arm64 it installs the zip on a Windows runner of that architecture, boots `claude.exe --profile=ci` and waits for one startup line per shipped feature in `claude-patches.log`. A feature added to the Windows build gets its line added there, its row added to `WINDOWS_ROWS` in the overlay, and its module to `test-windows-feature-gates.mjs`.
 
 Known red check: `Build & Release / check-version` fails on this fork because it has no Linux releases. The fork does not publish Linux packages.

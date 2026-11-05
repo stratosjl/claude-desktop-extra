@@ -131,8 +131,6 @@ SRC="$WORK/src"
 "$SCRIPT_DIR/prepare-sources.sh" "$SRC"
 log "Compiling patches"
 make -C "$SRC/patches" -j"$(nproc)" >/dev/null
-log "Applying the Windows patch set"
-python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
 
 # ion-dist (the third-party inference setup window) is not inside app.asar:
 # its `@patch-type: nim-dir` patches run on a folder, as in
@@ -161,6 +159,41 @@ fi
 [ -f "$ION_DIR/index.html" ] && [ -d "$ION_DIR/assets/v1" ] ||
     die "the staged ion-dist ($ION_FORMAT) has no index.html or assets/v1/ - the setup window's layout moved"
 WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
+
+# Upstream absorption probe (AGENTS.md Rule 4) on the Windows set: a shared
+# patch that changes nothing in the pristine Windows bundle means Anthropic now
+# ships that feature on Windows itself - audit it, then take it out of
+# WINDOWS_PATCH_SET. The Linux build's probe (scripts/check-upstream-absorbed.py)
+# runs on the pristine app.asar and ion-dist, before any patch, over a patches
+# folder holding only the Windows set and the Windows ion patch: it probes
+# every patch it finds there.
+log "Probing the Windows patch set for patches upstream absorbed"
+win_set="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import apply_patches as ap; print("\n".join(ap.WINDOWS_PATCH_SET))' "$SRC/scripts")" ||
+    die "cannot read WINDOWS_PATCH_SET from apply_patches.py"
+PROBE="$WORK/probe-patches"
+mkdir -p "$PROBE/linux" "$PROBE/core" "$PROBE/community"
+probed=0
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    srcs=("$SRC"/patches/{linux,core,community}/"$name".nim)
+    found=()
+    for f in "${srcs[@]}"; do [ -f "$f" ] && found+=("$f"); done
+    [ "${#found[@]}" -eq 1 ] || die "WINDOWS_PATCH_SET names $name, found ${#found[@]} sources for it"
+    cp -p "${found[0]}" "${found[0]%.nim}" "$PROBE/$(basename "$(dirname "${found[0]}")")/"
+    probed=$((probed + 1))
+done <<< "$win_set"
+for p in "${WINDOWS_ION_PATCHES[@]}"; do
+    cp -p "$SRC/patches/$p.nim" "$SRC/patches/$p" "$PROBE/$(dirname "$p")/"
+    probed=$((probed + 1))
+done
+[ "$probed" -gt 1 ] || die "the absorption probe got no patches"
+python3 "$SRC/scripts/check-upstream-absorbed.py" --patches "$PROBE" "$WORK/app/app.asar.contents" "$ION_DIR" ||
+    die "absorption probe failed on the Windows set ($probed patches) - see AGENTS.md Rule 4: audit the patch it names against the Windows bundle"
+rm -rf "$PROBE"
+
+log "Applying the Windows patch set"
+python3 "$SRC/scripts/apply_patches.py" --windows "$SRC/patches" "$WORK/app"
+
 for p in "${WINDOWS_ION_PATCHES[@]}"; do
     grep -q '^# @patch-type: nim-dir$' "$SRC/patches/$p.nim" || die "$p is not a nim-dir patch"
     log "Applying $p to ion-dist ($ION_FORMAT)"
