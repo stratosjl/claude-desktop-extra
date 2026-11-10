@@ -4,12 +4,12 @@
 
 This project repackages Anthropic's **official Claude Desktop Linux `.deb`** for the distros Anthropic does not ship (Arch via our own pacman repo, Fedora/RHEL via RPM, NixOS, AppImage, plus our own Debian/Ubuntu `.deb`). It applies JavaScript patches to the official build's `app.asar` to add Linux-only value-adds (Computer Use, custom themes, multi-profile, Quick Entry) and Linux fixes.
 
-The official `.deb` (apt repo `https://downloads.claude.ai/claude-desktop/apt`) bundles its own **Electron** (44.9.0 as of v3.1623.0; authoritative source: the deb tree's `usr/lib/claude-desktop/version` file) and a **native Cowork VM backend**. We download it, verify GPG + SHA256, extract it, patch its `app.asar`, and repackage. We do not pin Electron or rebuild node-pty (both ship pre-built in the `.deb`).
+The official `.deb` (apt repo `https://downloads.claude.ai/claude-desktop/apt`) bundles its own **Electron** (44.9.3 as of v4.23118.0; authoritative source: the deb tree's `usr/lib/claude-desktop/version` file) and a **native Cowork VM backend**. We download it, verify GPG + SHA256, extract it, patch its `app.asar`, and repackage. We do not pin Electron or rebuild node-pty (both ship pre-built in the `.deb`).
 
 **Layout invariant (2026-07-13):** every package ships the `.deb`'s `usr/lib/claude-desktop/` tree **verbatim** (binary renamed `claude-desktop` -> `claude`; patched `resources/app.asar` exe-adjacent; our CU bridges added to `resources/`). Electron auto-loads the adjacent asar - the official build's `OnlyLoadAppFromAsar` + `EnableEmbeddedAsarIntegrityValidation` fuses are on (integrity is not enforced on Linux, which is why a patched asar boots). The launcher passes NO asar on the command line, so `process.resourcesPath` and `app.isPackaged` behave exactly as on the stock Anthropic `.deb`. Never add a patch that redirects resource paths; put bundled files at their upstream `resources/` position instead. On NixOS the nixpkgs Electron dist is merged with our `resources/` into one directory to preserve the same adjacency.
 
 - **Target platform:** Linux only (X11, Wayland, XWayland). No macOS/Windows code.
-  One exception: custom models (`js/custom_models_main.js`, and its CLI preload `js/custom_models_preload.js`) and the Extra settings page (`js/extra_settings_main.js`, `js/extra_settings_page.js`) also load on `win32`, so the downstream Windows build ([stratosjl/claude-desktop-extra](https://github.com/stratosjl/claude-desktop-extra)) carries them unedited. Keep those win32 branches behind their platform checks and their tests green; they must never change Linux behavior. Do not add Windows code anywhere else.
+  One exception: custom models (`js/custom_models_main.js`, and its CLI preload `js/custom_models_preload.js`) and the Extra settings page (`js/extra_settings_main.js`, `js/extra_settings_page.js`) also load on `win32`, together with the shared IPC sender check both consult (`js/sender_guard.js`), so the downstream Windows build ([stratosjl/claude-desktop-extra](https://github.com/stratosjl/claude-desktop-extra)) carries them unedited. Keep those win32 branches behind their platform checks and their tests green; they must never change Linux behavior. Do not add Windows code anywhere else.
 - **Architectures:** x86_64 (primary) and aarch64.
 - **glibc floor:** 2.34 (RHEL 9 / Ubuntu 22.04). Debian 11 is not supported. If upstream's `claude-native-binding.node` asks for a glibc above 2.34 through weak symbols only (v2.19675.1 did, for GLIBC_2.39; v2.26454.0 tops out at 2.34), `scripts/fix-native-glibc-floor.py` marks those version-needs weak at build time; a strong symbol above the floor fails the build, and CI asserts the result.
 - **Native binaries we ship** (the four Computer Use bridges) build for x86_64 AND aarch64, each with a stated glibc floor or as static musl; CI verifies with `objdump -T | grep GLIBC_`. A new native binary picks the floor of its minimum viable distro.
@@ -36,13 +36,16 @@ python3 scripts/check-upstream-absorbed.py tmp/app.asar.contents \
 bash scripts/run-feature-tests.sh <community|core|linux>  # feature harnesses for the category you touched
 ./scripts/validate-patches.sh ./tmp/app.asar.contents
 node --check <patched.js>
+# census gates need a PATCHED tree (the dir apply_patches.py patched, holding .vite/build/index*.js):
+python3 -I scripts/check-predicate-consumers.py <patched tree>
+python3 -I scripts/check-refusal-strings.py <patched tree>   # add --strict to fail on warnings too (/update)
 ```
 
 Where each check runs:
-- **Commit:** `.githooks/pre-commit` runs `nph --check`, `nim check` and `shellcheck -S error` on staged files.
-- **Task end** (any change under `patches/` or `js/`, budget under 90 s): `make`, the absorption probe against a fresh extract, and the feature tests for the touched category.
-- **Build** (local + CI): `scripts/build-patched-tarball.sh` runs the probe, the orchestrator, and `node --check` per chunk.
-- **CI:** all of the above plus the full harness suite, sibling-noop check, jsonc template sync, `desktop-file-validate`, and the smoke test. After a release, `verify-install-channels` runs the README install commands (apt, dnf, pacman, AUR, nix) in fresh containers via `scripts/verify-install-channel.sh`; changing an install command in the README changes what CI tests.
+- **Commit:** `.githooks/pre-commit` runs `nph --check`, `nim check` and `shellcheck -S error` on staged files, and the landing-page catalogue sync when `docs/patches.md`, `site/index.html` or `js/extra_settings_page.js` is staged.
+- **Task end** (any change under `patches/` or `js/`, budget under 90 s): `make`, the absorption probe against a fresh extract, and the feature tests for the touched category. A patch that touches Computer Use or session/platform gates also runs the two census commands above against a patched scratch copy.
+- **Build** (local + CI): `scripts/build-patched-tarball.sh` runs the probe, the orchestrator, `node --check` per chunk, and the predicate and refusal censuses ([docs/census-gates.md](docs/census-gates.md)).
+- **CI:** all of the above plus the full harness suite, sibling-noop check, jsonc template sync, the landing-page patch catalogue sync (`scripts/check-site-catalog-sync.sh`: `site/index.html` renders every row of `docs/patches.md`; after editing that file run `python3 -I scripts/gen-site-patch-catalog.py --write`), `desktop-file-validate`, and the smoke test. After a release, `verify-install-channels` runs the README install commands (apt, dnf, pacman, AUR, nix) in fresh containers via `scripts/verify-install-channel.sh`; changing an install command in the README changes what CI tests.
 
 ## Adding a feature
 
@@ -148,7 +151,7 @@ Also enforced:
 - A patch writes only its own `@patch-target`. The orchestrator stages each target alone, so a sibling write is a silent no-op (`bash scripts/check-patch-sibling-noop.sh`).
 - The count pins `EXPECTED_PATCH_COUNT` (`scripts/apply_patches.py`) and `EXPECTED_TEST_HARNESSES` (`scripts/run-feature-tests.sh`) only change in the commit that adds or `git rm`s the file.
 - Every patched JS part must pass `node --check`.
-- Loosening a gate (an `IDEMPOTENCY_EXCEPTIONS` entry in `scripts/check-upstream-absorbed.py`, a lowered count) needs @patrickjaja in the commit.
+- Loosening a gate (an `IDEMPOTENCY_EXCEPTIONS` entry in `scripts/check-upstream-absorbed.py`, a lowered count, a census `allowlist` / `coveredSites` / `envSites` / `transitiveIgnore` entry or `accepted` refusal pin, a raised census count) needs @patrickjaja in the commit.
 
 ## Debugging patch failures
 
@@ -167,8 +170,13 @@ These embed assumptions about upstream internals and **must be challenged on eve
 | `baseline/CLAUDE_BUILT_IN_MCP.md` | Built-in MCP server names, registration patterns | Check `registerInternalMcpServer` calls in new JS |
 | `js/extra_settings_main.js` (`__cdbEx_DEPLOY_KEYS`) | The managed-settings key catalog the Extra -> Deployment panel renders, pinned from the bundle's zod schema; also the port of the 3p-dir resolver and mode decision | ``rg -ao 'flatKey:[`"][A-Za-z0-9_]+[`"]' tmp/app.asar.contents/.vite/build/index.pre.js \| sort -u`` and diff against the catalog; `node scripts/tests/core/test-deployment-main.mjs` |
 | `kwin-portal-bridge/src/teach_overlay.rs` (`TeachStepPayload`) | The only place our CU bridges are pinned to upstream DATA: `js/executor_linux.js` forwards upstream's teach-step payload verbatim and the Rust side requires `explanation`. A rename is a runtime serde failure on a green build, KDE Wayland only. Maintained in `patrickjaja/kwin-portal-bridge` (our fork of mosi0815's original; CI builds that fork's HEAD) - fix it there directly | ``grep -ao 'onTeachStep({[^}]*}' <new-bundle-concat>``; keys must still be `explanation` / `nextPreview` / `anchorLogical` |
+| `packaging/nix/background-display.nix` | Pins upstream DATA for the NixOS background display's Claude in Chrome manifest: the three extension IDs (`browser.claudeExtensionIds`), the manifest name `com.anthropic.claude_browser_extension` and the native host's path `lib/claude-desktop/resources/chrome-native-host` in the package. A change is a browser that never reaches Claude on a green build | ``grep -aohE '[A-Za-z0-9_$]+="[a-p]{32}",[A-Za-z0-9_$]+="[a-p]{32}",[A-Za-z0-9_$]+="[a-p]{32}",[A-Za-z0-9_$]+="com\.anthropic\.[a-z_]+",[A-Za-z0-9_$]+="[a-z-]+"' tmp/app.asar.contents/.vite/build/index*.js`` (cross-check ``grep -aoh 'allowed_origins:\[[^]]*\]'``) must print the module's three IDs, the manifest name and `chrome-native-host`; `tmp/extract/usr/lib/claude-desktop/resources/chrome-native-host` must exist |
+| `baseline/predicate-consumers.json` | Consumers of upstream's session/Computer Use predicates (a new consumer = a Linux/Wayland decision our patches may not cover); hand-edited | `python3 -I scripts/check-predicate-consumers.py <patched tree>` must exit 0; red: audit the new path, patch at the definition or add a reviewed entry ([docs/census-gates.md](docs/census-gates.md)) |
+| `baseline/refusal-strings.json` | Every upstream Linux/Wayland/Xorg/platform refusal string with its status; hand-edited | `python3 -I scripts/check-refusal-strings.py <patched tree>` must exit 0 (fails on strong-topic strings and regressed pins, warns on the rest; `/update` runs it with `--strict`); red: new string or stale verify regex, see [docs/census-gates.md](docs/census-gates.md) |
 | `baseline/PANEL_TABS_ANCHORS.md` | Panel-tabs DOM/fiber anchors and the `[cdb-tabs]` warning keys that mean an anchor moved | Re-run the console recipes in that file against the new build |
 | `baseline/FILES_QUICK_OPEN_ANCHORS.md` | Files quick-open anchors and the `[cdb-qopen]` warning keys | Re-run its console recipes; `grep -o 'of this\.index\.search(' fileIndexWorker.js` must hit exactly once |
+| `baseline/AUTO_ARCHIVE_GRACE_WEB_ANCHORS.md` | 1P archive-grace UI: the claude.ai hold-notice and session-rail anchors (fiber props `{hold, sessionRef}` / `{session, pullRequests, outputsSession}`) and the `[archive-grace-ui]` warning keys | Re-run its console recipes on the Code tab; the debug hook renders without a merged PR |
+| `baseline/COWORK_HEADER_ICON_ANCHORS.md` | Cowork device icon in the claude.ai chat header (`fix_cowork_device_icon_web.nim`): the title-row indicator testids, the device store and the upstream popover, all remote claude.ai code, and the `[cdb-cowork-icon]` warning keys | Re-run its console recipes on a cloud task and a local task; also re-check the `__cdbNavigation` / `__cdbCoworkVmProbe` captures in `add_feature_extra_settings.nim` |
 | `baseline/CUSTOM_MODELS_ANCHORS.md` | Custom models: the build-time anchors of `add_feature_custom_models.nim` (sub-patches B, C, D and C's transport-shape asserts), and the run-time assumptions no build can check - the claude.ai bootstrap and `model_selector_state` APIs, and Claude Code CLI internals (`BUN_OPTIONS` preload, `fetch(string, {body})`, the `claude-<id>`/`[1m]` ids, threads, the web-search sub-request, `diagnostics.previous_message_id`) | Re-grep the local shapes listed there; after a CLI or claude.ai change, read `logs/custom-models.log` and the `[custom-models]` lines that file maps to the anchor that moved |
 | `baseline/ION.md` | ion-dist SPA bundle stats, patched patterns, config key schema | ion-dist audit (`/update` skill) |
 | `baseline/PLATFORM_GATE_BASELINE.md` | darwin/win32 conditional counts, gate classifications (PATCHED/NATIVE/STUB/PORTABLE) | Platform gate re-audit (`/update` skill) |
@@ -199,7 +207,7 @@ The launcher (`scripts/claude-desktop-launcher.sh`) resolves `CLAUDE_PROFILE` fr
 | Claude Code config | `CLAUDE_CONFIG_DIR` env exported by launcher | Honored by `@anthropic-ai/claude-code` CLI |
 | Quick Entry socket | `process.env.CLAUDE_PROFILE` read in JS | `patches/core/fix_quick_entry_cli_toggle.nim` |
 | systemd scope | `${profile_suffix}` in launcher | `claude-desktop-launcher.sh` |
-| Per-profile Electron binary | hardlink -> reflink -> copy fallback, refreshed from `CLAUDE_ELECTRON` when set (Nix) | `~/.local/lib/claude-desktop/<APP_ID>-<name>`. Does NOT give the window its own identity: WM_CLASS / Wayland app_id is `com.anthropic.Claude` for every profile; `fix_profile_window_title.nim` puts the profile name in the title |
+| Per-profile Electron binary | hardlink -> reflink -> copy fallback, refreshed from `CLAUDE_ELECTRON` when set (Nix) | `~/.local/lib/claude-desktop/<APP_ID>-<name>`. The window identity comes from `fix_profile_app_identity.nim`: WM_CLASS / Wayland app_id is `com.anthropic.Claude-<name>` when that profile's `.desktop` exists, else the shared `com.anthropic.Claude`; `fix_profile_window_title.nim` puts the profile name in the title |
 | SSO callback routing | marker file written by JS hook on `shell.openExternal`; launcher reads it to dispatch an incoming `claude://` URL | `patches/core/fix_profile_url_routing.nim` (writer) + launcher URL-handler block (reader) |
 
 **Rule when adding a patch:** if it writes to a fixed user-level path, prefer `app.getPath("userData")` (auto-isolates) over `os.homedir()+"/.config/Claude"`. If it opens a Unix socket or pipe owned by the Electron process itself, append `process.env.CLAUDE_PROFILE` to the path like `fix_quick_entry_cli_toggle.nim` does. If the socket belongs to a shared user-level daemon, do NOT suffix it - clients across all profiles connect to the same listener. If the patch spawns a long-lived child process that holds state, make sure it gets `CLAUDE_PROFILE` and `CLAUDE_CONFIG_DIR` (`child_process.spawn` inherits `process.env` by default - verify, don't assume).
@@ -222,9 +230,9 @@ Runtime logs are in `~/.config/Claude/logs/`. When 3P mode is active (an `infere
 
 ```
 patches/           # Nim patch sources (.nim) + Makefile, compiled to native binaries (ls patches/*/*.nim)
-patches/linux/     #   Linux compatibility - always on, not user-configurable (36)
-patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (21)
-patches/core/      #   Always-on infrastructure: Extra settings pages, theme engine, GrowthBook overrides, multi-profile (7)
+patches/linux/     #   Linux compatibility - always on, not user-configurable (39)
+patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (24)
+patches/core/      #   Always-on infrastructure: Extra settings pages, theme engine, GrowthBook overrides, multi-profile, shared tool lookup (9)
 js/                # Shared JS snippets embedded by Nim patches via staticRead ("../../js/..." from a patch)
 scripts/           # Build, validation, and launcher scripts
 scripts/tests/     # Feature test harnesses, grouped like patches/ (run: scripts/run-feature-tests.sh)

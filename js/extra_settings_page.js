@@ -567,9 +567,11 @@
     // Short labels: upstream's nav column is narrow and truncates anything
     // longer, so the full name lives in a tooltip and in the panel's own h1.
     { kind: "features", label: "Community", icon: ICON_FEATURES, tooltip: "Community Features" },
-    // Computer Use is upstream's feature, not a community add-on: its status
-    // and our switches for it get their own entry.
-    { kind: "cu", label: "Computer Use", icon: ICON_CU },
+    // Cowork and Computer Use are upstream's features, not community add-ons:
+    // their Linux status and our switches get their own entry. The kind stays
+    // "cu" (deep links and tests name it); the label must never be exactly
+    // upstream's own "Cowork" (NAV_LABELS), and it is not.
+    { kind: "cu", label: "Cowork (Linux)", icon: ICON_CU, tooltip: "Cowork and Computer Use on Linux" },
     { kind: "models", label: "Models", icon: ICON_MODELS, tooltip: "Custom models" },
     { kind: "flags", label: "Anthropic", icon: ICON_FLAGS, tooltip: "Anthropic Features" },
     { kind: "deploy", label: "Deployment", icon: ICON_DEPLOY }
@@ -1106,6 +1108,60 @@
     return (entry.displayName || entry.name || "").toLowerCase();
   }
 
+  // Opens one of our own panels in this same dialog, as a click on its nav item
+  // does. `show` and `mounted` are defined further down; both are live by the
+  // time anyone can click.
+  function openPanel(kind) {
+    var item = null;
+    if (mounted && mounted.items) {
+      for (var i = 0; i < mounted.items.length; i++) {
+        if (mounted.items[i].kind === kind) { item = mounted.items[i]; break; }
+      }
+    }
+    if (!item) { diag("openpanel-miss", "[ExtraSettings] no mounted nav item of kind " + kind + " to open"); return; }
+    show(kind, item);
+  }
+
+  // Renders `text` into `node`: plain text, except that each occurrence of a
+  // link's text (spec.links: [{ text, kind }]) becomes an inline button that
+  // opens that panel. A <button> is Tab-focusable and activates on Enter/Space
+  // by itself; the handlers keep the click away from the surrounding row.
+  function setLinkedText(node, text, links) {
+    node.textContent = "";
+    if (!links || !links.length) { node.textContent = text; return; }
+    var rest = String(text);
+    while (rest) {
+      var best = null, at = -1;
+      for (var i = 0; i < links.length; i++) {
+        var k = rest.indexOf(links[i].text);
+        if (k >= 0 && (at < 0 || k < at)) { at = k; best = links[i]; }
+      }
+      if (!best) { node.appendChild(document.createTextNode(rest)); break; }
+      if (at > 0) node.appendChild(document.createTextNode(rest.slice(0, at)));
+      node.appendChild(inlineLink(best));
+      rest = rest.slice(at + best.text.length);
+    }
+  }
+
+  function inlineLink(link) {
+    var b = el("button", "cdbx-link", link.text);
+    b.type = "button";
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openPanel(link.kind);
+    });
+    // Enter is handled on keydown, whose preventDefault also drops the click the
+    // browser would synthesize (no double open); Space keeps the native click.
+    b.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      openPanel(link.kind);
+    });
+    return b;
+  }
+
   // --- ONE TOGGLE ROW, EVERY COMMUNITY FEATURE -----------------------------
   // Every one of our own switches (Source control, Layout, Motion, Shortcuts)
   // is the same widget: a section heading, a titled row with a note and a state
@@ -1135,7 +1191,7 @@
     if (!api || typeof api[spec.read] !== "function" || typeof api[spec.write] !== "function") return;
 
     var head = el("div", "cdbx-sec-h");
-    head.appendChild(el("span", "cdbx-sec-t", spec.section));
+    if (spec.section) head.appendChild(el("span", "cdbx-sec-t", spec.section));
     // spec.sharedSection: this row sits under the section header the row before
     // it already rendered, so it gets no header of its own (head stays detached).
     if (!spec.sharedSection) panel.appendChild(head);
@@ -1147,7 +1203,9 @@
     // spec.badge: a pill after the title ("Experimental"), see experimentalBadge().
     if (spec.badge) title.appendChild(experimentalBadge(spec.badge));
     main.appendChild(title);
-    main.appendChild(el("div", "cdbx-note", spec.note));
+    var noteNode = el("div", "cdbx-note");
+    setLinkedText(noteNode, spec.note, spec.links);
+    main.appendChild(noteNode);
     var stateLine = el("div", "cdbx-state", "Loading...");
     main.appendChild(stateLine);
     node.appendChild(main);
@@ -1182,6 +1240,11 @@
       if (typeof spec.hideIf === "function" && spec.hideIf(res)) {
         head.remove();
         host.remove();
+        // A grouped page (Community Features) hides a headline whose rows
+        // are all gone: it marks the row and asks to be told (spec.onGone).
+        spec.gone = true;
+        host.style.display = "none";
+        if (typeof spec.onGone === "function") spec.onGone();
         return;
       }
       if (failed(res)) {
@@ -1198,12 +1261,12 @@
       // the .jsonc leaves the key alone.
       if (res.lockedByJsonc) {
         toggle.title = "Edit " + spec.lockFile + " to change this";
-        stateLine.textContent = describe() + " - set in " + spec.lockFile;
+        setLinkedText(stateLine, describe() + " - set in " + spec.lockFile, spec.links);
         return;
       }
 
       toggle.disabled = false;
-      stateLine.textContent = describe();
+      setLinkedText(stateLine, describe(), spec.links);
       toggle.addEventListener("click", function () {
         if (toggle.disabled) return;
         var next = !isOn();
@@ -1212,7 +1275,7 @@
           toggle.disabled = false;
           if (failed(r)) { toast(spec.errorPrefix + reason(r), true); return; }
           toggle.setAttribute("aria-checked", next ? "true" : "false");
-          stateLine.textContent = describe();
+          setLinkedText(stateLine, describe(), spec.links);
           syncRestart(res);
           node.classList.add("cdbx-flash");
           setTimeout(function () { node.classList.remove("cdbx-flash"); }, 700);
@@ -1236,13 +1299,9 @@
   // this row is the way to ask for it.
   function renderDiffViewsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Source control",
       title: "Diff view modes",
-      note: "Adds a scope dropdown to the Code tab's diff panel - Working tree, Branch changes " +
-        "(committed work only) and Latest turn - and compares against the branch you actually " +
-        "branched from. Also adds an expand/collapse-all button next to it, which keeps expanding " +
-        "files as they load while it is on. Off leaves the panel exactly as Anthropic ships it. " +
-        "Applies live - an open Code tab picks the change up within a few seconds.",
+      note: "Adds a scope dropdown to the Code tab's diff panel: Working tree, Branch changes or Latest turn. Off leaves the panel as Anthropic ships it. Applies live.",
+      keywords: "expand collapse all button branched from committed work latest turn scope",
       ariaLabel: "show the diff view modes dropdown and the expand/collapse-all button",
       read: "diffViewsRead",
       write: "diffViewsSet",
@@ -1268,14 +1327,9 @@
   // layout is presented, so it is opt-in and this row is the way to ask for it.
   function renderPanelTabsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Layout",
       title: "Panel tabs",
-      note: "Shows the Code tab's side panels as tabs instead of squeezing them side by side, so " +
-        "the panel you are using gets the full width. The rest stay open in the background and keep " +
-        "their place, so switching back is instant - that also means a live preview goes on " +
-        "running while you are not looking at it. Drag the divider to resize; opening or closing a " +
-        "panel will not move it. Off gives you the normal split layout back, and nothing you have " +
-        "open is lost. Applies live - an open Code tab picks the change up within a few seconds.",
+      note: "Shows the Code tab's side panels as tabs, so the panel you are using gets the full width. Off gives you the normal split layout back. Applies live.",
+      keywords: "layout split divider resize background live preview side by side",
       ariaLabel: "show the Code tab's side panels as tabs instead of a split layout",
       read: "panelTabsRead",
       write: "panelTabsSet",
@@ -1304,14 +1358,9 @@
   // so the note says "or after a restart" rather than pretending it is instant.
   function renderFilesQuickOpenRow(panel) {
     return renderToggleRow(panel, {
-      section: "Files",
       title: "Files quick open",
-      note: "Ctrl+P on the Code tab opens a VS Code-style quick-open box over the Files panel: " +
-        "type part of a name, use the arrow keys or the mouse, press Enter to open it as a file tab. " +
-        "Spaces split the query into pieces that must all match, in any order - 'user service' " +
-        "finds user-service.spec.ts - and that also fixes the Files panel's own filter and the " +
-        "composer's @ file picker. Off leaves the panel and the index exactly as Anthropic ships them. " +
-        "The hotkey applies live; the spaces fix reaches the file index on its next start or after a restart.",
+      note: "Press Ctrl+P on the Code tab to jump to a file by typing part of its name. Off leaves the Files panel as Anthropic ships it. The hotkey applies live; the improved search reaches the file index after a restart.",
+      keywords: "VS Code quick-open arrow keys Enter file tab spaces split query user service files panel filter composer @ file picker index",
       ariaLabel: "open files with Ctrl+P from a quick-open box over the Files panel",
       read: "quickOpenRead",
       write: "quickOpenSet",
@@ -1339,13 +1388,10 @@
   // it found and the row refuses to turn on when there is nothing to list.
   function renderCustomModelsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Models",
       title: "Custom models",
-      note: "Adds models from Anthropic-compatible endpoints (DeepSeek, OpenRouter, a gateway) to the Code " +
-        "tab's model picker, next to Anthropic's. Sessions on them use your key; everything else stays on " +
-        "your subscription. Set up providers and models in Settings > Extra > Models. Applies live: new " +
-        "sessions follow the switch, the picker updates when the Code tab reloads, and open sessions stop " +
-        "routing at once. A session opened while this was off needs reopening.",
+      note: "Adds models from Anthropic-compatible providers (DeepSeek, OpenRouter, your own gateway) to the Code tab's model picker. Sessions on them use your own key; set them up in Settings > Extra > Models. Applies live.",
+      links: [{ text: "Settings > Extra > Models", kind: "models" }],
+      keywords: "endpoint subscription routing reopen picker reload",
       ariaLabel: "list custom Anthropic-compatible models in the Code model picker",
       read: "customModelsRead",
       write: "customModelsSet",
@@ -1380,13 +1426,9 @@
   // differ - the same arrangement as the transcript limits row below.
   function renderDevToolsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Developer",
       title: "Developer tools",
-      note: "Lets Ctrl+Alt+I open Chromium DevTools for the focused window, and shows \"Toggle Dev " +
-        "Tools\" in the app menu. Writes the official build's own opt-in file, developer_settings.json " +
-        "in the profile directory, which the app re-reads on every shortcut press - so the shortcut works " +
-        "right away; the menu entry appears after a restart. An organization that disabled developer " +
-        "mode for its workspace keeps DevTools off regardless.",
+      note: "Lets Ctrl+Alt+I open the browser developer tools for the focused window. The shortcut applies live; the app menu entry appears after a restart, and an organization that turned developer mode off keeps it off.",
+      keywords: "Chromium DevTools Toggle Dev Tools developer_settings.json profile directory official build",
       ariaLabel: "allow developer tools (Ctrl+Alt+I)",
       read: "devToolsRead",
       write: "devToolsSet",
@@ -1461,12 +1503,15 @@
     return (kind === "x11" ? "X11 display " : "Wayland display ") + display;
   }
 
-  function renderCuBackgroundRow(panel) {
+  // `host` takes the row (the Computer Use section); `panel` is the whole
+  // panel the setup page replaces (defaults to host).
+  function renderCuBackgroundRow(host, panel) {
+    panel = panel || host;
     // The setup page needs every channel; an older preload gets no row at all.
     if (!cubgApiOk()) return;
     var lastRes = null;
     var noteNode = null;
-    var row = renderToggleRow(panel, {
+    var row = renderToggleRow(host, {
       section: "Options",
       title: "Computer Use on a background display",
       // Under the Options heading renderCu draws.
@@ -1515,33 +1560,46 @@
   }
 
   // --- Computer Use (its own Extra entry) -----------------------------------
-  // Computer Use is an upstream feature everyone expects to work, so it has its
-  // own page rather than rows among the community add-ons: the status block
-  // (this desktop, the device key (TPM), cloud Cowork and Dispatch, with only
-  // the actions that apply) at the top, then our Computer Use switches. Opening
-  // the page, Re-check and the end of each action are the only status reads;
-  // nothing here polls.
+  // The "Cowork (Linux)" page (nav kind "cu"). Cowork and Computer Use are
+  // upstream features everyone expects to work, so they have their own page
+  // rather than rows among the community add-ons. Three sections: Cloud Cowork
+  // (the device key (TPM), cloud Cowork and Dispatch), Local Cowork VM (KVM,
+  // vhost-vsock, the VM tools, whether the VM runs) and Computer Use (this
+  // desktop, then our Computer Use switches), each with only the actions that
+  // apply. Opening the page, Re-check and the end of each action are the only
+  // status reads; nothing here polls.
   // Main side: cdb-cu-status:* in js/extra_settings_main.js. No call takes an
   // argument; the main side decides every path it runs, and the pkexec actions
   // carry the exact command it runs and what that changes, shown before
   // anything runs.
   var CUS_API = ["cuStatusRead", "cuStatusTpmEnable", "cuStatusTpmDisable", "cuStatusResetScreenSharing"];
   var CUS_WORD = { ok: "OK", action: "Needs action", na: "Not available", unknown: "Unknown" };
-  var CUS_TITLES = { desktop: "This desktop", tpm: "Device key (TPM)", cloud: "Cloud Cowork and Dispatch" };
+  var CUS_TITLES = { desktop: "This desktop", tpm: "Device key (TPM)", cloud: "Cloud Cowork and Dispatch",
+    kvm: "KVM (/dev/kvm)", vsock: "VM socket (/dev/vhost-vsock)", vmTools: "QEMU, OVMF and virtiofsd", vm: "Local VM" };
+  // KVM access: the same buttons as TPM; an older preload without these gets
+  // the command to run instead of a button.
+  var CUS_KVM_API = ["cuStatusKvmEnable", "cuStatusKvmDisable"];
   // What enabling exposes, shown in full next to Enable. Main's confirmation
   // dialog (__cdbEx_CUS_TPM_CONFIRM) is the consent and stays short: it points
   // here for this text and the exact command.
   var CUS_RISK = "This applies to every account that logs in at this computer's screen (the active local seat), and only to /dev/tpmrm0, never /dev/tpm0. Any program such an account runs can then use the TPM, including clearing it (which destroys TPM-sealed keys such as LUKS/systemd-cryptenroll or BitLocker keys), triggering its dictionary-attack lockout, or setting its owner or lockout password. If the TPM's lockout or owner authorization is empty, set one first: tpm2_changeauth -c lockout and tpm2_changeauth -c owner.";
   var CUS_SECURITY = CUS_RISK + " Details: docs/computer-use.md in the claude-desktop-extra repository.";
+  // The same for Enable KVM access (main's dialog: __cdbEx_CUS_KVM_CONFIRM).
+  var CUS_KVM_RISK = "This applies to every account that logs in at this computer's screen (the active local seat), and only to /dev/kvm and /dev/vhost-vsock. Any program such an account runs can then start hardware-accelerated virtual machines, which exposes the kernel's KVM code to it; many distributions already grant /dev/kvm to every local user. It does not give root access.";
+  var CUS_KVM_SECURITY = CUS_KVM_RISK + " Details: docs/cowork.md in the claude-desktop-extra repository.";
 
   function cuStatusApiOk() {
     return !!api && CUS_API.every(function (n) { return typeof api[n] === "function"; });
+  }
+  function cusKvmApiOk() {
+    return !!api && CUS_KVM_API.every(function (n) { return typeof api[n] === "function"; });
   }
 
   // The Computer Use switches, below the status block. Same keys, same rows as
   // they had under Community Features.
   var CU_ROWS = [
     renderCuAskRow,
+    renderCuEscapeAbortCuRow,
     renderCuBackgroundRow,
     renderCuAxRow
   ];
@@ -1613,48 +1671,72 @@
   // (main's own string, never rebuilt here), and in "What this does" the file
   // it changes, the rule, the udev reload and how to undo it. Every command is
   // copyable, so a user can run them in a terminal instead of clicking.
-  function cusPkexecInfo(host, verb, act) {
+  // `what` is "TPM" (default) or "KVM"; KVM adds its modules-load.d link.
+  function cusPkexecInfo(host, verb, act, what) {
     if (typeof act.command !== "string" || !act.command) return;
+    var kvm = what === "KVM";
+    var name = kvm ? "KVM" : "TPM";
     var enable = verb === "enable";
     var box = el("div", "cdbx-cus-cmd cdbx-cus-pk");
     box.setAttribute("data-verb", verb);
+    if (kvm) box.setAttribute("data-access", "kvm");
     box.appendChild(el("div", "cdbx-note", (enable ? "Enable" : "Disable") +
-      " TPM access runs this command, which you can also run in a terminal yourself:"));
+      " " + name + " access runs this command, which you can also run in a terminal yourself:"));
     box.appendChild(codeBlock(act.command));
-    var what = el("details", "cdbx-cus-what");
-    what.appendChild(el("summary", "cdbx-note", "What this does"));
+    var what2 = el("details", "cdbx-cus-what");
+    what2.appendChild(el("summary", "cdbx-note", "What this does"));
     function say(text, code) {
-      what.appendChild(el("div", "cdbx-note", text));
-      if (code) what.appendChild(codeBlock(code));
+      what2.appendChild(el("div", "cdbx-note", text));
+      if (code) what2.appendChild(codeBlock(code));
     }
     if (enable) {
       say("It links this package's udev rule into udev's rules directory (link -> rule file):",
         String(act.link || "") + " -> " + String(act.target || ""));
-      say("The rule gives the user at the active local seat access to the TPM resource manager, and nothing else:",
+      say(kvm ? "The rule gives the user at the active local seat access to /dev/kvm and /dev/vhost-vsock, and nothing else:"
+        : "The rule gives the user at the active local seat access to the TPM resource manager, and nothing else:",
         String(act.rule || ""));
+      if (kvm && act.mlink) {
+        say("It also links this package's modules-load.d entry, so the vhost_vsock module loads at every boot (link -> file):",
+          String(act.mlink) + " -> " + String(act.mtarget || ""));
+      }
+    } else if (kvm) {
+      say("It removes these links, and only while they point at claude-desktop-extra files:",
+        String(act.link || "") + (act.mlink ? "\n" + String(act.mlink) : ""));
     } else {
       say("It removes this link, and only while it points at a claude-desktop-extra rule:", String(act.link || ""));
     }
     if (act.apply) {
-      say("Then it reloads udev and re-applies the rules to the TPM device" +
-        (enable ? ", so access applies now without logging out:" : ":"), String(act.apply));
+      if (kvm) {
+        say(enable ? "Then it loads vhost_vsock now, reloads udev and re-applies the rules to both devices, so access applies now without logging out:"
+          : "Then it reloads udev:", String(act.apply));
+      } else {
+        say("Then it reloads udev and re-applies the rules to the TPM device" +
+          (enable ? ", so access applies now without logging out:" : ":"), String(act.apply));
+      }
     }
     if (enable) {
-      say("To undo it: Disable TPM access on this page, or run:", String(act.undo || ""));
-      if (act.undoManual) say("or remove the link by hand:", String(act.undoManual));
+      if (kvm) {
+        what2.appendChild(el("div", "cdbx-note",
+          "Claude checks for the local VM once per run: restart it afterwards (Restart now appears on this page)."));
+      }
+      say("To undo it: Disable " + name + " access on this page, or run:", String(act.undo || ""));
+      if (act.undoManual) say(kvm ? "or remove the links by hand:" : "or remove the link by hand:", String(act.undoManual));
     } else {
-      what.appendChild(el("div", "cdbx-note",
-        "Access this session already has lasts until you log out. To turn it on again: Enable TPM access."));
+      what2.appendChild(el("div", "cdbx-note", kvm
+        ? "Disable removes the rule and clears the access entry right away; it takes effect after restarting Claude, no relogin or reboot. The vhost_vsock module stays loaded. To turn it on again: Enable KVM access."
+        : "Disable removes the rule and clears the access entry right away; it takes effect after restarting Claude, no relogin or reboot. To turn it on again: Enable TPM access."));
     }
-    box.appendChild(what);
+    box.appendChild(what2);
     host.appendChild(box);
   }
 
-  // The status block: the three rows and their actions, drawn into `page`.
-  // `scope` is the element whose buttons a running action disables; `recheck`
-  // the page's Re-check button.
-  function renderCuStatusBlock(scope, page, recheck) {
+  // The status block: the rows and their actions, drawn into the section
+  // hosts (`hosts.status` takes the wait line and a failed read, the others
+  // their section's rows). `scope` is the element whose buttons a running
+  // action disables; `recheck` the page's Re-check button.
+  function renderCuStatusBlock(scope, hosts, recheck) {
     var running = false;
+    var all = [hosts.status, hosts.cloud, hosts.local, hosts.cu];
     function setBusy(on) {
       running = on;
       Array.prototype.forEach.call(scope.querySelectorAll(".cdbx-cus .cdbx-btn, .cdbx-cus-top .cdbx-btn"), function (b) {
@@ -1662,20 +1744,21 @@
       });
     }
 
-    // failure: the last Enable/Disable that did not change anything, shown
-    // under the TPM row until the next Re-check.
+    // failure: the last Enable/Disable that did not change anything,
+    // {on: "tpm" | "kvm", r}, shown under that row until the next Re-check.
     var slowTimer = null;
     function stopSlowTimer() { if (slowTimer !== null) { clearTimeout(slowTimer); slowTimer = null; } }
+    function clearAll() { all.forEach(clear); }
     function load(failure) {
       stopSlowTimer();
-      clear(page);
+      clearAll();
       var wait = el("div", "cdbx-empty cdbx-cus-wait");
       wait.setAttribute("role", "status");
       wait.setAttribute("aria-busy", "true");
       wait.appendChild(el("span", "cdbx-spin"));
       var waitText = el("span", "cdbx-cus-wait-t", "Checking this desktop...");
       wait.appendChild(waitText);
-      page.appendChild(wait);
+      hosts.status.appendChild(wait);
       // One timer: the bridge check normally answers at once; only a hung
       // portal makes it run to main's 8 s timeout.
       slowTimer = setTimeout(function () {
@@ -1686,28 +1769,33 @@
       api.cuStatusRead().then(function (st) {
         stopSlowTimer();
         recheck.disabled = false;
-        clear(page);
+        clearAll();
         if (failed(st)) {
-          page.appendChild(el("div", "cdbx-error", "The status is unavailable: " + reason(st)));
+          hosts.status.appendChild(el("div", "cdbx-error", "The status is unavailable: " + reason(st)));
           return;
         }
         draw(st, failure);
       }, function (err) {
         stopSlowTimer();
         recheck.disabled = false;
-        clear(page);
-        page.appendChild(el("div", "cdbx-error", "The status is unavailable: " + (err && err.message ? err.message : String(err))));
+        clearAll();
+        hosts.status.appendChild(el("div", "cdbx-error", "The status is unavailable: " + (err && err.message ? err.message : String(err))));
       });
     }
 
-    function tpmAction(which) {
+    // Enable/Disable TPM or KVM access. Main asks for consent and runs pkexec;
+    // the page only names the action.
+    function accessAction(on, which) {
       if (running) return;
+      var name = on === "kvm" ? "KVM" : "TPM";
+      var call = on === "kvm" ? (which === "enable" ? api.cuStatusKvmEnable : api.cuStatusKvmDisable)
+        : (which === "enable" ? api.cuStatusTpmEnable : api.cuStatusTpmDisable);
+      if (typeof call !== "function") return;
       setBusy(true);
-      var call = which === "enable" ? api.cuStatusTpmEnable : api.cuStatusTpmDisable;
       call().then(function (r) {
         setBusy(false);
         if (!failed(r)) {
-          toast(r.changed ? "Done: " + r.message : "No change needed: " + r.message);
+          toast((r.changed ? "Done: " + r.message : "No change needed: " + r.message) + (r.note ? " " + r.note : ""));
           load(null);
           return;
         }
@@ -1715,9 +1803,9 @@
         // a quick retry): a toast only, no command block under the row.
         var quiet = r && (r.code === "cancelled" || r.code === "declined" || r.code === "cooldown");
         if (r && r.code === "cancelled") toast("Not changed: authentication was cancelled", true);
-        else if (r && r.code === "declined") toast("Not changed: Enable TPM access was not confirmed", true);
+        else if (r && r.code === "declined") toast("Not changed: Enable " + name + " access was not confirmed", true);
         else toast("Not changed: " + reason(r), true);
-        load(quiet ? null : r);
+        load(quiet ? null : { on: on, r: r });
       }, function (err) {
         setBusy(false);
         toast("Not changed: " + (err && err.message ? err.message : String(err)), true);
@@ -1725,12 +1813,114 @@
       });
     }
 
+    // Off-state: the button is greyed with its reason; the command block stays.
+    function offNote(row, verb, act) {
+      if (typeof act.disabled !== "string" || !act.disabled) return;
+      var n = el("div", "cdbx-note cdbx-cus-off", act.disabled);
+      n.setAttribute("data-verb", verb);
+      row.main.appendChild(n);
+    }
+    function offBtn(b, act) {
+      if (typeof act.disabled === "string" && act.disabled) { b.disabled = true; b.setAttribute("data-off", "1"); b.title = act.disabled; }
+    }
+    // The Enable / Disable pair of one access (TPM or KVM) on its row.
+    function accessActs(row, on, en, dis, security) {
+      var name = on === "kvm" ? "KVM" : "TPM";
+      var what = on === "kvm" ? "KVM" : undefined;
+      var hasCall = on === "kvm" ? cusKvmApiOk() : true;
+      if (en && typeof en === "object") {
+        row.main.appendChild(el("div", "cdbx-note cdbx-cus-sec", security));
+        if (en.kind === "pkexec" && hasCall) {
+          var enable = cusButton("Enable " + name + " access", on === "kvm"
+            ? "Asks you to confirm, then for an administrator password, then lets this session use /dev/kvm and /dev/vhost-vsock"
+            : "Asks you to confirm, then for an administrator password, then lets this session use the TPM");
+          enable.addEventListener("click", function () { accessAction(on, "enable"); });
+          offBtn(enable, en);
+          row.aside.appendChild(enable);
+          offNote(row, "enable", en);
+          cusPkexecInfo(row.main, "enable", en, what);
+        } else if (en.kind === "pkexec") {
+          offNote(row, "enable", en);
+          cusCommand(row.main, "Run this in a terminal:", String(en.command || ""));
+        } else if (en.kind === "nixos") {
+          offNote(row, "enable", en);
+          cusCommand(row.main, "Add this to your NixOS configuration, then rebuild and restart Claude:", String(en.text || ""));
+        } else if (en.kind === "command") {
+          offNote(row, "enable", en);
+          cusCommand(row.main, cusWhere(en), String(en.text || ""));
+        }
+      }
+      if (dis && typeof dis === "object") {
+        if (dis.kind === "pkexec" && hasCall) {
+          var disable = cusButton("Disable " + name + " access", on === "kvm"
+            ? "Removes this package's KVM rule and module links and clears the access entry; takes effect after restarting Claude"
+            : "Removes this package's TPM rule link and clears the access entry; takes effect after restarting Claude");
+          disable.addEventListener("click", function () { accessAction(on, "disable"); });
+          offBtn(disable, dis);
+          row.aside.appendChild(disable);
+          offNote(row, "disable", dis);
+          cusPkexecInfo(row.main, "disable", dis, what);
+        } else if (dis.kind === "pkexec") {
+          offNote(row, "disable", dis);
+          cusCommand(row.main, "To turn " + name + " access off again - run this in a terminal:", String(dis.command || ""));
+        } else if (dis.kind === "command") {
+          offNote(row, "disable", dis);
+          cusCommand(row.main, "To turn " + name + " access off again - " + cusWhere(dis).charAt(0).toLowerCase() + cusWhere(dis).slice(1),
+            String(dis.text || ""));
+        }
+      }
+    }
+    function failBlock(row, failure, on) {
+      if (!failure || failure.on !== on) return;
+      row.main.appendChild(el("div", "cdbx-error cdbx-cus-fail", "Not changed: " + reason(failure.r)));
+      if (typeof failure.r.command === "string" && failure.r.command) {
+        cusCommand(row.main, "Run this in a terminal instead:", failure.r.command);
+      }
+    }
+
     function draw(st, failure) {
+      var help = scope.querySelector(".cdbx-cus-help");
+      if (help) fillCusHelp(help, st.mode);
       var rows = st.rows || {};
       var acts = st.actions || {};
-      var restartOk = acts.restart === true && typeof api.appRelaunch === "function";
+      var canRestart = typeof api.appRelaunch === "function";
+      var restartOk = acts.restart === true && canRestart;
 
-      var desk = cusRow(page, "desktop", rows.desktop);
+      // Cloud Cowork: the device key (TPM) and this run's device state.
+      var tpm = cusRow(hosts.cloud, "tpm", rows.tpm);
+      accessActs(tpm, "tpm", acts.tpmEnable, acts.tpmDisable, CUS_SECURITY);
+      if (typeof acts.tssCommand === "string" && acts.tssCommand) {
+        cusCommand(tpm.main, "This session did not get access from the rule (not the active local seat, or no logind). " +
+          "Add yourself to the TPM group instead, then log out and back in:", acts.tssCommand);
+      }
+      if (restartOk) tpm.aside.appendChild(restartButton());
+      failBlock(tpm, failure, "tpm");
+      var cloud = cusRow(hosts.cloud, "cloud", rows.cloud);
+      if (restartOk) cloud.aside.appendChild(restartButton());
+
+      // Local Cowork VM: KVM, vhost-vsock, the VM tools and whether it runs.
+      if (rows.kvm || rows.vsock || rows.vmTools || rows.vm) {
+        var kvm = cusRow(hosts.local, "kvm", rows.kvm);
+        accessActs(kvm, "kvm", acts.kvmEnable, acts.kvmDisable, CUS_KVM_SECURITY);
+        if (typeof acts.kvmGroupCommand === "string" && acts.kvmGroupCommand) {
+          cusCommand(kvm.main, "Without a local seat (remote login, no logind) the rule gives this session nothing. " +
+            "Add yourself to the device's group instead, then log out and back in:", acts.kvmGroupCommand);
+        }
+        if (acts.vmRestart === true && canRestart) kvm.aside.appendChild(restartButton());
+        failBlock(kvm, failure, "kvm");
+        var vsock = cusRow(hosts.local, "vsock", rows.vsock);
+        if (typeof acts.vsockCommand === "string" && acts.vsockCommand) {
+          cusCommand(vsock.main, "Load the module now (Enable KVM access also loads it at every boot):", acts.vsockCommand);
+        }
+        cusRow(hosts.local, "vmTools", rows.vmTools);
+        cusRow(hosts.local, "vm", rows.vm);
+      } else {
+        hosts.local.appendChild(el("div", "cdbx-note cdbx-cus-old",
+          "This build's main side does not report the local VM - reinstall to pick it up."));
+      }
+
+      // Computer Use: this desktop.
+      var desk = cusRow(hosts.cu, "desktop", rows.desktop);
       var shots = cusShotsLine(st.screenshots);
       if (shots) {
         var sl = el("div", "cdbx-note cdbx-cus-shots", shots);
@@ -1755,104 +1945,117 @@
         });
         desk.aside.appendChild(reset);
       }
-
-      var tpm = cusRow(page, "tpm", rows.tpm);
-      // Off-state: the button is greyed with its reason; the command block stays.
-      function offNote(verb, act) {
-        if (typeof act.disabled !== "string" || !act.disabled) return;
-        var n = el("div", "cdbx-note cdbx-cus-off", act.disabled);
-        n.setAttribute("data-verb", verb);
-        tpm.main.appendChild(n);
-      }
-      function offBtn(b, act) {
-        if (typeof act.disabled === "string" && act.disabled) { b.disabled = true; b.setAttribute("data-off", "1"); b.title = act.disabled; }
-      }
-      var en = acts.tpmEnable;
-      if (en && typeof en === "object") {
-        tpm.main.appendChild(el("div", "cdbx-note cdbx-cus-sec", CUS_SECURITY));
-        if (en.kind === "pkexec") {
-          var enable = cusButton("Enable TPM access", "Asks you to confirm, then for an administrator password, then lets this session use the TPM");
-          enable.addEventListener("click", function () { tpmAction("enable"); });
-          offBtn(enable, en);
-          tpm.aside.appendChild(enable);
-          offNote("enable", en);
-          cusPkexecInfo(tpm.main, "enable", en);
-        } else if (en.kind === "nixos") {
-          offNote("enable", en);
-          cusCommand(tpm.main, "Add this to your NixOS configuration, then rebuild and restart Claude:", String(en.text || ""));
-        } else if (en.kind === "command") {
-          offNote("enable", en);
-          cusCommand(tpm.main, cusWhere(en), String(en.text || ""));
-        }
-      }
-      var dis = acts.tpmDisable;
-      if (dis && typeof dis === "object") {
-        if (dis.kind === "pkexec") {
-          var disable = cusButton("Disable TPM access", "Removes this package's TPM rule link; access already granted lasts until you log out");
-          disable.addEventListener("click", function () { tpmAction("disable"); });
-          offBtn(disable, dis);
-          tpm.aside.appendChild(disable);
-          offNote("disable", dis);
-          cusPkexecInfo(tpm.main, "disable", dis);
-        } else if (dis.kind === "command") {
-          offNote("disable", dis);
-          cusCommand(tpm.main, "To turn TPM access off again - " + cusWhere(dis).charAt(0).toLowerCase() + cusWhere(dis).slice(1),
-            String(dis.text || ""));
-        }
-      }
-      if (typeof acts.tssCommand === "string" && acts.tssCommand) {
-        cusCommand(tpm.main, "This session did not get access from the rule (not the active local seat, or no logind). " +
-          "Add yourself to the TPM group instead, then log out and back in:", acts.tssCommand);
-      }
-      if (restartOk) tpm.aside.appendChild(restartButton());
-      if (failure) {
-        tpm.main.appendChild(el("div", "cdbx-error cdbx-cus-fail", "Not changed: " + reason(failure)));
-        if (typeof failure.command === "string" && failure.command) {
-          cusCommand(tpm.main, "Run this in a terminal instead:", failure.command);
-        }
-      }
-
-      var cloud = cusRow(page, "cloud", rows.cloud);
-      if (restartOk) cloud.aside.appendChild(restartButton());
     }
 
     recheck.addEventListener("click", function () { if (!running) load(null); });
     load(null);
   }
 
+  // The page's three sections, in order. `id` is the data-cdbx-section value
+  // a deep link scrolls to.
+  // "How Cowork chooses where a task runs": a closed help block at the top of
+  // the page (facts as of 4.23118.0). Links are fixed URLs on plain anchors
+  // that open a new window (upstream's window-open handling decides where);
+  // nothing here hands a URL to main. In 3P only the local line applies.
+  var CUS_HELP_DOC = "https://github.com/patrickjaja/claude-desktop-extra/blob/master/docs/cowork.md#how-cowork-chooses-cloud-or-local";
+  var CUS_HELP_LINKS_1P = [
+    ["Admin settings - Cowork", "https://claude.ai/admin-settings/cowork"],
+    ["Admin settings - Capabilities", "https://claude.ai/admin-settings/capabilities"],
+    ["docs/cowork.md", CUS_HELP_DOC]
+  ];
+  var CUS_HELP_LOCAL = "Local: the VM on this computer. It needs KVM (see Local Cowork VM below), and it is the only option in 3P mode.";
+  var CUS_HELP_1P = [
+    "Cloud: Anthropic's cloud VM. It reaches this computer's files and commands through the device link; Computer Use (screen and input) also needs the device key (see Cloud Cowork below).",
+    CUS_HELP_LOCAL,
+    "The header icon tells you which: a laptop marked \"Connected\" is a cloud task linked to this computer; a slashed cloud, \"Only on this computer\", is a local task.",
+    "Switching: if your organization offers the choice, a cloud / local toggle (Beta) sits above the composer of a new task. Otherwise the app decides: a task with a local folder or Space, Dispatch, or an Auto or Skip-approvals mode the cloud cannot run runs locally; plain chats and tasks run in the cloud. A running task can be moved with \"Continue in cloud...\" or back to this computer.",
+    "Organization admins control this in claude.ai Admin settings: Cowork -> \"Cowork in the cloud\" (and \"Chat and Cowork unified\": when on, chat and Cowork are one surface and no separate toggle is shown), and Capabilities -> Remote sessions -> \"Computer access\" and \"Require trusted devices\" (trusted devices = the device key)."
+  ];
+  var CUS_HELP_3P = [CUS_HELP_LOCAL, "Cloud Cowork is not available in 3P mode."];
+
+  // Fills the help block for "1p" or "3p", keeping whether it is open.
+  function fillCusHelp(box, mode) {
+    var m = mode === "3p" ? "3p" : "1p";
+    if (box.getAttribute("data-mode") === m) return;
+    box.setAttribute("data-mode", m);
+    var open = box.open;
+    clear(box);
+    box.appendChild(el("summary", "cdbx-note", "How Cowork chooses where a task runs"));
+    (m === "3p" ? CUS_HELP_3P : CUS_HELP_1P).forEach(function (t) { box.appendChild(el("div", "cdbx-note", t)); });
+    var links = el("div", "cdbx-note cdbx-cus-help-links");
+    (m === "3p" ? [["docs/cowork.md", CUS_HELP_DOC]] : CUS_HELP_LINKS_1P).forEach(function (l, i) {
+      if (i) links.appendChild(document.createTextNode(" - "));
+      var a = el("a", "cdbx-cus-help-link", l[0]);
+      a.href = l[1];
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      links.appendChild(a);
+    });
+    box.appendChild(links);
+    box.open = open;
+  }
+
+  var CUS_SECTIONS = [
+    { id: "cloud", title: "Cloud Cowork" },
+    { id: "local", title: "Local Cowork VM" },
+    { id: "cu", title: "Computer Use" }
+  ];
+
   function renderCu(panel) {
     clear(panel);
     var top = el("div", "cdbx-cus-top");
-    top.appendChild(el("div", "cdbx-h1", "Computer Use"));
+    top.appendChild(el("div", "cdbx-h1", "Cowork (Linux)"));
     var recheck = cusButton("Re-check", "Run the checks again");
     top.appendChild(recheck);
     panel.appendChild(top);
     panel.appendChild(el("div", "cdbx-sub",
-      "Code sessions use Computer Use on this desktop. Cloud Cowork and Dispatch tasks reach it only when this " +
-      "computer connects as a device with a key kept in its TPM, and offers the computer tools."));
+      "Cowork runs each task in Anthropic's cloud or in a VM on this computer. Cloud tasks reach this desktop only " +
+      "when it connects as a device with a key kept in its TPM; the local VM needs KVM. Code sessions use Computer " +
+      "Use on this desktop directly."));
 
-    var head = el("div", "cdbx-sec-h");
-    head.appendChild(el("span", "cdbx-sec-t", "Status"));
-    panel.appendChild(head);
-    if (cuStatusApiOk()) {
-      var page = el("div", "cdbx-cus");
-      panel.appendChild(page);
-      panel.appendChild(el("div", "cdbx-note cdbx-cus-foot",
-        "Full report for an issue: run claude-desktop --diagnose in a terminal."));
-      renderCuStatusBlock(panel, page, recheck);
+    var help = el("details", "cdbx-cus-what cdbx-cus-help");
+    fillCusHelp(help, null);
+    panel.appendChild(help);
+
+    var apiOk = cuStatusApiOk();
+    var hosts = {};
+    if (apiOk) {
+      hosts.status = el("div", "cdbx-cus cdbx-cus-status");
+      panel.appendChild(hosts.status);
     } else {
       recheck.remove();
       panel.appendChild(el("div", "cdbx-error",
         "This build's preload does not expose the Computer Use status bridge - reinstall to pick it up."));
     }
+    var cuWrap = null;
+    CUS_SECTIONS.forEach(function (sec) {
+      var wrap = el("div", "cdbx-cus-section");
+      wrap.setAttribute("data-cdbx-section", sec.id);
+      var head = el("div", "cdbx-sec-h");
+      head.appendChild(el("span", "cdbx-sec-t", sec.title));
+      wrap.appendChild(head);
+      if (apiOk) {
+        hosts[sec.id] = el("div", "cdbx-cus");
+        wrap.appendChild(hosts[sec.id]);
+      }
+      panel.appendChild(wrap);
+      if (sec.id === "cu") cuWrap = wrap;
+    });
+    if (apiOk) {
+      cuWrap.appendChild(el("div", "cdbx-note cdbx-cus-foot",
+        "Full report for an issue: run claude-desktop --diagnose in a terminal."));
+      renderCuStatusBlock(panel, hosts, recheck);
+    }
 
-    // The switches share one "Options" heading, drawn here (each row passes
-    // sharedSection); it goes again when no switch row is there to carry it.
+    // The switches share one "Options" heading inside the Computer Use
+    // section, drawn here (each row passes sharedSection); it goes again when
+    // no switch row is there to carry it. The background-display row opens
+    // its setup page in the whole panel.
     var opts = el("div", "cdbx-sec-h");
     opts.appendChild(el("span", "cdbx-sec-t", "Options"));
-    panel.appendChild(opts);
+    cuWrap.appendChild(opts);
     var rows = 0;
-    CU_ROWS.forEach(function (render) { if (render(panel)) rows++; });
+    CU_ROWS.forEach(function (render) { if (render(cuWrap, panel)) rows++; });
     if (!rows) opts.remove();
     jsoncFootnote(panel);
   }
@@ -1989,7 +2192,7 @@
   // one slow probe never holds up the rest.
   function renderCuBackground(panel) {
     clear(panel);
-    var back = el("button", "cdbx-btn cdbx-cubg-back", "Back to Computer Use");
+    var back = el("button", "cdbx-btn cdbx-cubg-back", "Back to Cowork (Linux)");
     back.type = "button";
     back.addEventListener("click", function () { renderCu(panel); });
     panel.appendChild(back);
@@ -2276,14 +2479,9 @@
 
   function renderAllowNonAnthropicModelsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Inference",
       title: "Allow non-Anthropic models",
-      note: "Relaxes the built-in check that drops model IDs which do not look Anthropic - " +
-        "DeepSeek, Qwen, GLM, Kimi, gpt-oss and the like - from a third-party gateway's model " +
-        "list. For 3P/gateway users who route to non-Anthropic models through their own gateway; " +
-        "with it off, those routes are silently removed and the session falls back to the default " +
-        "model. The setting is per mode: set it while in 3P mode, where it is saved in " +
-        "~/.config/Claude-3p. Takes effect after a restart - the model list is built at startup.",
+      note: "Keeps models such as DeepSeek, Qwen, GLM or Kimi in the model list when you use a third-party (3P) gateway. 3P mode only: set it while in 3P mode. Takes effect after a restart.",
+      keywords: "gpt-oss model IDs filter gateway Claude-3p default model fallback",
       ariaLabel: "allow non-Anthropic models from a third-party gateway in the model list",
       read: "allowNonAnthropicModelsRead",
       write: "allowNonAnthropicModelsSet",
@@ -2321,15 +2519,14 @@
     var api = window.cdbExtra;
     if (!api || typeof api.autoFixAuthorRead !== "function" || typeof api.autoFixAuthorSet !== "function") return;
     var spec = {
-      section: "Code", title: "Trusted Auto-fix PR authors",
-      note: "Empty by default: the authenticated gh user is always recognized. Add exact host/login " +
-        "pairs, one per line (for example github.com/my-app[bot]), to also recognize selected users " +
-        "or GitHub App bots. No URLs or wildcards. Their PRs count as the session's own PRs (binding, " +
-        "discovery on the session's branch, automatic and model-requested Auto-fix); authentication, " +
-        "PR scope, origin/age, consent and race checks remain. It does not enable Auto-fix itself. Applies live to future attempts."
+      title: "Trusted Auto-fix PR authors",
+      note: "Lets Auto-fix also handle PRs opened by other GitHub users or bots. Empty by default, so only " +
+        "the signed-in gh user counts; add one host/login per line, for example github.com/my-app[bot]. " +
+        "Applies live to future attempts.",
+      keywords: "binding discovery branch model-requested authentication PR scope origin age consent race " +
+        "checks URLs wildcards GitHub App does not enable Auto-fix"
     };
     var head = el("div", "cdbx-sec-h");
-    head.appendChild(el("span", "cdbx-sec-t", spec.section));
     var host = el("div", "cdbx-list");
     var row = el("div", "cdbx-row");
     var main = el("div", "cdbx-row-main");
@@ -2397,14 +2594,9 @@
   // .jsonc; this row only shows them.
   function renderTranscriptLimitsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Sessions",
       title: "Load large sessions in full",
-      note: "Anthropic's app loads only the most recent part of a very large session - currently " +
-        "the last 50 MiB of the conversation plus 32 MiB shared by its subagents - and hides the " +
-        "rest behind \"This session is too large to load in full\". That is typical after long " +
-        "sessions with many browser screenshots. On loads up to 256 MiB and 192 MiB by default " +
-        "(adjustable in claude-desktop-extra.jsonc), using more memory and time to open a huge " +
-        "session. Off leaves the limits exactly as Anthropic ships them. Takes effect after a restart.",
+      note: "Opens very large sessions in full instead of hiding their older part. It uses more memory and time on huge sessions; off keeps Anthropic's limits. Takes effect after a restart.",
+      keywords: "too large to load in full 50 MiB 32 MiB 256 MiB 192 MiB subagents browser screenshots claude-desktop-extra.jsonc memory",
       ariaLabel: "load large Code sessions in full",
       read: "transcriptLimitsRead",
       write: "transcriptLimitsSet",
@@ -2474,17 +2666,9 @@
 
   function renderWindowControlsRow(panel) {
     return renderToggleRow(panel, {
-      section: "Window",
       title: "Hide window controls",
-      note: "Opens the main window with no frame, no minimize/maximize/close buttons and no drop " +
-        "shadow. On xfwm4 (XFCE), i3 and Awesome, Chromium draws a thin 4px border inside a " +
-        "frameless window, and dropping the controls overlay together with the shadow is the only " +
-        "way from inside the app to be rid of it. The price is the buttons: you minimize, maximize " +
-        "and close through your window manager instead - Alt+F4 and whatever else it binds. " +
-        "Dragging the window edges still resizes as usual. Off keeps the integrated titlebar the " +
-        "official build ships, and the native titlebar below wins over this either way. Takes " +
-        "effect after a restart - the frame is fixed when the window is created, so nothing " +
-        "changes until you quit and reopen Claude Desktop.",
+      note: "Opens the main window without frame, buttons or shadow, which removes the thin border some window managers (XFCE, i3, Awesome) leave. You minimize, maximize and close through your window manager; the native titlebar wins if both are on. Takes effect after a restart.",
+      keywords: "frameless 4px border xfwm4 xfce i3 awesome overlay shadow Alt+F4 integrated titlebar",
       ariaLabel: "open the main window frameless, without window-control buttons or a shadow",
       read: "windowControlsRead",
       write: "windowControlsSet",
@@ -2536,16 +2720,9 @@
     var slider = null;
 
     var row = renderToggleRow(panel, {
-      section: "Window",
       title: "Transparent window",
-      note: "Makes the main window see-through so the desktop - and any blur your compositor " +
-        "(Hyprland, KWin, ...) applies behind it - shows through the sidebar and the chat area. " +
-        "The Transparency slider sets how see-through the surfaces are (higher is more see-through) " +
-        "and applies live. A transparent window has " +
-        "no minimize/maximize/close buttons and no shadow: close and maximize through your window " +
-        "manager (Alt+F4 and friends) and resize by dragging the outermost few pixels of the window. " +
-        "On X11 a compositor must be running, or the window turns black. Needs the integrated " +
-        "titlebar: it does nothing while the native titlebar is on. The switch takes effect after a restart.",
+      note: "Makes the main window see-through so your desktop, or the blur your compositor adds, shows through. It has no window buttons or shadow and needs the integrated titlebar. The switch takes effect after a restart; the Transparency slider applies live.",
+      keywords: "Hyprland KWin blur compositor X11 black sidebar chat area Alt+F4 resize edge",
       ariaLabel: "make the main window transparent",
       read: "windowTransparencyRead",
       write: "windowTransparencySet",
@@ -2695,15 +2872,9 @@
   // happens when it is off - that is the other row's line to write.
   function renderNativeTitlebarRow(panel) {
     return renderToggleRow(panel, {
-      section: "Window",
       title: "Native titlebar",
-      note: "Swaps this app's integrated titlebar for your system's own window frame, so the " +
-        "titlebar, its buttons and its right-click menu are the ones your window manager draws " +
-        "for every other application. It also avoids the thin 4px border xfwm4 (XFCE), i3 and " +
-        "Awesome leave behind, because the window is not frameless at all any more - at the cost " +
-        "of a second bar above the app's own header. This wins over \"Hide window controls\": with " +
-        "both on you get the system frame. Takes effect after a restart - the frame is fixed when " +
-        "the window is created, so nothing changes until you quit and reopen Claude Desktop.",
+      note: "Uses your system's own window frame and titlebar instead of the app's. It adds a second bar above the app's header and wins over \"Hide window controls\". Takes effect after a restart.",
+      keywords: "integrated titlebar xfwm4 xfce i3 awesome 4px border frameless window manager right-click menu",
       ariaLabel: "use the system window frame instead of this app's integrated titlebar",
       read: "nativeTitlebarRead",
       write: "nativeTitlebarSet",
@@ -2870,11 +3041,9 @@
   // whole Community panel (not in WINDOWS_NAV).
   function renderTrayIconRow(panel) {
     return renderToggleRow(panel, {
-      section: "Tray",
       title: "Always use the white tray icon",
-      note: "Off follows the theme like the stock app: a white icon on GNOME and in dark mode, " +
-        "a black one in light mode. On keeps it white, for dark panels with a light Claude theme " +
-        "or bars that report no color scheme. Applies live.",
+      note: "Keeps the tray icon white instead of following the theme. Off follows the theme like the stock app. Applies live.",
+      keywords: "tray glyph dark light panel color scheme black icon GNOME",
       ariaLabel: "always show the white tray icon",
       read: "trayIconRead",
       write: "trayIconSet",
@@ -2898,12 +3067,12 @@
   function renderAutoArchiveGraceRow(panel) {
     var api = window.cdbExtra;
     if (!api || typeof api.autoArchiveGraceRead !== "function" || typeof api.autoArchiveGraceSet !== "function") return;
-    var spec = { section: "Code", title: "Auto-archive delay after a PR merges or closes",
-      note: "Only applies when native PR auto-archive is enabled. The grace starts when the app first confirms " +
-        "the merged or closed PR and persists across restarts. Archives on the next native sweep after it expires " +
-        "(normally within 5 minutes), once all safety checks pass. The separate inactivity rule is unchanged. " +
-        "Changing the delay recalculates from the same start; disabling PR auto-archive cancels it. Applies live." };
-    var head = el("div", "cdbx-sec-h"); head.appendChild(el("span", "cdbx-sec-t", spec.section));
+    var spec = { title: "Auto-archive delay after a PR merges or closes",
+      note: "Waits a chosen time after a PR merges or closes before its Code session is archived. Only used " +
+        "while PR auto-archive is on; the Code session also shows the time left and a Keep this " +
+        "session button. Applies live.",
+      keywords: "grace native sweep 5 minutes safety checks inactivity rule recalculates disabling cancels persists restarts" };
+    var head = el("div", "cdbx-sec-h");
     var host = el("div", "cdbx-list"), row = el("div", "cdbx-row"), main = el("div", "cdbx-row-main");
     main.appendChild(el("div", "cdbx-id", spec.title)); main.appendChild(el("div", "cdbx-note", spec.note));
     var label = el("label", "cdbx-note", "Delay after merged or closed PR confirmation");
@@ -2961,14 +3130,9 @@
   // add_feature_autofix_post_merge.nim read it on every sweep, so it applies live.
   function renderAutoFixMergeReadyRow(panel) {
     return renderToggleRow(panel, {
-      section: "Code",
       title: "Auto-fix notices: ready to merge, comments after merge",
-      note: "For a PR with Auto-fix on, the Code session gets a short notice when GitHub reports it " +
-        "ready to merge (open, checks green, reviews done, no conflicts). After the PR is merged, new " +
-        "comments from the repository's owners, members, collaborators and bots are forwarded as quoted " +
-        "informational notices for up to 7 days. Claude reports them and waits for you - it never merges, " +
-        "turns on auto-merge or replies on GitHub. Costs one GitHub read per Auto-fix PR on each Auto-fix " +
-        "sweep (every minute while the app is focused) and one model turn per notice. Applies live.",
+      note: "Tells the Code session when a PR with Auto-fix on is ready to merge, and passes on new comments after it merges. Claude only reports them and waits for you - it never merges. Costs one GitHub read per Auto-fix PR and one model turn per notice. Applies live.",
+      keywords: "checks green reviews done conflicts owners members collaborators bots quoted informational 7 days auto-merge replies sweep",
       ariaLabel: "Auto-fix notices: ready to merge, comments after merge",
       read: "autoFixMergeReadyRead",
       write: "autoFixMergeReadySet",
@@ -2990,6 +3154,52 @@
     });
   }
 
+  // --- Computer Use: Escape stops it (issue #323) -------------------------
+  // Off by default. Main side: cdb-cu-esc:* in js/extra_settings_main.js;
+  // patches/community/add_feature_cu_escape_abort.nim reads the switch each
+  // time Computer Use takes its lock, so a flip applies from the next task.
+  // One setting, two views: the same row on Community Features (its own
+  // "Computer Use" group) and on the Cowork (Linux) page under Computer Use ->
+  // Options (cuPage). Both read and write cdb-cu-esc:* and each page reads it
+  // afresh every time it is drawn, so a flip on one shows on the other.
+  function renderCuEscapeAbortCuRow(panel) { return renderCuEscapeAbortRow(panel, true); }
+  function renderCuEscapeAbortRow(panel, cuPage) {
+    return renderToggleRow(panel, {
+      // On the Cowork (Linux) page: under the Options heading renderCu draws.
+      section: cuPage ? "Options" : void 0,
+      sharedSection: !!cuPage,
+      title: "Escape stops Computer Use",
+      note: "Press Escape anywhere to stop Computer Use while Claude is working. X11, and Hyprland 0.55 and " +
+        "newer: Escape still reaches your apps. KDE Plasma (Wayland): while Claude is working Escape only " +
+        "stops Computer Use - it does not close Overview, menus or the launcher, cancel a window move or reach " +
+        "the app (Alt+Tab and the lock screen work as usual); if another global shortcut already uses Escape, " +
+        "the stop key is not enabled. sway: Escape is taken while Claude is working; an Escape binding in " +
+        "sway's default mode keeps the stop key off. GNOME and other desktops: not available - use Stop " +
+        "sharing or Stop. Off keeps Anthropic's behavior (on X11 Escape stops Computer Use and is taken while " +
+        "Claude is working; elsewhere only Escape in Claude's own window). Applies live, from the next Computer Use task.",
+      keywords: "abort cancel keyboard shortcut kglobalaccel xinput hyprland sway kde x11 wayland",
+      ariaLabel: "Escape stops Computer Use",
+      read: "cuEscRead",
+      write: "cuEscSet",
+      lockFile: "claude-desktop-extra.jsonc",
+      // The downstream Windows build carries this page; its main side answers
+      // "Linux only" and the row must not appear there.
+      hideIf: function (res) { return failed(res) && /Linux only/.test(reason(res)); },
+      // Opt-in: only an explicit true is on.
+      isOn: function (res) { return res.enabled === true; },
+      describe: function (on) {
+        return on ? "on - Escape stops Computer Use on supported desktops" : "off - Anthropic's Escape handling";
+      },
+      writeArg: function (next) { return next; },
+      toast: function (next) {
+        return next
+          ? "Escape stops Computer Use from the next task"
+          : "Escape handling is back to Anthropic's behavior";
+      },
+      errorPrefix: "Could not change the setting: "
+    });
+  }
+
   // --- Code: native dialog with "Allow always" for starting other sessions --
   // Off by default. Main side: cdb-session-start:* in js/extra_settings_main.js;
   // the broker hook in patches/community/add_feature_session_start_always_allow.nim
@@ -2998,16 +3208,9 @@
   // how many are remembered and forget them, never add one.
   function renderSessionStartAlwaysAllowRow(panel) {
     var row = renderToggleRow(panel, {
-      section: "Code",
       title: "Native dialog with 'Allow always' for starting other sessions",
-      note: "When Claude asks to start another Code session, a native dialog replaces the in-chat card and " +
-        "offers Deny, Allow once and Allow always (Deny is the default; Escape denies). Allow always " +
-        "remembers the approval for that asking project and the displayed local destination only. A different " +
-        "folder asks separately, and an explicit folder is asked again in a new asking session or after an app restart; host, environment, preset, cloud and higher-mode requests keep the in-chat card. Sessions started " +
-        "this way run in this session's permission mode or lower from a prompt Claude wrote; nothing inside " +
-        "them is approved by this. When the app window is hidden or minimized the in-chat card asks instead. " +
-        "Off (the default) leaves Anthropic's in-chat card as shipped; turning it off also forgets every " +
-        "remembered approval. Applies live.",
+      note: "Asks with a system dialog (Deny, Allow once, Allow always) when Claude wants to start another Code session. Off (the default) keeps Anthropic's in-chat card, and turning it off forgets every remembered approval. Applies live.",
+      keywords: "native dialog asking project displayed local destination different folder asks separately permission mode nothing inside host environment preset cloud hidden minimized",
       ariaLabel: "use a native dialog with Allow always for starting other sessions",
       read: "sessionStartAlwaysAllowRead",
       write: "sessionStartAlwaysAllowSet",
@@ -3136,11 +3339,9 @@
   // explicit false takes it away.
   function renderThemePickerRow(panel) {
     return renderToggleRow(panel, {
-      section: "Shortcuts",
       title: "Theme picker",
-      note: "Ctrl+Shift+T opens a searchable gallery of every theme this build knows about. " +
-        "Clicking a card applies it live and saves it; the same chord closes the window again. " +
-        "Applies live - the shortcut reads this switch on every press.",
+      note: "Press Ctrl+Shift+T to open a searchable gallery of themes and apply one with a click. Applies live.",
+      keywords: "shortcut hotkey gallery card palette",
       ariaLabel: "open the theme gallery with Ctrl+Shift+T",
       read: "pickerRead",
       write: "pickerSet",
@@ -3449,23 +3650,38 @@
   // the transparent window, the transcript limits and the non-Anthropic models
   // rows, which are read once at startup.
 
-  var FEATURE_ROWS = [
-    renderDiffViewsRow,
-    renderPanelTabsRow,
-    renderFilesQuickOpenRow,
-    renderCustomModelsRow,
-    renderAllowNonAnthropicModelsRow,
-    renderAutoFixAuthorRow,
-    renderAutoFixMergeReadyRow,
-    renderAutoArchiveGraceRow,
-    renderSessionStartAlwaysAllowRow,
-    renderTranscriptLimitsRow,
-    renderWindowControlsRow,
-    renderNativeTitlebarRow,
-    renderWindowTransparencyRow,
-    renderTrayIconRow,
-    renderThemePickerRow,
-    renderDevToolsRow
+  // Three headlined groups, in this order. A group's `items` are row renderers
+  // or one nested group (the Pull requests subgroup under Code). The headline
+  // replaces what used to be a per-row section label; nothing here changes what
+  // a row does.
+  var FEATURE_GROUPS = [
+    { title: "Code", sub: "Code tab: panels, files, diffs and sessions", items: [
+      renderPanelTabsRow,
+      renderFilesQuickOpenRow,
+      renderDiffViewsRow,
+      renderTranscriptLimitsRow,
+      renderSessionStartAlwaysAllowRow,
+      { title: "Pull requests", sub: "Auto-fix and auto-archive for your GitHub PRs", items: [
+        renderAutoFixAuthorRow,
+        renderAutoFixMergeReadyRow,
+        renderAutoArchiveGraceRow
+      ] }
+    ] },
+    { title: "App and window", sub: "Look and behavior of the app window, tray and theme", items: [
+      renderWindowControlsRow,
+      renderNativeTitlebarRow,
+      renderWindowTransparencyRow,
+      renderTrayIconRow,
+      renderThemePickerRow,
+      renderDevToolsRow
+    ] },
+    { title: "Models and 3P", sub: "Extra models and gateway options", items: [
+      renderCustomModelsRow,
+      renderAllowNonAnthropicModelsRow
+    ] },
+    { title: "Computer Use", sub: "Computer Use on Linux", items: [
+      renderCuEscapeAbortRow
+    ] }
   ];
 
   function renderFeatures(panel) {
@@ -3480,12 +3696,36 @@
     panel.appendChild(search);
 
     var rows = [];
-    FEATURE_ROWS.forEach(function (render) {
-      // renderToggleRow answers nothing when the bridge half of a row is missing
-      // (older preload, newer page) - such a row is simply not there to filter.
-      var row = render(panel);
-      if (row) rows.push(row);
-    });
+    // Renders one group into `parent`; answers the node and its rows so the
+    // filter can hide a headline whose rows are all hidden.
+    function buildGroup(parent, group, nested) {
+      var node = el("div", nested ? "cdbx-group cdbx-group-sub" : "cdbx-group");
+      node.appendChild(el("div", nested ? "cdbx-sec-h cdbx-sec-h2 cdbx-grouphdr cdbx-grouphdr-sub" : "cdbx-sec-h cdbx-grouphdr", group.title));
+      node.appendChild(el("div", "cdbx-sub", group.sub));
+      parent.appendChild(node);
+      var g = { node: node, rows: [], kids: [] };
+      group.items.forEach(function (item) {
+        if (typeof item !== "function") {
+          var kid = buildGroup(node, item, true);
+          g.kids.push(kid);
+          return;
+        }
+        // renderToggleRow answers nothing when the bridge half of a row is missing
+        // (older preload, newer page) - such a row is simply not there to filter.
+        var row = item(node);
+        if (!row) return;
+        // The group headline stands in for the per-row label.
+        row.head.remove();
+        // A row whose read says it does not exist on this platform (hideIf,
+        // e.g. a Linux-only switch on the downstream Windows build) is gone:
+        // draw again so its headline hides when nothing else is left in it.
+        row.spec.onGone = function () { draw(search.value); };
+        g.rows.push(row);
+        rows.push(row);
+      });
+      return g;
+    }
+    var groups = FEATURE_GROUPS.map(function (group) { return buildGroup(panel, group, false); });
     // The two Window rows are three mutually exclusive modes and the only rows
     // that outlive a flip, so they are the one pair here that cannot report
     // itself row by row.
@@ -3509,12 +3749,20 @@
       var needle = (filter || "").trim().toLowerCase();
       var shown = 0;
       rows.forEach(function (row) {
-        var hay = (row.spec.section + " " + row.spec.title + " " + row.spec.note).toLowerCase();
-        var hit = !needle || hay.indexOf(needle) >= 0;
+        var hay = (row.spec.title + " " + row.spec.note + " " + (row.spec.keywords || "")).toLowerCase();
+        var hit = !row.spec.gone && (!needle || hay.indexOf(needle) >= 0);
         row.head.style.display = hit ? "" : "none";
         row.host.style.display = hit ? "" : "none";
         if (hit) shown++;
       });
+      // A headline hides when none of its rows (own or in a subgroup) match.
+      function sync(g) {
+        var any = g.rows.some(function (row) { return row.host.style.display !== "none"; });
+        g.kids.forEach(function (kid) { if (sync(kid)) any = true; });
+        g.node.style.display = any ? "" : "none";
+        return any;
+      }
+      groups.forEach(sync);
       empty.style.display = shown ? "none" : "";
     }
 
@@ -5345,6 +5593,19 @@
       mounted.paneDisplay = pane.style.display;
       pane.style.display = "none";
       mounted.panel = el("div", "cdbx-panel");
+      // A click on a headline label replays the quick sheen sweep; nothing else.
+      mounted.panel.addEventListener("click", function (ev) {
+        var t = ev.target;
+        var h = t && t.closest ? t.closest(".cdbx-sec-h") : null;
+        if (!h || !mounted.panel.contains(h) || (t.closest(".cdbx-sec-n, button, input, select, a"))) return;
+        h.classList.remove("cdbx-sheen-play");
+        void h.offsetWidth;
+        h.classList.add("cdbx-sheen-play");
+        h.addEventListener("animationend", function done() {
+          h.classList.remove("cdbx-sheen-play");
+          h.removeEventListener("animationend", done);
+        });
+      });
       pane.parentElement.insertBefore(mounted.panel, pane.nextSibling);
       // Only possible once the panel is IN the document: it measures the modal.
       paintSurface(mounted.panel);
@@ -5442,8 +5703,77 @@
         built.label === "#structure" ? "cloned from the group found by structure, not by label" :
           built.label === "#last-group" ? "cloned from the last group, found by structure" :
             "cloned from the \"" + built.label + "\" group") + ")");
+    openPending();
     return true;
   }
+
+  // --- deep link: window.__cdbExtraOpen(kind, section) -----------------------
+  // Opens one of our panels (a NAV_ITEMS kind) and, for "cu", scrolls to one of
+  // its sections ("cloud" | "local" | "cu"; anything else: the top). Used by the
+  // Cowork header icon. With the settings dialog mounted it opens at once;
+  // otherwise it asks main to navigate this view to upstream's settings
+  // (cdb-extra:open-settings, a fixed route) and leaves a pending entry the next
+  // successful install() honours within PENDING_MS. No timers: the mount is
+  // what finishes it.
+  var PENDING_MS = 10000;
+  var SECTIONS = { cu: { cloud: true, local: true, cu: true } };
+  function navItemOf(kind) {
+    for (var i = 0; i < NAV_ITEMS.length; i++) if (NAV_ITEMS[i].kind === kind) return NAV_ITEMS[i];
+    return null;
+  }
+  function manualPath(kind) {
+    var it = navItemOf(kind);
+    return "Open Settings -> Extra -> " + (it ? it.label : "Extra");
+  }
+  function openAt(kind, section) {
+    if (!mounted) return false;
+    var item = null;
+    for (var i = 0; i < mounted.items.length; i++) {
+      if (mounted.items[i].kind === kind) { item = mounted.items[i]; break; }
+    }
+    if (!item) return false;
+    show(kind, item);
+    var ok = SECTIONS[kind] && SECTIONS[kind][section] === true;
+    var node = ok && mounted.panel ? mounted.panel.querySelector('[data-cdbx-section="' + section + '"]') : null;
+    if (node) {
+      try { node.scrollIntoView({ block: "start" }); } catch (e) { /* older engines */ }
+      var head = node.querySelector(".cdbx-sec-h");
+      if (head) {
+        head.setAttribute("tabindex", "-1");
+        try { head.focus({ preventScroll: true }); } catch (e2) { head.focus(); }
+      }
+    }
+    return true;
+  }
+  function openPending() {
+    var p = window.__cdbExtraPending;
+    if (!p || typeof p !== "object") return;
+    window.__cdbExtraPending = null;
+    if (typeof p.at !== "number" || Date.now() - p.at > PENDING_MS || Date.now() < p.at) return;
+    if (!openAt(p.kind, p.section)) toast(manualPath(p.kind), true);
+  }
+  window.__cdbExtraOpen = function (kind, section) {
+    kind = String(kind || "");
+    section = String(section || "");
+    if (!navItemOf(kind)) return false;
+    if (attached() && openAt(kind, section)) return true;
+    if (!api || typeof api.extraOpenSettings !== "function") {
+      toast(manualPath(kind), true);
+      return false;
+    }
+    window.__cdbExtraPending = { kind: kind, section: section, at: Date.now() };
+    Promise.resolve().then(function () { return api.extraOpenSettings(); }).then(function (r) {
+      if (!failed(r)) return;
+      window.__cdbExtraPending = null;
+      diag("deeplink-failed", "[ExtraSettings] deep link: settings navigation failed: " + reason(r));
+      toast(manualPath(kind), true);
+    }, function (err) {
+      window.__cdbExtraPending = null;
+      diag("deeplink-failed", "[ExtraSettings] deep link: settings navigation failed: " + ((err && err.message) || String(err)));
+      toast(manualPath(kind), true);
+    });
+    return true;
+  };
 
   // Our rows are clones, so they carry no React handler: these are the only ones.
   // A cloned <button> activates on Enter and Space by itself; anything else needs

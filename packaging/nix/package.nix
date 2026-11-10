@@ -67,9 +67,9 @@
 
 let
   # Updated automatically by CI (build-and-release.yml) on each release.
-  version = "4.16336.0"; # pkgver: always the upstream Claude Desktop version
+  version = "4.23118.1"; # pkgver: always the upstream Claude Desktop version
   pkgrel = "4"; # Arch-style release counter: bumped on re-releases of the same upstream version, reset to 1 on version bumps
-  hash = "sha256-QR1pis6gSWcIGvTFH5BSRH8HugoBB/fpnYXvjO3z4No=";
+  hash = "sha256-azvG+0bKU5cYFHw826Hf1h8erLSa+RBU5P93fiZKjak=";
   # Every release publishes under its own tag (v<version> for pkgrel 1,
   # v<version>-<pkgrel> for re-releases) and its assets are never overwritten
   # afterwards, so this URL is immutable and a pinned flake.lock keeps fetching
@@ -294,11 +294,21 @@ stdenvNoCC.mkDerivation {
     # the store's sh). The polkit action is dropped: its exec.path names the
     # /usr/lib install, and polkit on a non-NixOS host does not read the store.
     # Guarded: release tarballs before this change do not ship linux-udev/.
+    # Opt-in KVM access (local Cowork VM) follows the same shape: the rule, the
+    # vhost_vsock modules-load file and cdb-kvm-access stay in the tree,
+    # disabled; programs.claude-desktop-extra.kvmAccess.enable is the NixOS
+    # path. Each KVM file is guarded on its own: older release tarballs ship
+    # linux-udev/ without them.
     udev=$out/lib/claude-desktop/resources/linux-udev
     if [ -d $udev ]; then
       rm -f $udev/io.github.patrickjaja.claude-desktop-extra.tpm-access.policy
+      rm -f $udev/io.github.patrickjaja.claude-desktop-extra.kvm-access.policy
       chmod 755 $udev $udev/cdb-tpm-access
       chmod 644 $udev/70-claude-desktop-extra-tpm.rules
+      if [ -f $udev/cdb-kvm-access ]; then chmod 755 $udev/cdb-kvm-access; fi
+      for f in 70-claude-desktop-extra-kvm.rules claude-desktop-extra-vsock.conf; do
+        if [ -f $udev/$f ]; then chmod 644 $udev/$f; fi
+      done
     fi
 
     # Release stamp for the in-app update check: the release tag (releaseTag,

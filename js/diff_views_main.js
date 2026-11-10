@@ -720,11 +720,28 @@
   }
 
   // spawn-based collector: manual cap => clean truncation semantics.
+  //
+  // git is the ONE tool of ours treated the way upstream treats it: looked up
+  // on the APP PATH (the PATH Claude Desktop was started with, first), and run
+  // with that PATH - upstream runs git for Code sessions from its own wide
+  // path, and git executes hooks, filters and core.fsmonitor from the user's
+  // config anyway, so the TOOL PATH would protect nothing here and would cost
+  // ~/.local/bin and standalone home-manager users the diff view. Every other
+  // tool our patches run stays on the TOOL PATH (system folders plus root-owned
+  // read-only ones). Since 4.23118 upstream narrows process.env.PATH; the APP
+  // PATH comes from the shared resolver (globalThis.__cdbToolPath,
+  // add_tool_path_resolver.nim). Without the resolver, or with narrowing off:
+  // bare "git" and process.env, as before.
+  function gitCmd() {
+    var t = globalThis.__cdbToolPath;
+    return (t && typeof t.appWhich === "function" && t.appWhich("git")) || "git";
+  }
   function git(args, cwd, extraEnv, cb) {
     var out = [], outLen = 0, errBuf = "", truncated = false, done = false;
-    var env = Object.assign({}, process.env, extraEnv || {});
+    var t = globalThis.__cdbToolPath;
+    var env = Object.assign({}, (t && t.appEnv()) || process.env, extraEnv || {});
     var child;
-    try { child = _cp.spawn("git", args, { cwd: cwd, env: env, stdio: ["ignore", "pipe", "pipe"] }); }
+    try { child = _cp.spawn(gitCmd(), args, { cwd: cwd, env: env, stdio: ["ignore", "pipe", "pipe"] }); }
     catch (e) { return cb(String(e && e.message || e)); }
     var timer = setTimeout(function () { try { child.kill("SIGKILL"); } catch (e) {} }, GIT_TIMEOUT_MS);
     child.stdout.on("data", function (d) {
@@ -2232,50 +2249,10 @@
 
   // ---- IPC (our own bridge channels) -----------------------------------------
 
-  // Same origin allowlist the stock eipc validator enforces, verified in the
-  // 1.24012.9 bundle (the "did not pass origin validation" chain compares the
-  // sender origin against exactly these four). We deliberately do NOT mirror
-  // its trailing `globalThis.isDeveloperApprovedDevUrlOverrideEnabled` escape
-  // hatch: we never set that flag, and a mode switch is not worth widening the
-  // gate. Tightened from the previous generic /^https?:\/\// test, which would
-  // have accepted any http(s) page that somehow got our preload.
-  //
-  // app://localhost is the main window in 3P mode (upstream serves the bundled
-  // SPA from it instead of claude.ai). Its URL.origin is the opaque "null", so
-  // the origin is normalised to protocol + "//" + host first - the same
-  // normalisation upstream's own eIPC sender validator applies. host keeps a
-  // port, so app://localhost:1234 stays distinct and is rejected.
-  var ALLOWED_ORIGINS = [
-    "https://claude.ai",
-    "https://preview.claude.ai",
-    "https://claude.com",
-    "https://preview.claude.com",
-    "app://localhost"
-  ];
-
-  function originAllowed(rawUrl) {
-    var origin;
-    try {
-      var u = new URL(String(rawUrl));
-      origin = u.origin;
-      if (!origin || origin === "null") origin = u.protocol + "//" + u.host;
-    } catch (e) { return false; }
-    for (var i = 0; i < ALLOWED_ORIGINS.length; i++) {
-      if (origin === ALLOWED_ORIGINS[i]) return true;
-    }
-    return false;
-  }
-
-  function okSender(ev) {
-    try {
-      var wc = ev && ev.sender;
-      if (!wc || wc.isDestroyed()) return false;
-      if (!originAllowed(wc.getURL() || "")) return false;
-      var frame = ev.senderFrame;
-      if (frame && frame.parent) return false;
-      return true;
-    } catch (e) { return false; }
-  }
+  // The IPC sender validator is shared: js/sender_guard.js (issue #318). Looked up
+  // at call time; a missing guard fails closed.
+  function originAllowed(u) { var g = globalThis.__cdbSenderGuard; return !!g && g.originAllowed(u); }
+  function okSender(ev) { var g = globalThis.__cdbSenderGuard; return !!g && g.okSender(ev); }
 
   // `mode` is the EFFECTIVE mode (see effectiveMode): the page sets its
   // <select> value from it on every install, so a dropdown remounted by a view

@@ -115,6 +115,10 @@
 
     autoArchiveGraceRead: function (sessionId) { return sessionId === undefined ? ipcRenderer.invoke("cdb-archive-grace:read") : ipcRenderer.invoke("cdb-archive-grace:read", sessionId); },
     autoArchiveGraceSet: function (minutes) { return ipcRenderer.invoke("cdb-archive-grace:set", minutes); },
+    // The 1P Code page's "Keep this session" (js/auto_archive_grace_web_page.js):
+    // the session id only; main validates it and writes upstream's own
+    // per-session "Auto-archive on merge or close" = false.
+    autoArchiveGraceKeep: function (sessionId) { return ipcRenderer.invoke("cdb-archive-grace:keep", sessionId); },
 
     // Auto-fix notices (ready to merge, comments after merge). Fixed channels,
     // boolean only; the main side re-validates the type.
@@ -131,6 +135,14 @@
     },
     cuAxSet: function (enabled) {
       return ipcRenderer.invoke("cdb-cu-ax:set", enabled === true);
+    },
+
+    // Escape stops Computer Use (community). Fixed channels, boolean only.
+    cuEscRead: function () {
+      return ipcRenderer.invoke("cdb-cu-esc:read");
+    },
+    cuEscSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-cu-esc:set", enabled === true);
     },
 
     // Computer Use: ask before controlling an app. Fixed channels, boolean only.
@@ -380,9 +392,10 @@
       return ipcRenderer.invoke("cdb-cubg:tools");
     },
 
-    // Computer Use status (Settings -> Extra -> Computer Use). No channel
-    // takes an argument: the helper path, the launcher and the bridge are all
-    // decided on the main side, so the page can only name one of these actions.
+    // Cowork and Computer Use status (Settings -> Extra -> Cowork (Linux)). No
+    // channel takes an argument: the helper paths, the launcher and the bridge
+    // are all decided on the main side, so the page can only name one of these
+    // actions.
     cuStatusRead: function () {
       return ipcRenderer.invoke("cdb-cu-status:read");
     },
@@ -394,6 +407,21 @@
     },
     cuStatusResetScreenSharing: function () {
       return ipcRenderer.invoke("cdb-cu-status:reset-screen-sharing");
+    },
+    cuStatusKvmEnable: function () {
+      return ipcRenderer.invoke("cdb-cu-status:kvm-enable");
+    },
+    cuStatusKvmDisable: function () {
+      return ipcRenderer.invoke("cdb-cu-status:kvm-disable");
+    },
+    // The Cowork header icon's facts (device key, local VM): files only, cached.
+    cuStatusIcon: function () {
+      return ipcRenderer.invoke("cdb-cu-status:icon");
+    },
+    // Navigate this view to upstream's settings; the page then opens Extra ->
+    // Cowork (Linux). The route is fixed on the main side.
+    extraOpenSettings: function () {
+      return ipcRenderer.invoke("cdb-extra:open-settings");
     },
 
     // Open one of the files this package writes, or show it in the file manager.

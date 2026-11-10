@@ -30,7 +30,7 @@ for n in <numbers>; do gh issue view $n --json title,author,createdAt,body; gh i
 
 - `--comments` shows only the comments, never the body. Always fetch the body separately with `--json body`.
 - Pull any `--diagnose` gist the reporter linked with `gh gist view <id> --raw > <scratch>/gist<n>/diagnose.txt`. Then grep it for session type, compositor, scale, bridges and versions.
-- Compare the reporter's version with `.upstream-version` and the installed package (`pacman -Q claude-desktop-extra`). If the extract in `tmp/` matches the upstream version the reports are against, it can be reused read-only.
+- Compare the reporter's version with `.upstream-version` and the installed package (`pacman -Q claude-desktop-extra`). `tmp/` is reusable read-only only when `tmp/app.asar.contents/package.json` says the same version: its mtime lies (a fresh-looking `tmp/` held the previous release in #318). Otherwise re-extract before any probe or real-release harness section runs.
 
 ## Phase 2 - investigate in parallel (read-only)
 
@@ -49,13 +49,15 @@ Each brief carries:
   - Confirm that our patches do not touch that path.
   - Search `anthropics/claude-code` issues for the same symptom.
 - An upstream bug that only breaks on Linux is still ours to patch. It counts as a functional gap, not a cosmetic one.
+- A refusal or a gate that one of our patches already touches: resolve the upstream predicate behind it and list ALL its consumers (export aliases, lazy requires, derived values) before calling it an upstream change. `scripts/check-predicate-consumers.py` on a patched tree does this (docs/census-gates.md); #323 was a call-site patch that covered 1 of 3 consumers. When the cause is a class of gap, dispatch a second read-only worker for the sibling audit in the same phase.
 
 **Reproduce without the user's running app.** The user's Claude is in use: never signal its processes, and identify yours by your own `--user-data-dir`.
 - **Renderer, main-process or Electron behaviour:** run on a private Xvfb display with `env -i` and a throwaway HOME, XDG_RUNTIME_DIR, CLAUDE_CONFIG_DIR and `--user-data-dir`. Use the installed binary or a scratch patched tree. A hung renderer is simulated with `SIGSTOP` on the main renderer.
+- **A scratch 3P instance** (anything on `app://localhost`, managed/gateway deployments) needs no login and no `/etc`: a throwaway HOME where `<userData>-3p/configLibrary/_meta.json` applies an entry with `inferenceProvider: gateway` pointing at a stub HTTP server on 127.0.0.1, plus `deploymentMode: 3p` in `claude_desktop_config.json`; the launcher's `--user-data-dir` only identifies the pid. `main.log` must show upstream's `3P mode active`. Our IPC can be probed from an appended `index.js` probe that calls the Extra page's preload bridge. Crop screenshots to the Settings dialog: the account row shows `os.userInfo()`'s login name whatever `USER` says.
 - **A logged-in scratch instance** (cloud session timing, anything that needs the account): copy `~/.config/Claude` minus logs, caches, vm_bundles and `bridge-state.json` into a 0700 scratch dir and use it as `--user-data-dir`, pass the real `DBUS_SESSION_BUS_ADDRESS` so libsecret can decrypt the cookies, and delete the copy afterwards. `--remote-debugging-port` makes the app refuse to start; append a probe to the scratch asar's `index.js` instead (wrap main-side hooks, `executeJavaScript` into the claude.ai page every few seconds). On Xvfb the CU overlay renders solid black, so the model never clicks anything: good for lock, turn-end and API timing, useless for click accuracy. Upstream re-shows the session page when the lock is released, so a 'page not mounted' run has to re-assert the home after that.
 - **Wayland, wlroots or fractional scale:** use headless sway per `/test-native`, and run the bridge CLI directly against it. The Wayland socket path must stay under 108 bytes, so use a short `mktemp -d /tmp/xx.XXXX` runtime dir rather than the scratchpad.
 - **GNOME portal (gnome-portal-bridge) without a VM:** headless nested GNOME on the host (`dbus-run-session -- gnome-shell --wayland --no-x11 --devkit --virtual-monitor WxH`, private XDG_RUNTIME_DIR, own xdg-desktop-portal + pipewire), with the consent dialog and "Stop sharing" driven over accessibility/Shell.Eval. Good for bridge-level session tests; it cannot host a logged-in Claude.
-- **VMs:** allowed, but never start Cowork inside a VM. Turn off the guest's idle lock before handing a VM to a worker: auto mode rightly refuses to get past a lock screen, so a locked VM stalls the run.
+- **VMs:** allowed, but never start Cowork inside a VM. Install a build in a guest with its package manager (or an extracted tree under the user's home), never by copying onto `/usr`: a `cp -a` onto `/usr/share` changed its owner and broke sshd. Turn off the guest's idle lock before handing a VM to a worker: auto mode rightly refuses to get past a lock screen, so a locked VM stalls the run.
 
 **Session types.** Upstream's Computer Use lock lives differently per session type: the Code tab and local Cowork release it after every turn, cloud Cowork only after an idle sweep or Stop. Anything of ours tied to the lock (bridge sessions, latches) must be checked against each type, and against the reporter's type from their first comment.
 
@@ -73,12 +75,12 @@ Load `agent-skills:spec-driven-development`. Write `.agent/SPEC-<slug>.md`. The 
 - **Commands, testing strategy, boundaries and success criteria.**
 - **A "Rulings during implementation" section,** appended as decisions are made.
 
-Ask the real design forks with AskUserQuestion: one question per fork, with the recommended option first. Approval of the spec covers "break into tasks and dispatch". Save the plan and the ledger to `.agent/tasks/plan-<slug>.md` and `.agent/tasks/todo-<slug>.md`.
+Ask the real design forks with AskUserQuestion: one question per fork, with the recommended option first. Before proposing a default, ask whether an existing user's behaviour changes on update: if it does, the recommended option is a community switch that is off by default, with the upstream path untouched when off (the maintainer corrected two 'on by default' proposals in #323). Approval of the spec covers "break into tasks and dispatch". Save the plan and the ledger to `.agent/tasks/plan-<slug>.md` and `.agent/tasks/todo-<slug>.md`.
 
 ## Phase 4 - implement in parallel
 
 **File ownership:**
-- Two tasks that edit the same file each get their own worktree, or else run in sequence. A worktree task leaves its diff uncommitted. The orchestrator then runs `git apply --check` and `git apply` on the main tree (`-3` fails on a dirty index) and copies over any untracked files.
+- Two tasks that edit the same file each get their own worktree, or else run in sequence. A reviewer of a finished task whose files the next task is already editing gets a snapshot (`git diff` plus a tar of the untracked files) and builds a private clone from it. A worktree task leaves its diff uncommitted. The orchestrator then runs `git apply --check` and `git apply` on the main tree (`-3` fails on a dirty index) and copies over any untracked files.
 - Implementers never touch `CHANGELOG.md`, `docs/`, `README.md`, or `EXPECTED_TEST_HARNESSES` in `scripts/run-feature-tests.sh`. The integration task owns those, so parallel edits cannot conflict. New harnesses run with plain `node <file>` until the count is bumped.
 
 **Rules every brief must state:**
@@ -90,11 +92,15 @@ Ask the real design forks with AskUserQuestion: one question per fork, with the 
 - A harness that runs the compiled patch is only valid after `make` ran AFTER the last `js/` edit (the binary embeds the JS); reviewers rebuild in a scratch copy before trusting counts.
 - A harness must fire the trigger upstream really uses. If it only calls our own injected hook (e.g. the CU lock hook), it misses upstream paths that bypass that hook: #300 passed ~400 harness cases and a private-display rig, then failed in the first real Code-tab turn.
 - Live checks run on scratch trees only.
+- Scratch budget: `/tmp` is a 16 GB tmpfs. A worker keeps its scratch under 2 GB and deletes it when done (one reviewer's 11 GB repo copy filled the disk and put a "Low disk space" toast into the after screenshots).
+- A runtime global that one patch defines and others consume (`globalThis.__cdbX`) gets its idempotency marker from the DEFINING line (`globalThis.__cdbX = Object.freeze(`), never the bare name: consumers injected earlier in basename order mention the name, and a bare-name marker reads as a partial injection on a pristine build.
 
 **Reviews:**
 - Every task gets an independent per-task review.
 - Feed the findings back to the same implementer through SendMessage, so it keeps its context.
-- Do not re-review small verified fixes.
+- Do not re-review small verified fixes. A fix round that rewrites whole files is not small: name those files in the final review's brief.
+- Compositor or desktop-service code written from documentation (Hyprland IPC, kglobalaccel) is not done until it ran on the real thing: schedule the VM run right after the task's review, before integration. In #323 it found a compositor crash and a keymap defect that mocks and reviews had passed.
+- A new shared crate is a path dependency until its repo exists: bridge CI, and the local build's container build of the dynamic bridges, cannot see `../<crate>`. Tell the maintainer early that a new GitHub repo is needed.
 
 ## Phase 5 - integrate and gate
 
@@ -146,7 +152,7 @@ Use the `/comment` voice for every comment:
 - name the fix and the **release** in bold. The maintainer may want it posted while the release run is still going; then say the build is running and name the expected tag, and close the issue once the tag exists
 - no blame on our patches
 - no internals and no speculation
-- for a new UI feature, attach screenshots with a rectangle around what is new. The maintainer wants them as attachments of the comment itself. `gh` cannot upload those, so a worker uses claude-in-chrome with the maintainer's GitHub session to drag them into the comment editor. Release assets (`gh release upload` plus embedded URLs) are only a fallback; ask before using them. Check every PNG for personal data (names, avatar, sidebar, paths, other windows) before uploading.
+- for a new UI feature, attach screenshots with a rectangle around what is new. The maintainer wants them as attachments of the comment itself. `gh` cannot upload those, so a worker uses claude-in-chrome with the maintainer's GitHub session (check they are signed in first). GitHub's comment editor creates its `<input type=file>` only when its attach button is clicked, so neither `read_page` nor `file_upload` finds one: in `javascript_tool` wrap `HTMLInputElement.prototype.click` to capture the input instead of opening the native picker, then `file_upload` each PNG on it, wait for the `<img ... user-attachments/...>` line, and revert the wrapper. `upload_image` only takes browser screenshots; the computer tool cannot drag a host file. Release assets (`gh release upload` plus embedded URLs) are only a fallback; ask before using them. Check every PNG for personal data (names, avatar, sidebar, paths, other windows) before uploading.
 
 **Asking for more data.** Only after local reproduction is exhausted: the maintainer dislikes round-trips with reporters, and a logged-in scratch instance (Phase 2) answers most timing and lifecycle questions here. Give one action plus one copy-paste command, and end with "empty output is fine too" when that is true. Never ask them to look for strings themselves. Never explain what each line would mean. `claude-desktop --diagnose` is the default collector, but never ask for it again when the thread already has one. Use a targeted `grep` only when the evidence is not in `--diagnose`, which does not include `claude-patches.log`.
 
@@ -174,3 +180,6 @@ Before reporting done, update **this file**: `.claude/skills/check-issue/SKILL.m
 - 2026-10-30 (#305): `nativeTheme.shouldUseDarkColors` follows Claude's own Appearance setting (upstream sets `themeSource` from it), not the desktop or panel. Anything "theme-aware" on Linux is only desktop-aware with Appearance = System; offer a switch for the mismatch instead of guessing the panel color.
 - 2026-10-30 (#305): when a refresh hook calls into upstream code, call upstream's own wrapper (crash containment, retries) rather than the inner function it wraps.
 - 2026-11-02 (#293 round 8): upstream main has no task-end signal for cloud Cowork sessions; the page's `releaseRemoteCuLock` is view-scoped and the model's `computer_release_lock` is optional. The server's `worker_status` (upstream's own `refreshRemoteChromeSessionMode`, cookie-authenticated) flips to idle with the `result` event; poll it instead of guessing with a timer.
+- 2026-11-10 (#319): when a live run on the new build shows odd behaviour (a dialog, a hotkey that does not arm), run the released build through the same steps before calling it a regression; two of three KDE observations were already there. A change to the window identity also changes the portal app id on KDE (shortcut component, one confirmation dialog per profile).
+- 2026-11-10 (#323): harnesses that spawn fake child processes must kill them and remove their temp dirs on exit and on signals; reviewers found orphans after interrupted runs. Workers' `rm` in shared /tmp can be denied: have them register cleanup in the harness instead.
+- 2026-11-10 (#319): tell a host live-check worker up front that the maintainer may log in to an instance it started, so it never quits one; a later message can arrive after the quit. Do not run the full feature suite while other heavy runs are going: one harness flaked under load.

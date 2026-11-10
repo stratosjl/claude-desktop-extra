@@ -322,7 +322,7 @@ jobs:
         run: |
           echo "=== Running shellcheck on shell scripts ==="
           FAILED=false
-          for f in scripts/*.sh packaging/apt/*.sh packaging/rpm/*.sh packaging/pacman/*.sh .github/scripts/*.sh packaging/udev/cdb-tpm-access; do
+          for f in scripts/*.sh packaging/apt/*.sh packaging/rpm/*.sh packaging/pacman/*.sh .github/scripts/*.sh packaging/udev/cdb-tpm-access packaging/udev/cdb-kvm-access; do
             [ -f "$f" ] || continue
             echo "Checking $f..."
             if ! shellcheck -S error "$f"; then
@@ -387,6 +387,32 @@ jobs:
           [ "$rc" = 5 ] && [ -z "$out" ] || { echo "::error::cdb-tpm-access enable from the source tree exited $rc (stdout '$out'), expected 5 and no stdout"; exit 1; }
           echo "TPM access rule, helper and polkit action OK"
 
+      - name: Validate KVM access rule, modules-load file, helper and polkit action
+        run: |
+          # Same contract as the TPM step, plus the vhost_vsock modules-load file.
+          set -euo pipefail
+          D=packaging/udev
+          POLICY="$D/io.github.patrickjaja.claude-desktop-extra.kvm-access.policy"
+          shellcheck -S style "$D/cdb-kvm-access"
+          sudo apt-get install -y libxml2-utils
+          xmllint --noout "$POLICY"
+          grep -qF '<action id="io.github.patrickjaja.claude-desktop-extra.kvm-access">' "$POLICY"
+          grep -qF '<annotate key="org.freedesktop.policykit.exec.path">/usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access</annotate>' "$POLICY"
+          grep -qF '<allow_active>auth_admin</allow_active>' "$POLICY"
+          udevadm verify "$D/70-claude-desktop-extra-kvm.rules"
+          # The helper links only files equal to its embedded RULE_TEXT / CONF_TEXT.
+          sed -n "/^RULE_TEXT='/,/^'\$/p" "$D/cdb-kvm-access" | sed '1s/^RULE_TEXT=.//;$d' \
+            | cmp - "$D/70-claude-desktop-extra-kvm.rules" \
+            || { echo "::error::RULE_TEXT in cdb-kvm-access differs from 70-claude-desktop-extra-kvm.rules"; exit 1; }
+          sed -n "/^CONF_TEXT='/,/^'\$/p" "$D/cdb-kvm-access" | sed '1s/^CONF_TEXT=.//;$d' \
+            | cmp - "$D/claude-desktop-extra-vsock.conf" \
+            || { echo "::error::CONF_TEXT in cdb-kvm-access differs from claude-desktop-extra-vsock.conf"; exit 1; }
+          rc=0; "$D/cdb-kvm-access" bogus 2>/dev/null || rc=$?
+          [ "$rc" = 2 ] || { echo "::error::cdb-kvm-access bogus exited $rc, expected 2"; exit 1; }
+          rc=0; out=$("$D/cdb-kvm-access" enable 2>/dev/null) || rc=$?
+          [ "$rc" = 5 ] && [ -z "$out" ] || { echo "::error::cdb-kvm-access enable from the source tree exited $rc (stdout '$out'), expected 5 and no stdout"; exit 1; }
+          echo "KVM access rule, modules-load file, helper and polkit action OK"
+
       - name: Verify Nim patches compile
         run: |
           echo "=== Checking Nim patch syntax (compile check) ==="
@@ -417,6 +443,13 @@ jobs:
           # template add_growthbook_overrides writes on first launch, so the
           # browsable flag catalog cannot drift from what the app produces.
           bash scripts/check-jsonc-template-sync.sh
+
+      - name: Guard landing-page patch catalogue is in sync with docs/patches.md
+        run: |
+          # site/index.html renders every patch from docs/patches.md between the
+          # patch-catalog markers; fail if the generated block drifted or a
+          # table no longer matches patches/<dir>/*.nim.
+          bash scripts/check-site-catalog-sync.sh
 
       - name: Verify Anthropic apt signing key fingerprint
         run: |
@@ -970,7 +1003,7 @@ jobs:
 
           mkdir -p /tmp/build-input /tmp/build-output
           cp "$DEB" /tmp/build-input/claude.deb
-          cp -r scripts patches js packaging /tmp/build-input/
+          cp -r scripts patches js packaging baseline /tmp/build-input/
 
           # Pass the bridge binaries if available: kwin-portal-bridge for KDE
           # Wayland Computer Use, x11-bridge for X11 / XWayland Computer Use.
@@ -1149,7 +1182,7 @@ jobs:
 
           mkdir -p /tmp/build-input-arm /tmp/build-output-arm
           cp "$DEB" /tmp/build-input-arm/claude.deb
-          cp -r scripts patches js packaging /tmp/build-input-arm/
+          cp -r scripts patches js packaging baseline /tmp/build-input-arm/
 
           # Bundle the prebuilt arm64 bridges: kwin-portal-bridge (KDE Wayland)
           # and x11-bridge (X11 / XWayland).
@@ -1304,8 +1337,7 @@ jobs:
               bash -c "
                 set -e
                 export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y xvfb libgtk-3-0 libnss3 libasound2 libgbm1 libnotify4
+                sh /scripts/apt-install-retry.sh xvfb libgtk-3-0 libnss3 libasound2 libgbm1 libnotify4
 
                 cp /dist/Claude_Desktop-*-x86_64.AppImage /tmp/
                 chmod +x /tmp/Claude_Desktop-*-x86_64.AppImage
@@ -1396,13 +1428,39 @@ jobs:
                       "-rw-r--r-- root/root usr/share/polkit-1/actions/$P"; do
             grep -qxF -- "$want" <<<"$LIST" || { echo "::error::.deb lacks '$want'"; exit 1; }
           done
-          if grep -E ' (etc/udev|usr/lib/udev)/' <<<"$LIST"; then echo "::error::.deb ships udev files outside resources/"; exit 1; fi
+          if grep -E ' (etc/udev|usr/lib/udev|etc/modules-load.d)/' <<<"$LIST"; then echo "::error::.deb ships udev files outside resources/"; exit 1; fi
           dpkg-deb --fsys-tarfile "$DEB" | tar -xO "./usr/share/polkit-1/actions/$P" \
             | grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/$U/cdb-tpm-access</annotate>" \
             || { echo "::error::polkit exec.path is not /$U/cdb-tpm-access"; exit 1; }
           CTL=$(mktemp -d); dpkg-deb -e "$DEB" "$CTL"
           if grep -rlE 'tpm|linux-udev|polkit' "$CTL"; then echo "::error::a maintainer script references the TPM access files"; exit 1; fi
           echo "TPM access files OK in $(basename "$DEB")"
+
+
+      - name: Check KVM access files in the .deb (${{ matrix.arch }})
+        run: |
+          # Disabled rule + root helper + polkit action, root-owned with fixed
+          # modes; nothing under /etc/udev or /usr/lib/udev; no maintainer
+          # script references them.
+          set -euo pipefail
+          DEB=$(ls dist/claude-desktop-extra_*_${{ matrix.arch }}.deb)
+          U=usr/lib/claude-desktop/resources/linux-udev
+          P=io.github.patrickjaja.claude-desktop-extra.kvm-access.policy
+          LIST=$(dpkg-deb -c "$DEB" | awk '{print $1, $2, $NF}' | sed 's| \./| |')
+          for want in "-rw-r--r-- root/root $U/70-claude-desktop-extra-kvm.rules" \
+                      "-rw-r--r-- root/root $U/claude-desktop-extra-vsock.conf" \
+                      "-rwxr-xr-x root/root $U/cdb-kvm-access" \
+                      "-rw-r--r-- root/root $U/$P" \
+                      "-rw-r--r-- root/root usr/share/polkit-1/actions/$P"; do
+            grep -qxF -- "$want" <<<"$LIST" || { echo "::error::.deb lacks '$want'"; exit 1; }
+          done
+          if grep -E ' (etc/udev|usr/lib/udev|etc/modules-load.d)/' <<<"$LIST"; then echo "::error::.deb ships udev files outside resources/"; exit 1; fi
+          dpkg-deb --fsys-tarfile "$DEB" | tar -xO "./usr/share/polkit-1/actions/$P" \
+            | grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/$U/cdb-kvm-access</annotate>" \
+            || { echo "::error::polkit exec.path is not /$U/cdb-kvm-access"; exit 1; }
+          CTL=$(mktemp -d); dpkg-deb -e "$DEB" "$CTL"
+          if grep -rlE 'kvm-access|vsock|linux-udev|polkit' "$CTL"; then echo "::error::a maintainer script references the KVM access files"; exit 1; fi
+          echo "KVM access files OK in $(basename "$DEB")"
 
       - name: Test Debian Package (${{ matrix.arch }})
         run: |
@@ -1414,8 +1472,7 @@ jobs:
               bash -c "
                 set -e
                 export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y /dist/claude-desktop-extra_*_arm64.deb
+                sh /scripts/apt-install-retry.sh /dist/claude-desktop-extra_*_arm64.deb
                 test -f /usr/lib/claude-desktop/claude
                 test -f /usr/lib/claude-desktop/resources/app.asar
                 test -x /usr/bin/claude-desktop
@@ -1430,8 +1487,7 @@ jobs:
               bash -c "
                 set -e
                 export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y xvfb /dist/claude-desktop-extra_*_amd64.deb
+                sh /scripts/apt-install-retry.sh xvfb /dist/claude-desktop-extra_*_amd64.deb
                 bash /scripts/smoke-test.sh \
                   /usr/lib/claude-desktop/claude
               "
@@ -1444,8 +1500,7 @@ jobs:
               bash -c "
                 set -e
                 export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y xvfb /dist/claude-desktop-extra_*_amd64.deb
+                sh /scripts/apt-install-retry.sh xvfb /dist/claude-desktop-extra_*_amd64.deb
                 test -f /usr/lib/claude-desktop/claude
                 test -f /usr/lib/claude-desktop/resources/app.asar
                 test -x /usr/bin/claude-desktop
@@ -1463,8 +1518,7 @@ jobs:
               bash -c '
                 set -e
                 export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y weston /dist/claude-desktop-extra_*_amd64.deb
+                sh /scripts/apt-install-retry.sh weston /dist/claude-desktop-extra_*_amd64.deb
                 export XDG_RUNTIME_DIR=/tmp/xdg-smoke
                 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
                 weston --backend=headless --socket=wayland-1 --idle-time=0 >/tmp/weston.log 2>&1 &
@@ -1576,12 +1630,43 @@ jobs:
                           "-rw-r--r-- root/root usr/share/polkit-1/actions/$P"; do
                 grep -qxF -- "$want" <<<"$LIST" || { echo "::error::.rpm lacks $want"; exit 1; }
               done
-              if grep -E " (etc/udev|usr/lib/udev)/" <<<"$LIST"; then echo "::error::.rpm ships udev files outside resources/"; exit 1; fi
+              if grep -E " (etc/udev|usr/lib/udev|etc/modules-load.d)/" <<<"$LIST"; then echo "::error::.rpm ships udev files outside resources/"; exit 1; fi
               rpm2cpio "$RPM" | cpio -i --quiet --to-stdout "./usr/share/polkit-1/actions/$P" \
                 | grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/$U/cdb-tpm-access</annotate>" \
                 || { echo "::error::polkit exec.path is not /$U/cdb-tpm-access"; exit 1; }
               if rpm -qp --scripts "$RPM" | grep -E "tpm|linux-udev|polkit"; then echo "::error::an rpm scriptlet references the TPM access files"; exit 1; fi
               echo "TPM access files OK in $(basename "$RPM")"
+            '
+
+
+      - name: Check KVM access files in the .rpm (${{ matrix.arch }})
+        run: |
+          # Same assertions as the .deb: disabled rule + root helper + polkit
+          # action, root-owned with fixed modes, no udev path outside resources/,
+          # no scriptlet reference. rpm reads the package without installing it.
+          docker run --rm \
+            -v "$(pwd)/dist:/dist:ro" \
+            fedora:40 \
+            bash -c '
+              set -euo pipefail
+              dnf install -y -q cpio >/dev/null
+              RPM=$(ls /dist/claude-desktop-extra-*.${{ matrix.arch }}.rpm)
+              U=usr/lib/claude-desktop/resources/linux-udev
+              P=io.github.patrickjaja.claude-desktop-extra.kvm-access.policy
+              LIST=$(rpm -qlvp "$RPM" | awk "{print \$1, \$3\"/\"\$4, \$NF}" | sed "s| /| |")
+              for want in "-rw-r--r-- root/root $U/70-claude-desktop-extra-kvm.rules" \
+                          "-rw-r--r-- root/root $U/claude-desktop-extra-vsock.conf" \
+                          "-rwxr-xr-x root/root $U/cdb-kvm-access" \
+                          "-rw-r--r-- root/root $U/$P" \
+                          "-rw-r--r-- root/root usr/share/polkit-1/actions/$P"; do
+                grep -qxF -- "$want" <<<"$LIST" || { echo "::error::.rpm lacks $want"; exit 1; }
+              done
+              if grep -E " (etc/udev|usr/lib/udev|etc/modules-load.d)/" <<<"$LIST"; then echo "::error::.rpm ships udev files outside resources/"; exit 1; fi
+              rpm2cpio "$RPM" | cpio -i --quiet --to-stdout "./usr/share/polkit-1/actions/$P" \
+                | grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/$U/cdb-kvm-access</annotate>" \
+                || { echo "::error::polkit exec.path is not /$U/cdb-kvm-access"; exit 1; }
+              if rpm -qp --scripts "$RPM" | grep -E "kvm-access|vsock|linux-udev|polkit"; then echo "::error::an rpm scriptlet references the KVM access files"; exit 1; fi
+              echo "KVM access files OK in $(basename "$RPM")"
             '
 
       - name: Test RPM Package (${{ matrix.arch }})
@@ -1710,6 +1795,57 @@ jobs:
           RULE_OUT=$(nix build --no-link --print-out-paths "${RULES##* rule=}^out")
           cmp "$RULE_OUT/lib/udev/rules.d/70-claude-desktop-extra-tpm.rules" packaging/udev/70-claude-desktop-extra-tpm.rules
           echo "Nix TPM access files + NixOS module OK"
+          # backgroundDisplay: the user unit exists only when enabled, is scoped
+          # to its user and turns lingering on; off leaves users.users alone, and
+          # linger = false defines no users.users entry (an undeclared user then
+          # trips no assertion). drvs = the start script (it embeds the session
+          # script) for option sets that change the scripts' text, built below so
+          # writeShellApplication's shellcheck runs on each. claudePackage, the
+          # browser, sway and wayvnc are tiny stubs there: nothing big is fetched.
+          BGD=$(nix eval --impure --raw --expr '
+            let
+              f = builtins.getFlake (toString ./.);
+              p = f.inputs.nixpkgs.legacyPackages.x86_64-linux;
+              stub = p.writeShellScriptBin "stub" "exit 0";
+              cheap = {
+                claudePackage = p.runCommand "claude-stub" { } "mkdir -p $out/lib/claude-desktop/resources; touch $out/lib/claude-desktop/resources/chrome-native-host";
+                browser.package = stub; swayPackage = stub; vnc.package = stub;
+              };
+              sys = mods: (f.inputs.nixpkgs.lib.nixosSystem {
+                modules = [ f.nixosModules.default {
+                  nixpkgs.hostPlatform = "x86_64-linux";
+                  nixpkgs.config.allowUnfree = true;
+                  users.users.alice.isNormalUser = true;
+                  boot.loader.grub.enable = false;
+                  fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+                  system.stateVersion = "25.05";
+                } ] ++ map (m: { programs.claude-desktop-extra.backgroundDisplay = m; }) mods;
+              }).config;
+              on = sys [ { enable = true; user = "alice"; } ]; off = sys [ { enable = false; user = "alice"; } ];
+              nol = sys [ { enable = true; user = "alice"; linger = false; } cheap ];
+              und = sys [ { enable = true; user = "bob"; linger = false; } cheap ];
+              u = on.systemd.user.services.claude-extra-display;
+              bob = builtins.filter (a: !a.assertion && f.inputs.nixpkgs.lib.hasInfix "bob" a.message) und.assertions;
+              start = o: (sys [ { enable = true; user = "alice"; } cheap o ]).systemd.user.services.claude-extra-display.serviceConfig.ExecStart;
+              combos = [
+                { }
+                { browser.enable = false; keyring.enable = false; }
+                { browser.enable = false; vnc.enable = true; autostart = [ "true" ]; }
+                { keyring.enable = false; vnc = { enable = true; unixSocket = true; }; xwayland = true;
+                  browser = { startUrl = "https://claude.ai/"; extraArgs = [ "--a b" ]; nativeMessagingHosts."com.example host" = "/etc/my hosts/host.json"; }; }
+                { browser.claudeNativeHost = false; }
+              ];
+            in "on=${toString (on.systemd.user.services ? claude-extra-display)} off=${toString (off.systemd.user.services ? claude-extra-display)} user=${u.unitConfig.ConditionUser} linger=${toString on.users.users.alice.linger} offlinger=${toString off.users.users.alice.linger} nolinger=${toString nol.users.users.alice.linger} undeclared=${toString (builtins.length bob)} exec=${builtins.unsafeDiscardStringContext u.serviceConfig.ExecStart} drvs=${toString (map (o: builtins.head (builtins.attrNames (builtins.getContext (start o)))) combos)}"')
+          echo "NixOS module backgroundDisplay: $BGD"
+          case "$BGD" in "on=1 off= user=alice linger=1 offlinger= nolinger= undeclared=0 exec=/nix/store/"*"/bin/claude-extra-display drvs=/nix/store/"*.drv) ;; *) echo "::error::nixosModules.default backgroundDisplay option misbehaves: $BGD"; exit 1 ;; esac
+          # Each build runs shellcheck (writeShellApplication's checkPhase).
+          read -ra BGD_DRVS <<< "${BGD##* drvs=}"
+          nix build --no-link "${BGD_DRVS[@]/%/^out}" \
+            || { echo "::error::nixosModules.default backgroundDisplay: a generated script does not build (shellcheck?)"; exit 1; }
+          # The module's Claude in Chrome manifest embeds this path of the package.
+          test -x "$OUT/lib/claude-desktop/resources/chrome-native-host" \
+            || { echo "::error::Nix output lacks an executable lib/claude-desktop/resources/chrome-native-host (the backgroundDisplay manifest points there)"; exit 1; }
+          echo "NixOS module backgroundDisplay OK"
 
   # ================================================================
   # Job 3e: Generate PKGBUILD & .SRCINFO — PARALLEL
@@ -2072,12 +2208,37 @@ jobs:
                       "-rw-r--r-- root/root usr/share/polkit-1/actions/$P"; do
             grep -qxF -- "$want" <<<"$LIST" || { echo "::error::pacman package lacks '$want'"; exit 1; }
           done
-          if grep -E ' (etc/udev|usr/lib/udev)/' <<<"$LIST"; then echo "::error::pacman package ships udev files outside resources/"; exit 1; fi
+          if grep -E ' (etc/udev|usr/lib/udev|etc/modules-load.d)/' <<<"$LIST"; then echo "::error::pacman package ships udev files outside resources/"; exit 1; fi
           tar --zstd -xOf "$PKG" "usr/share/polkit-1/actions/$P" \
             | grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/$U/cdb-tpm-access</annotate>" \
             || { echo "::error::polkit exec.path is not /$U/cdb-tpm-access"; exit 1; }
           if tar --zstd -xOf "$PKG" .INSTALL | grep -E 'tpm|linux-udev|polkit'; then echo "::error::the .install hook references the TPM access files"; exit 1; fi
           echo "TPM access files OK in $(basename "$PKG")"
+
+
+      - name: Check KVM access files in the pacman package (${{ matrix.arch }})
+        run: |
+          # Same assertions as the .deb: disabled rule + root helper + polkit
+          # action, root-owned with fixed modes, no udev path outside resources/,
+          # and the .install hook does not reference them.
+          set -euo pipefail
+          PKG=$(ls dist/claude-desktop-extra-*-${{ matrix.arch }}.pkg.tar.zst)
+          U=usr/lib/claude-desktop/resources/linux-udev
+          P=io.github.patrickjaja.claude-desktop-extra.kvm-access.policy
+          LIST=$(tar --zstd -tvf "$PKG" | awk '{print $1, $2, $NF}')
+          for want in "-rw-r--r-- root/root $U/70-claude-desktop-extra-kvm.rules" \
+                      "-rw-r--r-- root/root $U/claude-desktop-extra-vsock.conf" \
+                      "-rwxr-xr-x root/root $U/cdb-kvm-access" \
+                      "-rw-r--r-- root/root $U/$P" \
+                      "-rw-r--r-- root/root usr/share/polkit-1/actions/$P"; do
+            grep -qxF -- "$want" <<<"$LIST" || { echo "::error::pacman package lacks '$want'"; exit 1; }
+          done
+          if grep -E ' (etc/udev|usr/lib/udev|etc/modules-load.d)/' <<<"$LIST"; then echo "::error::pacman package ships udev files outside resources/"; exit 1; fi
+          tar --zstd -xOf "$PKG" "usr/share/polkit-1/actions/$P" \
+            | grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/$U/cdb-kvm-access</annotate>" \
+            || { echo "::error::polkit exec.path is not /$U/cdb-kvm-access"; exit 1; }
+          if tar --zstd -xOf "$PKG" .INSTALL | grep -E 'kvm-access|vsock|linux-udev|polkit'; then echo "::error::the .install hook references the KVM access files"; exit 1; fi
+          echo "KVM access files OK in $(basename "$PKG")"
 
       - name: Upload Arch package (${{ matrix.arch }})
         uses: actions/upload-artifact@v7
@@ -2919,16 +3080,38 @@ jobs:
     needs: [deploy-rpm-repo]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Two attempts of up to 30 min each plus the pause between them.
+    timeout-minutes: 75
     permissions:
       pages: write
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # Whichever attempt ran last and succeeded; the retry step only has
+      # outputs when it actually ran.
+      url: ${{ steps.deployment_retry.outputs.page_url || steps.deployment.outputs.page_url }}
     steps:
+      # The Pages backend sometimes sits in "syncing_files" until the action's
+      # timeout, or cancels a deployment within seconds; a rerun later goes
+      # through. The first attempt may fail without failing the job, one
+      # automatic second attempt follows, and the job ends red if that fails too.
       - name: Deploy to GitHub Pages
         id: deployment
+        continue-on-error: true
         uses: actions/deploy-pages@v5
+        with:
+          timeout: 1800000
+      - name: Wait before retrying the Pages deployment
+        if: steps.deployment.outcome == 'failure'
+        run: |
+          echo "::warning::First Pages deployment attempt failed; retrying once in 90 s"
+          sleep 90
+      - name: Deploy to GitHub Pages (retry)
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        with:
+          timeout: 1800000
 
   # ================================================================
   # Job 6b: LEGACY MIRROR (retire with the rename transition window)

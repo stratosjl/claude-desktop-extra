@@ -4,15 +4,25 @@ var _cp=require("child_process"),_path=require("path"),_fs=require("fs"),_os=req
 // Run ydotool without a shell. Typed text and key names are model-supplied;
 // concatenating them into an execSync shell string would let $(...), backticks
 // etc. expand (JSON.stringify quoting is NOT shell quoting).
-function _ydotool(args){return _cp.execFileSync("ydotool",args,{encoding:"utf-8",timeout:15000})}
+function _ydotool(args){return _cp.execFileSync(_toolCmd("ydotool")||"ydotool",args,{encoding:"utf-8",timeout:15000})}
 // Launch a command detached without a shell, fire-and-forget (replaces the
 // old `setsid ... >/dev/null 2>&1` shell strings). stdio:"ignore" matches the
 // old /dev/null redirect — execFile would pipe+buffer instead and SIGTERM the
 // app once its lifetime output passed maxBuffer (setsid execs the app in
 // place, so the kill would hit the app itself). Spawn failures still surface
 // via the error event; unref() lets the child outlive us.
+// args[0] is a tool we pick (xdg-open for a URL or path), taken from the TOOL
+// PATH like setsid. Its env is the TOOL PATH too, never the APP PATH: xdg-open
+// runs xdg-mime, gio, kde-open, exo-open ... by bare name, and a URL is opened
+// with the PATH upstream's own shell.openExternal uses. Only when BOTH commands
+// are absolute does the spawn get an env of ours; a bare-name fallback (a tool
+// not found) inherits the narrowed env, exactly as before - a bare name next to
+// a wider PATH could pick a planted copy (see _envFor).
 function _launchDetached(args){
-  var c=_cp.spawn("setsid",args,{detached:true,stdio:"ignore"});
+  var a=args.slice(),o={detached:true,stdio:"ignore"},ss=_toolCmd("setsid"),x=_toolCmd(a[0]);
+  if(ss&&x&&ss.charAt(0)==="/"&&x.charAt(0)==="/"){a[0]=x;var te=_envFor("tool");if(te)o.env=te}
+  else ss="setsid";
+  var c=_cp.spawn(ss,a,o);
   c.on("error",function(err){globalThis.__cdbDiag("[claude-cu] detached launch failed ("+args.join(" ")+"): "+(err.message||err))});
   c.unref();
 }
@@ -32,7 +42,7 @@ function _gnomeBridgeBin(){return process.env.GNOME_PORTAL_BRIDGE_BIN||globalThi
 function _isWlrootsCovered(){return _tgt?_tgt.kind==="wlroots":_wayland&&_isWlroots()}
 function _isGnomeCovered(){return !_tgt&&_isGnomeWayland()}
 // ── Background display target (issue #300) ──
-// Settings -> Extra -> Computer Use -> "Computer Use on a background display" points
+// Settings -> Extra -> Cowork (Linux) -> "Computer Use on a background display" points
 // Computer Use at a second, invisible display (Xvfb/Xephyr -> x11-bridge,
 // headless/nested wlroots -> wlroots-bridge). globalThis.__cuTargetRead
 // (cu_mode_preamble.js) reads the setting; it is latched here at startup and on
@@ -44,7 +54,7 @@ function _isGnomeCovered(){return !_tgt&&_isGnomeWayland()}
 // ydotool, spectacle, desktopCapturer, GNOME portal session or host
 // clipboard - nothing ever falls back to the user's desktop.
 var _tgt=null;
-var _CU_TGT_OFF="turn off Settings -> Extra -> Computer Use -> Computer Use on a background display.";
+var _CU_TGT_OFF="turn off Settings -> Extra -> Cowork (Linux) -> Computer Use on a background display.";
 // Target clipboard. The Electron clipboard is the user's desktop clipboard and
 // is never touched in target mode; the target's own selection is read and
 // written with xclip (else xsel) on an x11 target, wl-copy / wl-paste on a
@@ -57,17 +67,19 @@ var CU_TGT_CLIP_MS=5000;
 var TGT_LAUNCH_MS=15000;
 function _tgtClip(write){
   if(_tgt.refuse)throw _tgtErr();
-  var x=_tgt.kind==="x11",t=x?(_execResolvable("xclip",null,true)?(write?["xclip",["-selection","clipboard","-in"]]:["xclip",["-selection","clipboard","-out"]]):_execResolvable("xsel",null,true)?(write?["xsel",["--clipboard","--input"]]:["xsel",["--clipboard","--output"]]):null)
-    :(_execResolvable(write?"wl-copy":"wl-paste",null,true)?(write?["wl-copy",[]]:["wl-paste",["--no-newline","--type","text"]]):null);
-  if(!t){var e=new Error("The clipboard tools need "+(x?"xclip or xsel":"wl-clipboard (wl-copy and wl-paste)")+" to use the clipboard of the background display "+_tgt.display+" - ask the user to install "+(x?"the xclip package":"the wl-clipboard package")+", or type the text instead.");e.__cdbSurface=!0;throw e}
+  // t = [command to spawn (absolute while upstream narrows PATH), args, tool name].
+  var x=_tgt.kind==="x11",c,t=null,wl=write?"wl-copy":"wl-paste";
+  if(x){if(c=_toolCmd("xclip",!0))t=[c,write?["-selection","clipboard","-in"]:["-selection","clipboard","-out"],"xclip"];else if(c=_toolCmd("xsel",!0))t=[c,write?["--clipboard","--input"]:["--clipboard","--output"],"xsel"]}
+  else if(c=_toolCmd(wl,!0))t=[c,write?[]:["--no-newline","--type","text"],wl];
+  if(!t){var e=new Error("The clipboard tools need "+(x?"xclip or xsel":"wl-clipboard (wl-copy and wl-paste)")+" to use the clipboard of the background display "+_tgt.display+" - ask the user to install "+(x?"the xclip package":"the wl-clipboard package")+", or type the text instead."+_toolIgnoredMsg(x?["xclip","xsel"]:[wl]));e.__cdbSurface=!0;throw e}
   return t;
 }
 function _tgtClipRead(){
   var t=_tgtClip(!1);
   return new Promise(function(resolve,reject){
-    _cp.execFile(t[0],t[1],{encoding:"utf-8",timeout:CU_TGT_CLIP_MS,maxBuffer:16*1024*1024,env:_tgt.env},function(err,out,se){
+    _cp.execFile(t[0],t[1],{encoding:"utf-8",timeout:CU_TGT_CLIP_MS,maxBuffer:16*1024*1024,env:_envFor("tool")},function(err,out,se){
       // An empty selection is not an error to the model.
-      if(err){if(/nothing is copied|no suitable type|no selection|not available|no clipboard/i.test(String(se||"")+String(err.message||"")))resolve("");else reject(new Error(t[0]+" failed: "+String(se||err.message||err).trim()));return}
+      if(err){if(/nothing is copied|no suitable type|no selection|not available|no clipboard/i.test(String(se||"")+String(err.message||"")))resolve("");else reject(new Error(t[2]+" failed: "+String(se||err.message||err).trim()));return}
       resolve(out||"");
     });
   });
@@ -78,7 +90,7 @@ function _tgtClipRead(){
 function _tgtClipWrite(text){
   var t=_tgtClip(!0);
   var p=_tgtClipSpawn(t,text);
-  if(t[0]!=="xsel")return p;
+  if(t[2]!=="xsel")return p;
   return p.then(function(){
     var n=0;
     function again(){return _tgtClipRead().then(function(v){if(v===String(text))return;if(++n>=XSEL_READBACK_TRIES)throw new Error("xsel did not take the clipboard of the background display within "+XSEL_READBACK_TRIES*100+" ms");return new Promise(function(r){setTimeout(r,100)}).then(again)})}
@@ -90,10 +102,10 @@ function _tgtClipSpawn(t,text){
   return new Promise(function(resolve,reject){
     var done=!1,c,tm;
     function fin(e){if(done)return;done=!0;clearTimeout(tm);if(e)reject(e);else resolve()}
-    try{c=_cp.spawn(t[0],t[1],{stdio:["pipe","ignore","ignore"],env:_tgt.env})}catch(se){fin(se);return}
-    tm=setTimeout(function(){try{c.kill("SIGKILL")}catch(ke){}fin(new Error(t[0]+" did not finish within "+CU_TGT_CLIP_MS/1000+" s"))},CU_TGT_CLIP_MS);
-    c.on("error",function(e){fin(new Error(t[0]+": "+(e.message||e)))});
-    c.on("exit",function(code){fin(code?new Error(t[0]+" exited with code "+code):null)});
+    try{c=_cp.spawn(t[0],t[1],{stdio:["pipe","ignore","ignore"],env:_envFor("tool")})}catch(se){fin(se);return}
+    tm=setTimeout(function(){try{c.kill("SIGKILL")}catch(ke){}fin(new Error(t[2]+" did not finish within "+CU_TGT_CLIP_MS/1000+" s"))},CU_TGT_CLIP_MS);
+    c.on("error",function(e){fin(new Error(t[2]+": "+(e.message||e)))});
+    c.on("exit",function(code){fin(code?new Error(t[2]+" exited with code "+code):null)});
     try{c.stdin.on("error",function(){});c.stdin.end(String(text))}catch(we){fin(we)}
   });
 }
@@ -102,7 +114,8 @@ function _tgtDownMsg(d){return"Computer Use is set to the background display "+(
 // toolkits pinned to the target's protocol - all unless the setting's env map
 // supplies the var. The map never carries PATH, CLAUDE_ELECTRON or LD_*
 // (validated by __cuTargetRead); the display var and XDG_SESSION_TYPE are
-// always the target's.
+// always the target's. PATH is set per spawn (_envFor): the APP PATH for the
+// app a launch starts, the TOOL PATH for the bridge and the clipboard tools.
 // x11 target: with WAYLAND_DISPLAY unset libwayland still connects to
 // $XDG_RUNTIME_DIR/wayland-0 - the user's desktop on most Wayland sessions -
 // and GTK3/GTK4 and Wayland-only apps opened there (measured: headless sway on
@@ -114,6 +127,159 @@ function _tgtDownMsg(d){return"Computer Use is set to the background display "+(
 // defence in depth. wlroots target: Electron < 38 defaults to X11 (and fails
 // with DISPLAY unset), so its hint is pinned to wayland; GTK/Qt follow
 // WAYLAND_DISPLAY already.
+// ── PATH: the app's vs. our own tools ──
+// Upstream (v4.23118) narrows process.env.PATH at startup to a fixed list of
+// system dirs (/usr/local/bin and /usr/local/sbin only when root-owned and
+// read-only, then /usr/bin:/bin:/usr/sbin:/sbin:/snap/bin:
+// /run/current-system/sw/bin:/run/current-system/profile/bin), stores it in
+// CLAUDE_DESKTOP_NARROWED_PATH and the PATH it was started with in
+// CLAUDE_DESKTOP_STARTED_PATH: a tool the app runs by itself must not come from
+// a folder the user - or anything running as the user - can write. Its remote
+// flag 1358805273 can put the started PATH back at run time, so everything
+// here reads the env per call, never at load. Two PATHs, by purpose:
+//   APP PATH (_startedPath / _lookupPath) - the app the model asked to open:
+//     its Exec argv[0], TryExec, the exe-identity index, and PATH in the env of
+//     that app and of the desktop launcher tool that resolves Exec= for us
+//     (gio, gtk-launch, ...). The started PATH, absolute entries only (a
+//     relative one would resolve against our cwd), narrowed dirs appended - what
+//     the desktop's own launcher uses, so a bare Exec= from a per-user profile
+//     (~/.local/bin, ~/.nix-profile/bin, /etc/profiles/per-user/<u>/bin)
+//     resolves again, on the desktop and on a background display alike.
+//   TOOL PATH (_toolCmd / _toolPath) - every helper WE choose to run (setsid,
+//     clipboard tools, gio, ydotool, ...): the narrowed dirs, then the started
+//     dirs that pass upstream's trust rule (_dirTrusted - which keeps the Nix
+//     store dirs of our NixOS wrapper). A helper is spawned by the absolute path
+//     found, so the PATH in the child's env never picks the binary.
+// Narrowing not in effect (an upstream without it, or the flag restored the
+// started PATH): process.env.PATH for both and tools by bare name, as before.
+//
+// The started PATH while upstream's narrowing is in effect, else null. Mirrors
+// upstream's own test: PATH still equal to the narrowed one.
+function _startedRaw(){
+  var s=process.env.CLAUDE_DESKTOP_STARTED_PATH,p=process.env.PATH;
+  return typeof s==="string"&&typeof p==="string"&&p===process.env.CLAUDE_DESKTOP_NARROWED_PATH&&s!==p?s:null;
+}
+function _absDirs(s){var out=[],seen={};String(s||"").split(":").forEach(function(d){if(d.charAt(0)==="/"&&!seen[d]){seen[d]=1;out.push(d)}});return out}
+// APP PATH; null when narrowing is not in effect.
+function _startedPath(){
+  var s=_startedRaw();if(s===null)return null;
+  var d=_absDirs(s+":"+process.env.PATH);return d.length?d.join(":"):null;
+}
+// The PATH an app lookup walks (the same PATH its spawn gets, so a lookup and
+// the spawn after it agree).
+function _lookupPath(){return _startedPath()||process.env.PATH||""}
+var _X_OK=(_fs.constants&&_fs.constants.X_OK)||1,_W_OK=(_fs.constants&&_fs.constants.W_OK)||2;
+function _xfile(c){try{_fs.accessSync(c,_X_OK);return!_fs.statSync(c).isDirectory()}catch(e){return!1}}
+// PATH walk with an X_OK check - the lookup execvp itself does. Relative
+// entries are skipped. Absolute path or null.
+function _walk(dirs,bin){for(var i=0;i<dirs.length;i++){if(dirs[i].charAt(0)!=="/")continue;var c=_path.join(dirs[i],bin);if(_xfile(c))return c}return null}
+// Upstream's trust rule for a dir (index.pre.js): lstat says directory, uid 0,
+// and a W_OK check fails with EACCES / EROFS. st: an lstat result in hand.
+function _trustRule(d,st){
+  try{st=st||_fs.lstatSync(d);if(!st.isDirectory()||st.uid!==0)return!1}catch(e){return!1}
+  try{_fs.accessSync(d,_W_OK);return!1}catch(e){return!!e&&(e.code==="EACCES"||e.code==="EROFS")}
+}
+// A started-PATH entry -> the real dir to take tools from, when the entry AS
+// WRITTEN is trustworthy all the way, else null. Walked component by component
+// from "/": every directory passed through must pass the rule, and every
+// symlink hop must be owned by root and sit in a directory that passed it - so
+// only root can change where the entry leads. /etc/profiles/per-user/<u>/bin
+// (root's link into /nix/store), /run/current-system/sw/bin and a Bazzite-style
+// /usr/local -> /var/usrlocal link pass; ~/.nix-profile/bin does not (the user
+// owns that link and the dir holding it, and repoints it with nix-env / nix
+// profile). Upstream judges only fixed system dirs (lstat, no symlinks); ours
+// can be anywhere, hence the whole chain, the real dir's ancestors included.
+function _chainReal(p){
+  if(!_trustRule("/"))return null;
+  var cur="/",q=p.split("/").filter(Boolean),hops=0;
+  while(q.length){
+    var n=q.shift();if(n===".")continue;
+    if(n===".."){cur=_path.dirname(cur);continue}
+    var nx=_path.join(cur,n),st;try{st=_fs.lstatSync(nx)}catch(e){return null}
+    if(st.isSymbolicLink()){
+      // cur, the dir holding the link, already passed the rule.
+      if(++hops>40||st.uid!==0)return null;
+      var t;try{t=String(_fs.readlinkSync(nx))}catch(e){return null}
+      if(t.charAt(0)==="/")cur="/";
+      q=t.split("/").filter(Boolean).concat(q);continue;
+    }
+    if(!_trustRule(nx,st))return null;
+    cur=nx;
+  }
+  return cur;
+}
+// Verdict cached per entry string: a trusted chain cannot change without root,
+// and an untrusted verdict can only be stale on the safe side. fresh (launch
+// pre-checks, the clipboard tools) walks the chain again, so a link repointed
+// since is seen. The tool lookups (_toolCmd) cache the real path found, not
+// the entry: a spawn never follows the entry's links again.
+var _dirTrust={};
+function _dirTrusted(d,fresh){
+  if(fresh||!Object.prototype.hasOwnProperty.call(_dirTrust,d))_dirTrust[d]=_chainReal(d);
+  return _dirTrust[d];
+}
+// TOOL PATH as a string (env PATH of the target's bridge / clipboard tools and
+// of URL opening): the narrowed dirs, then the trusted started dirs (real paths).
+function _toolPath(){
+  var s=_startedRaw(),P=process.env.PATH||"";if(s===null)return P;
+  var out=_absDirs(P);
+  _absDirs(s).forEach(function(d){if(out.indexOf(d)>=0)return;var r=_dirTrusted(d);if(r&&out.indexOf(r)<0)out.push(r)});
+  return out.join(":");
+}
+// A helper we run -> what to spawn: its absolute path while upstream narrows
+// PATH (narrowed dirs first, then trusted started dirs), its bare name when it
+// does not (as before), null when it is missing. A helper present only in a
+// started dir that fails the rule (~/.local/bin/wl-copy) is missing; that is
+// logged once per tool and named by _toolIgnoredMsg. Cached per (PATH, started
+// PATH, tool): a hit for good, a miss for MISS_TTL_MS only, so a tool
+// installed while the app runs is seen a few seconds later without a restart
+// (the old bare-name spawn saw it at once). fresh bypasses the cache (launch
+// pre-checks, the clipboard tools: seen at once).
+var MISS_TTL_MS=5000;
+var _toolCache={},_toolMissAt={},_toolIgn={},_toolSaid={};
+function _toolCmd(bin,fresh){
+  var s=_startedRaw(),P=process.env.PATH||"",ck=P+"\0"+(s===null?"":s)+"\0"+bin;
+  if(fresh)delete _toolCache[ck];
+  var c=_toolCache[ck];
+  if(c!==void 0&&(c!==null||Date.now()-_toolMissAt[ck]<MISS_TTL_MS))return c;
+  var r=null;
+  if(s===null)r=_walk(P.split(":"),bin)?bin:null;
+  else{
+    r=_walk(P.split(":"),bin);
+    var ign=null,sd=_absDirs(s);
+    for(var i=0;!r&&i<sd.length;i++){
+      if(!_xfile(_path.join(sd[i],bin)))continue;
+      var rd=_dirTrusted(sd[i],fresh);
+      if(rd&&_xfile(_path.join(rd,bin)))r=_path.join(rd,bin);else if(!ign)ign=sd[i];
+    }
+    if(r&&!_toolSaid[bin+"\0"+r]&&P.split(":").indexOf(_path.dirname(r))<0){_toolSaid[bin+"\0"+r]=1;globalThis.__cdbDiag("[claude-cu] tools: "+bin+" -> "+r+" (a root-owned read-only folder on the PATH Claude Desktop was started with)")}
+    if(r)delete _toolIgn[bin];
+    else if(ign){_toolIgn[bin]=ign;if(!_toolSaid[bin+"\0"+ign]){_toolSaid[bin+"\0"+ign]=1;globalThis.__cdbDiag("[claude-cu] tools: "+bin+" found only in "+ign+", a user-writable folder - ignored (Computer Use runs its own tools only from system folders)")}}
+  }
+  _toolCache[ck]=r;if(r===null)_toolMissAt[ck]=Date.now();return r;
+}
+// " (<tool> was found in <dir>, a user-writable folder, ...)" for the tools of
+// a "missing" message that were ignored, else "".
+function _toolIgnoredMsg(bins){
+  var o=[];bins.forEach(function(b){if(_toolIgn[b])o.push(b+" in "+_toolIgn[b])});
+  return o.length?" (found "+o.join(", ")+" - a user-writable folder, which Computer Use ignores for the tools it runs itself)":"";
+}
+// env option for a spawn: kind "app" -> APP PATH, "tool" -> TOOL PATH. Target
+// mode: the overlay; desktop: process.env. null = no env option (inherit):
+// desktop mode with no narrowing in effect, exactly as before. The overlay
+// itself is returned when its PATH is already the one wanted.
+// Invariant for every caller: a PATH wider than the narrowed one goes only to a
+// spawn whose own commands are absolute (_toolCmd while narrowing); the only
+// bare names resolved on the APP PATH are the app the user asked for (its Exec
+// argv[0]), $TERMINAL and COWORK_SCREENSHOT_CMD - commands the user named.
+function _envFor(kind){
+  var base=_tgt&&_tgt.env||null,s=_startedRaw(),P=s===null?process.env.PATH:kind==="app"?_startedPath():_toolPath();
+  if(!base&&s===null)return null;
+  if(base&&base.PATH===P)return base;
+  var e={},k,src=base||process.env;for(k in src)e[k]=src[k];
+  if(typeof P==="string")e.PATH=P;else delete e.PATH;
+  return e;
+}
 var _TGT_PIN={x11:{GDK_BACKEND:"x11",QT_QPA_PLATFORM:"xcb",SDL_VIDEODRIVER:"x11",ELECTRON_OZONE_PLATFORM_HINT:"x11",MOZ_ENABLE_WAYLAND:"0"},wlroots:{ELECTRON_OZONE_PLATFORM_HINT:"wayland"}};
 function _targetEnv(r){
   var e={},k,x=r.env||{},X=r.kind==="x11",own=X?"DISPLAY":"WAYLAND_DISPLAY",other=X?"WAYLAND_DISPLAY":"DISPLAY",pin=_TGT_PIN[r.kind];
@@ -131,7 +297,9 @@ function _targetEnv(r){
 // `env` key at all (inherit, exactly as before). With bin given, only the
 // target's own bridge gets it: ending a GNOME portal session left from a
 // desktop lock must still talk to the desktop.
-function _spo(o,bin){if(_tgt&&_tgt.env&&(bin===void 0||bin===_tgt.bin))o.env=_tgt.env;return o}
+// The bridges get the TOOL PATH: x11-bridge / wlroots-bridge can exec `ibus`
+// by name (zbus, for an ibus: bus address).
+function _spo(o,bin){if(_tgt&&_tgt.env&&(bin===void 0||bin===_tgt.bin))o.env=_envFor("tool");return o}
 function _tgtErr(){var e=new Error(_tgt.refuse);e.__cdbSurface=!0;return e}
 // The target's bridge: env override, else the preamble's verdict, else the
 // bundled copy (a switch turned on after startup was never probed there).
@@ -155,7 +323,7 @@ function _tgtLatch(why,keep){
   if(keep&&_tgtKey(r)===(prev?prev.key:""))return !1;
   if(_tgtKey(r)!==(prev?prev.key:""))_tgtGen++;
   _tgtResetShot(prev?prev.key:"",_tgtKey(r));
-  if(!r){_tgt=null;if(prev){_wlScreensInvalidate();_x11ScreensInvalidate();globalThis.__cdbDiag("[claude-cu] diagnostics: target=off - back on the desktop session ("+why+")")}return !!prev}
+  if(!r){_tgt=null;if(prev){_wlScreensInvalidate();_x11ScreensInvalidate();globalThis.__cdbDiag("[claude-cu] diagnostics: target=off - back on the desktop session ("+why+")");_cuAnnounceCheck("background display off");_cuCapChanged("background display off")}return !!prev}
   var t={kind:r.kind,display:r.display,bin:null,env:null,refuse:null,why:null,probe:null,key:_tgtKey(r)};
   if(r.invalid){t.why="invalid";t.refuse="Computer Use is set to a background display, but the setting is invalid: "+r.invalid+". Fix it, or "+_CU_TGT_OFF}
   else{
@@ -165,6 +333,8 @@ function _tgtLatch(why,keep){
   }
   _tgt=t;_wlScreensInvalidate();_x11ScreensInvalidate();
   globalThis.__cdbDiag("[claude-cu] diagnostics: target="+(r.invalid?"invalid ("+r.invalid+")":r.kind+" "+r.display+" via "+(t.bin||"(no bridge)")+(r.env&&Object.keys(r.env).length?" env+"+Object.keys(r.env).join(","):""))+" ("+why+")");
+  _cuAnnounceCheck("background display changed");
+  _cuCapChanged("background display changed");
   return !0;
 }
 // What follows a (re)latch: a GNOME portal session left from a desktop lock
@@ -236,14 +406,17 @@ function _tgtProbe(t){
   }).then(function(){if(t.probe===p)t.probe=null});
   return p;
 }
-try{var _virt=_cp.execFileSync("systemd-detect-virt",[],{encoding:"utf-8",timeout:3000,stdio:["ignore","pipe","ignore"]}).trim();globalThis.__isVM=_virt!=="none"&&_virt!==""}catch(e){globalThis.__isVM=!1}
+try{var _virt=_cp.execFileSync(_toolCmd("systemd-detect-virt")||"systemd-detect-virt",[],{encoding:"utf-8",timeout:3000,stdio:["ignore","pipe","ignore"]}).trim();globalThis.__isVM=_virt!=="none"&&_virt!==""}catch(e){globalThis.__isVM=!1}
 if(globalThis.__isVM)globalThis.__cdbDiag("[claude-cu] VM detected ("+_virt+") — teach overlay uses dark backdrop fallback");
+// Lookups are PATH walks (_walk), not `which`: it is not installed on every
+// system (minimal images), where every tool read as missing, and it cost one
+// blocking spawn per tool on the main process.
+// _hasCmd: a helper tool we run (TOOL PATH, see _toolCmd).
+function _hasCmd(bin){return!!_toolCmd(bin)}
+// An app's command on the APP PATH -> absolute path or null. Cached per
+// (APP PATH, name): the started PATH and ours can differ.
 var _cmdCache={};
-// PATH walk with an X_OK check - the lookup execvp itself does. `which` is not
-// installed on every system (minimal images), where every tool read as missing,
-// and it cost one blocking spawn per tool on the main process. Empty and
-// relative PATH entries are skipped: they would resolve against our cwd.
-function _hasCmd(bin){if(_cmdCache[bin]!==void 0)return _cmdCache[bin];var found=false,X=(_fs.constants&&_fs.constants.X_OK)||1,dirs=(process.env.PATH||"").split(":");for(var i=0;i<dirs.length&&!found;i++){if(dirs[i].charAt(0)!=="/")continue;var c=_path.join(dirs[i],bin);try{_fs.accessSync(c,X);found=!_fs.statSync(c).isDirectory()}catch(e){}}_cmdCache[bin]=found;return found}
+function _appWhich(b,fresh){var P=_lookupPath(),ck=P+"\0"+b;if(fresh)delete _cmdCache[ck];if(_cmdCache[ck]===void 0)_cmdCache[ck]=_walk(P.split(":"),b);return _cmdCache[ck]}
 // Application dirs per the XDG base-dir spec: $XDG_DATA_HOME (default
 // ~/.local/share) first, then each $XDG_DATA_DIRS entry (default
 // /usr/local/share:/usr/share - this is what carries NixOS profiles, snap and
@@ -384,10 +557,11 @@ function _entryBase(e){
   }
   return _WRAPPER_BINS[b]?e.dfn:b;
 }
-// fresh=true bypasses _hasCmd's permanent per-process cache (launch pre-checks:
-// an app or tool installed after the first attempt must launch without a restart).
+// An app's command (Exec argv[0], TryExec, $TERMINAL): a bare name on the APP
+// PATH. fresh=true bypasses the permanent per-process cache (launch pre-checks:
+// an app installed after the first attempt must launch without a restart).
 function _execResolvable(b,cwd,fresh){
-  if(b.indexOf("/")<0){if(fresh)delete _cmdCache[b];return _hasCmd(b)}
+  if(b.indexOf("/")<0)return!!_appWhich(b,fresh);
   var p=b.charAt(0)==="/"?b:_path.resolve(cwd||process.cwd(),b);
   try{_fs.accessSync(p,(_fs.constants&&_fs.constants.X_OK)||1);return!_fs.statSync(p).isDirectory()}catch(e){return false}
 }
@@ -450,7 +624,9 @@ function _readDesktopEntries(dirs){
 // resolves without a restart). Read-only and portal-free: safe outside the
 // Computer Use lock (enumeration side of the _gnomePortalCmds rule).
 var APP_IDX_TTL_MS=30000;
-var _appIdx=null,_appIdxAt=0;
+// _appIdxPath: the APP PATH it was built on (TryExec and the exe index resolve
+// there): a different one - narrowing put in place or lifted - rebuilds it.
+var _appIdx=null,_appIdxAt=0,_appIdxPath=null;
 var _GENERIC_EXE_RE=/^(?:electron\d*|python[\d.]*m?|pypy[\d.]*|java|node|nodejs|bun|deno|wine(?:64)?(?:-preloader)?|mono|perl[\d.]*|ruby[\d.]*|bwrap|apprun|flatpak-spawn|gjs|qemu-.*|ld-linux.*)$/i;
 function _genericExe(b){return !b||!!_WRAPPER_BINS[b]||_GENERIC_EXE_RE.test(b)}
 function _genericDir(d){
@@ -481,8 +657,9 @@ function _aclaim(map,k,r,rank){
 }
 // fresh=true rebuilds now (listInstalledApps: a TryExec installed mid-session counts at once).
 function _appIndex(fresh){
-  var now=Date.now();
-  if(!fresh&&_appIdx&&now-_appIdxAt<APP_IDX_TTL_MS)return _appIdx;
+  var now=Date.now(),lp=_lookupPath();
+  if(!fresh&&_appIdx&&now-_appIdxAt<APP_IDX_TTL_MS&&_appIdxPath===lp)return _appIdx;
+  _appIdxPath=lp;
   var ents=[];try{ents=_readDesktopEntries(_xdgAppDirs())}catch(e){}
   var keys=Object.create(null),byId=Object.create(null),list=[];
   for(var i=0;i<ents.length;i++){
@@ -536,9 +713,7 @@ function _alook(map,k){var c=k?map[k]:null;return c&&!c.amb?c.r:null}
 function _arec(idx,raw){var k=_akey(raw);return k?(idx.byId[k]||_alook(idx.keys,k)):null}
 function _aWhich(b){
   if(b.indexOf("/")>=0)return b.charAt(0)==="/"?b:null;
-  var X=(_fs.constants&&_fs.constants.X_OK)||1,dirs=(process.env.PATH||"").split(":");
-  for(var i=0;i<dirs.length;i++){if(dirs[i].charAt(0)!=="/")continue;var c=_path.join(dirs[i],b);try{_fs.accessSync(c,X);if(!_fs.statSync(c).isDirectory())return c}catch(e){}}
-  return null;
+  return _walk(_lookupPath().split(":"),b);
 }
 function _aReal(p){try{return _fs.realpathSync(p)}catch(e){return p}}
 // Lazy: built only when a window needs the process tier.
@@ -657,25 +832,38 @@ function _spawnWait(cmd,args,opts,mode){
 // activatable ones included), then the optional desktop launcher tools for
 // entries with no/malformed Exec, Terminal=true, or a binary that would not
 // spawn. Throws a clear error when every tier is unavailable or fails.
+// Once per command: an app that resolves on the APP PATH only (not on the
+// narrowed PATH upstream leaves in process.env), so claude-patches.log shows
+// which PATH a launch took.
+var _appPathSaid={};
+function _appPathNote(b){
+  if(b.indexOf("/")>=0||_startedRaw()===null||_appPathSaid[b]||_walk((process.env.PATH||"").split(":"),b))return;
+  _appPathSaid[b]=1;globalThis.__cdbDiag("[claude-cu] openApp: "+b+" -> "+_appWhich(b)+" (found on the PATH Claude Desktop was started with, not on the narrowed one)");
+}
 async function _launchEntry(e,label){
   var reasons=[],cwd=e.path||null,SO={detached:true,stdio:"ignore"};
   // Target mode: the direct Exec spawn only, in the target's environment. The
   // desktop launcher tools (gio, gtk-launch, kioclient, exo-open, terminals)
   // hand the launch to the user's desktop session and are never tried.
-  if(_tgt)SO.env=_tgt.env;
-  function _has(b){return _execResolvable(b,null,true)}
+  // AE: the app's env (APP PATH; the overlay in target mode), null = inherit.
+  // setsid and the launcher tools are ours: TOOL PATH, absolute (_toolCmd);
+  // setsid then finds the app on the APP PATH of AE.
+  var AE=_envFor("app");
+  if(AE)SO.env=AE;
+  function _has(b){return _toolCmd(b,true)}
   var cwdBad=false;
   if(cwd){
     try{cwdBad=!_fs.statSync(cwd).isDirectory()}catch(ce){cwdBad=true}
     if(cwdBad)cwd=null;else SO.cwd=cwd;
   }
   if(e.argv&&!e.terminal){
-    var cmd,args;
-    if(_has("setsid")){cmd="setsid";args=e.argv.slice()}else{cmd=e.argv[0];args=e.argv.slice(1)}
+    var cmd,args,ss=_has("setsid");
+    if(ss){cmd=ss;args=e.argv.slice()}else{cmd=e.argv[0];args=e.argv.slice(1)}
     globalThis.__cdbDiag("[claude-cu] openApp: launching argv "+JSON.stringify([cmd].concat(args))+(cwd?" cwd="+cwd:""));
     if(cwdBad)reasons.push("working directory "+e.path+" not usable");
     else if(!_execResolvable(e.argv[0],cwd,true))reasons.push(e.argv[0]+": command not found");
     else{
+      _appPathNote(e.argv[0]);
       var r=await _spawnWait(cmd,args,SO,"direct");
       if(r.ok)return{via:"direct",pid:r.pid};
       reasons.push(r.reason);
@@ -683,17 +871,18 @@ async function _launchEntry(e,label){
   }else reasons.push(e.terminal?"Terminal=true":e.malformed?"malformed Exec":"no Exec");
   if(_tgt)throw new Error("Could not launch "+label+" on the background display "+_tgt.display+": "+reasons.join("; ")+" (only a plain Exec line can start there; desktop launcher tools would open it on the user's desktop).");
   globalThis.__cdbDiag("[claude-cu] openApp: "+e.name+" ("+reasons[0]+") - trying desktop launcher tools");
-  var tiers=[];
-  if(_has("gio"))tiers.push(["gio",["launch",e.file],"tool"]);
-  if(_has("gtk-launch"))tiers.push(["gtk-launch",[e.dfn],"tool"]);
-  var kio=_has("kioclient6")?"kioclient6":_has("kioclient5")?"kioclient5":"";
+  var tiers=[],tc0;
+  if(tc0=_has("gio"))tiers.push([tc0,["launch",e.file],"tool"]);
+  if(tc0=_has("gtk-launch"))tiers.push([tc0,[e.dfn],"tool"]);
+  var kio=_has("kioclient6")||_has("kioclient5");
   if(kio)tiers.push([kio,["exec",e.file],"tool"]);
-  if(_has("exo-open"))tiers.push(["exo-open",[e.file],"tool"]);
+  if(tc0=_has("exo-open"))tiers.push([tc0,[e.file],"tool"]);
   if(e.terminal&&e.argv){
-    if(_has("xdg-terminal-exec"))tiers.push(["xdg-terminal-exec",e.argv.slice(),"term"]);
-    if(_has("x-terminal-emulator"))tiers.push(["x-terminal-emulator",["-e"].concat(e.argv),"term"]);
+    if(tc0=_has("xdg-terminal-exec"))tiers.push([tc0,e.argv.slice(),"term"]);
+    if(tc0=_has("x-terminal-emulator"))tiers.push([tc0,["-e"].concat(e.argv),"term"]);
     // $TERMINAL may carry arguments ("kitty --single-instance"): split on
-    // whitespace into argv (no shell, no quote handling).
+    // whitespace into argv (no shell, no quote handling). A command the user
+    // named: looked up on the APP PATH and spawned by name with AE.
     var tt=(process.env.TERMINAL||"").trim();
     if(tt){
       var tp=tt.split(/\s+/);
@@ -705,10 +894,16 @@ async function _launchEntry(e,label){
       }
     }
   }
-  if(!tiers.length)reasons.push("no desktop launcher tool found (gio, gtk-launch, kioclient, exo-open)");
+  if(!tiers.length)reasons.push("no desktop launcher tool found (gio, gtk-launch, kioclient, exo-open)"+_toolIgnoredMsg(["gio","gtk-launch","kioclient6","kioclient5","exo-open"]));
   for(var t=0;t<tiers.length;t++){
     var tc=tiers[t],to={detached:true,stdio:"ignore"};
     if(tc[2]==="term"&&cwd)to.cwd=cwd;
+    // The tool resolves the app's Exec= (or runs its argv) itself, exactly as
+    // the user's own launcher does: it needs the APP PATH. The tool itself is
+    // absolute (_toolCmd; tiers hold only tools that were found). URL opening
+    // (_launchDetached) differs: xdg-open picks helper tools by name, not an
+    // app the user asked for, so it keeps the TOOL PATH.
+    if(AE)to.env=AE;
     globalThis.__cdbDiag("[claude-cu] openApp: launching argv "+JSON.stringify([tc[0]].concat(tc[1])));
     var tr=await _spawnWait(tc[0],tc[1],to,tc[2]==="term"?"direct":"tool");
     if(tr.ok)return{via:tc[0]};
@@ -717,8 +912,13 @@ async function _launchEntry(e,label){
   throw new Error("Could not launch "+label+": "+reasons.join("; "));
 }
 function _desktopId(){return(process.env.XDG_CURRENT_DESKTOP||"").toLowerCase()}
-var _ydotoolOk=null;
-function _checkYdotool(){if(_tgt)return false;if(_ydotoolOk!==null)return _ydotoolOk;if(!_hasCmd("ydotool")){_ydotoolOk=false;return false}try{_cp.execFileSync("pgrep",["-x","ydotoold"],{timeout:2000,stdio:"pipe"});_ydotoolOk=true}catch(e){var sock=(process.env.YDOTOOL_SOCKET||"")||((process.env.XDG_RUNTIME_DIR||"/tmp")+"/.ydotool_socket");try{_fs.accessSync(sock);_ydotoolOk=true}catch(se){globalThis.__cdbDiag("[claude-cu] ydotool found but ydotoold not running — falling back to x11-bridge (XWayland)");_ydotoolOk=false}}return _ydotoolOk}
+// ydotool usable (installed, and ydotoold running or its socket present). Like
+// _toolCmd: true is kept for good, false for MISS_TTL_MS only, so installing
+// ydotool or starting ydotoold while the app runs is seen a few seconds later
+// without a restart. Re-checked only when a caller asks (at most one pgrep per
+// MISS_TTL_MS), never on a timer.
+var _ydotoolOk=null,_ydotoolNoAt=0,_ydotoolSaid=!1;
+function _checkYdotool(){if(_tgt)return false;if(_ydotoolOk===true||_ydotoolOk===false&&Date.now()-_ydotoolNoAt<MISS_TTL_MS)return _ydotoolOk;_ydotoolOk=false;if(_hasCmd("ydotool")){try{_cp.execFileSync(_toolCmd("pgrep")||"pgrep",["-x","ydotoold"],{timeout:2000,stdio:"pipe"});_ydotoolOk=true}catch(e){var sock=(process.env.YDOTOOL_SOCKET||"")||((process.env.XDG_RUNTIME_DIR||"/tmp")+"/.ydotool_socket");try{_fs.accessSync(sock);_ydotoolOk=true}catch(se){if(!_ydotoolSaid){_ydotoolSaid=!0;globalThis.__cdbDiag("[claude-cu] ydotool found but ydotoold not running - falling back to x11-bridge (XWayland)")}}}}_ydotoolNoAt=Date.now();return _ydotoolOk}
 // ── x11-bridge: first-party X11/XWayland backend (replaces xdotool/scrot/import/wmctrl) ──
 // The binary is resolved in cu_mode_preamble.js into globalThis.__cuX11BridgeBin.
 function _x11BridgeBin(){if(_tgt)return _tgt.kind==="x11"?_tgt.bin:null;return process.env.X11_BRIDGE_BIN||globalThis.__cuX11BridgeBin}
@@ -982,7 +1182,35 @@ function _gnomeLatchStopped(why){
   _gnomeStoppedByUser=!0;_gnomeSessionActive=!1;_gnomeDaemonMayExist=!0;_gnomeMouseHeld=!1;_wlScreensInvalidate();
   globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: screen sharing was stopped ("+why+"); no new session until the task ends or "+Math.round(CU_PORTAL_IDLE_MS/1000)+" s pass without Computer Use actions");
   _gnomeIdleArm();_gnomeCheckArm();
+  _gnomeShareEnded(why);
 }
+// STOP SHARING = ABORT THE TURN (maintainer ruling 2026-11-10). The latch alone
+// only refused the NEXT action; the turn kept going until the model tried one.
+// Upstream's own "user stopped sharing" abort (globalThis.__cdbCuShareEnded,
+// sub-patch 17c; it stops the lock holder and every app-mode holder, as its
+// Escape does) runs once per lock hold and once per task within a hold (cloud
+// Cowork holds one lock across tasks): the watch below and a command's exit 5
+// both end up here.
+var _gnomeShareFireArmed=!0;
+function _gnomeShareEnded(why){
+  if(!_gnomeShareFireArmed)return;
+  _gnomeShareFireArmed=!1;
+  var s=globalThis.__cdbCuShareStop;
+  if(s&&typeof s.fire==="function")s.fire("gnome-portal-bridge",why);
+}
+// The daemon writes the stopped-by-user marker and exits; it is a setsid'd
+// grandchild (session-start returns once it is ready), so there is no exit
+// event of ours to wait for: watch its runtime dir (js/cu_share_stop.js) from
+// the moment a session is up until it ends.
+var _gnomeShareWatch=null;
+function _gnomeShareWatchArm(){
+  if(_gnomeShareWatch)return;
+  var s=globalThis.__cdbCuShareStop;if(!s||typeof s.watch!=="function")return;
+  _gnomeShareWatch=s.watch("gnome-portal-bridge",function(){
+    if(_gnomeSessionActive&&!_gnomeSessionEnding&&!_gnomeStoppedByUser&&_gnomeStoppedMarker())_gnomeMarkStopped("stopped-by-user marker appeared");
+  });
+}
+function _gnomeShareWatchClose(){if(_gnomeShareWatch){_gnomeShareWatch.close();_gnomeShareWatch=null}}
 // A portal COMMAND answered exit 5: latch and return the error for the model.
 // Not while a start or an end is in flight: those own the flags (a marker left
 // from before this lock's session-start is that start's to remove), so the
@@ -1189,9 +1417,9 @@ function _gnomeEnsureSessionSync(){
   var bin=_gnomeBridgeBin();if(!bin)return !1;
   if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive||_gnomeDaemonMayExist){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
   _gnomeDaemonMayExist=!0;
-  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
+  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
   catch(e){
-    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
     // Closed before it became ready: a stop, not a fault - latch, no cooldown, no retry.
     if(e&&e.__cdbStoppedByUser){_gnomeLatchStopped("sync backstop session-start exit 5");return !1}
     // No restore token (the user left "Remember this selection" unticked, or
@@ -1377,9 +1605,9 @@ function _gnomeAlreadyActive(e){return /already active/i.test(String(e&&(e.messa
 async function _gnomeSessionStart(){
   var bin=_gnomeBridgeBin();if(!bin)return;
   _gnomeDaemonMayExist=!0;
-  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
+  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
   catch(e){
-    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
     // The new daemon was closed before it became ready (the user stopped
     // sharing, or the desktop ended the session): latch for this lock instead
     // of the cooldown, so nothing starts it again until the lock ends.
@@ -1413,7 +1641,7 @@ async function _gnomeSessionEnd(why){
   // Every end cancels the idle timer and drops a held button (the daemon that
   // pressed it goes away); the next session arms the timer afresh.
   _gnomeIdleCancel();_gnomeMouseHeld=!1;_gnomeHeldDeferred=!1;
-  _gnomeCheckStop(why||"lock released");
+  _gnomeCheckStop(why||"lock released");_gnomeShareWatchClose();
   if(_gnomeSessionEnding)return _gnomeSessionEnding;
   var bin=_gnomeBridgeBin();
   // Snapshot BEFORE clearing: the skip below has to ask whether a session was up
@@ -1625,8 +1853,9 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
     // Intentionally shell-evaluated: this is a user-supplied command template
     // from the user's own environment (pipes/redirects are part of the
     // contract). Only {FILE}/{X}/{Y}/{W}/{H} are substituted, all local values.
+    // A command the user named: it runs with the APP PATH.
     try{var cmd=process.env.COWORK_SCREENSHOT_CMD.replace(/\{FILE\}/g,tmp).replace(/\{X\}/g,x).replace(/\{Y\}/g,y).replace(/\{W\}/g,w).replace(/\{H\}/g,h);
-    _cp.execSync(cmd,_spo({timeout:15000}));globalThis.__cdbDiag("[claude-cu] screenshot: captured via COWORK_SCREENSHOT_CMD");return _nativePng(_readClean(tmp))}catch(e){globalThis.__cdbDiag("[claude-cu] COWORK_SCREENSHOT_CMD failed: "+e.message)}
+    var _co={timeout:15000},_ce=_envFor("app");if(_ce)_co.env=_ce;_cp.execSync(cmd,_co);globalThis.__cdbDiag("[claude-cu] screenshot: captured via COWORK_SCREENSHOT_CMD");return _nativePng(_readClean(tmp))}catch(e){globalThis.__cdbDiag("[claude-cu] COWORK_SCREENSHOT_CMD failed: "+e.message)}
   }
   // Covered Wayland sessions (wlroots / GNOME): the bundled bridge is the SOLE
   // screenshot backend (no third-party fallback, per design). Like x11-bridge,
@@ -1668,8 +1897,8 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
   }
   if(!_tgt&&_de.indexOf("kde")>=0&&_hasCmd("spectacle")){
     try{var stmp=_path.join(_os.tmpdir(),"claude-cu-spectacle-"+Date.now()+".png");
-    _cp.execFileSync("spectacle",["-b","-n","-f","-o",stmp],{timeout:10000});
-    if(_fs.existsSync(stmp)){try{_cp.execFileSync("convert",[stmp,"-crop",w+"x"+h+"+"+x+"+"+y,"+repage",tmp],{timeout:5000});try{_fs.unlinkSync(stmp)}catch(e){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle+convert (KDE)");return _nativePng(_readClean(tmp))}catch(ce){try{_fs.renameSync(stmp,tmp)}catch(re){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle (KDE, uncropped)");return _nativePng(_readClean(tmp))}}
+    _cp.execFileSync(_toolCmd("spectacle")||"spectacle",["-b","-n","-f","-o",stmp],{timeout:10000});
+    if(_fs.existsSync(stmp)){try{_cp.execFileSync(_toolCmd("convert")||"convert",[stmp,"-crop",w+"x"+h+"+"+x+"+"+y,"+repage",tmp],{timeout:5000});try{_fs.unlinkSync(stmp)}catch(e){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle+convert (KDE)");return _nativePng(_readClean(tmp))}catch(ce){try{_fs.renameSync(stmp,tmp)}catch(re){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle (KDE, uncropped)");return _nativePng(_readClean(tmp))}}
     }catch(e){globalThis.__cdbDiag("[claude-cu] spectacle failed: "+e.message)}
   }
   // X11 (and XWayland fallback): single first-party tier — x11-bridge zoom.
@@ -1738,7 +1967,7 @@ if(_wayland){globalThis.__cdbDiag("[claude-cu] Wayland session detected"+(_isWlr
   globalThis.__cdbDiag("[claude-cu] diagnostics: XDG_CURRENT_DESKTOP="+(process.env.XDG_CURRENT_DESKTOP||"(unset)")+" XDG_SESSION_DESKTOP="+(process.env.XDG_SESSION_DESKTOP||"(unset)")+" XDG_SESSION_TYPE="+(process.env.XDG_SESSION_TYPE||"(unset)")+" kwin-mode="+!!globalThis.__cuKwinMode);
   try{var _diagMons=_getMonitors();globalThis.__cdbDiag("[claude-cu] diagnostics: displays=["+_diagMons.map(function(m){return m.label+"("+m.width+"x"+m.height+"+"+m.originX+"+"+m.originY+" sf="+m.scaleFactor+(m.isPrimary?" primary":"")+")"}).join(", ")+"]")}catch(me){}
   globalThis.__cdbDiag("[claude-cu] diagnostics: available=["+avail.join(", ")+"]");
-  if(missing.length)globalThis.__cdbDiag("[claude-cu] diagnostics: missing=["+missing.join(", ")+"] (install for the residual fallback paths)");
+  if(missing.length)globalThis.__cdbDiag("[claude-cu] diagnostics: missing=["+missing.join(", ")+"]"+_toolIgnoredMsg(missing)+" (install for the residual fallback paths)");
   globalThis.__cdbDiag("[claude-cu] diagnostics: x11-bridge="+_bridgeState("x11-bridge",_x11BridgeBin()));
   globalThis.__cdbDiag("[claude-cu] diagnostics: wlroots-bridge="+_bridgeState("wlroots-bridge",_wlrootsBridgeBin()));
   globalThis.__cdbDiag("[claude-cu] diagnostics: gnome-portal-bridge="+_bridgeState("gnome-portal-bridge",_gnomeBridgeBin()));
@@ -1776,6 +2005,12 @@ function _tgtMonitors(){
 }
 // Async entry points call this first, so the sync _getMonitors has the
 // target's list even when upstream calls in before our handler's gate.
+// A Computer Use ACTION (capture, input, opening an app; not enumeration,
+// icons or capability probes, which upstream also runs between turns): the
+// Escape watcher (community switch, js/cu_esc_watch.js) re-arms a watcher it
+// parked at a cloud turn end. Sync and cheap (a flag check); absent or off =
+// nothing.
+function _escAct(){try{globalThis.__cdbCuEscWatch?.toolCall?.()}catch(ee){}}
 async function _tgtPrime(){var g=_tgtGen;await _tgtSync("tool call");if(_tgtGen!==g)throw _tgtChangedErr();if(!_tgt||_tgt.mons||!_tgt.bin||_tgt.refuse)return;var c=_tgt.kind==="x11"?_x11ScreensCache:_wlScreensCache;if(!(Array.isArray(c)&&c.length))await _tgtProbe(_tgt)}
 function _getMonitors(){
   if(_tgt)return _tgtMonitors();
@@ -1898,6 +2133,30 @@ function _x11PxRect(x,y,w,h,displayIdx){
 }
 var _inputLogDone={mouse:false,click:false,key:false,type:false,scroll:false,drag:false,window:false,app:false};
 function _logFirstUse(op,backend){if(!_inputLogDone[op]){_inputLogDone[op]=true;globalThis.__cdbDiag("[claude-cu] "+op+": using "+backend)}}
+// A model-injected Escape must not trip the user's Escape watcher (js/
+// cu_esc_watch.js, community switch "Escape stops Computer Use"): every input
+// that can carry one runs inside its suspendAround, which only talks to an
+// armed watcher that is not syntheticSafe (KDE kglobalaccel) and else just runs
+// it. Other input is never wrapped; without the community patch, or with its
+// switch off, fn just runs.
+function _escAround(esc,fn,ms){var w=globalThis.__cdbCuEscWatch;return esc&&typeof w?.suspendAround==="function"?w.suspendAround(fn,ms):fn()}
+function _escKeys(v){var w=globalThis.__cdbCuEscWatch;return typeof w?.hasEscape==="function"&&w.hasEscape(v)===!0}
+// Upstream's own executor marks each key / holdKey whose keys are exactly one
+// Escape as expected (sub-patch 17e: globalThis.__cdbCuExpectEscape, a 100 ms
+// counter its X11 Escape grab reads), so the grab absorbs the model's Escape
+// instead of stopping the turn. Same rule here, called right before the
+// injection: one mark per press (a repeated key marks each repetition).
+function _escExpect(keys,n){
+  try{
+    var f=globalThis.__cdbCuExpectEscape;if(typeof f!=="function")return;
+    var t=(Array.isArray(keys)?keys:String(keys==null?"":keys).split("+")).filter(function(k){return String(k).length>0});
+    if(t.length!==1)return;
+    var k=String(t[0]).trim().toLowerCase();
+    if(k!=="escape"&&k!=="esc")return;
+    for(var i=0,m=Math.max(1,n|0);i<m;i++)f();
+  }catch(e){}
+}
+function _escText(t){return typeof t==="string"&&t.indexOf("\x1b")>=0}
 // True when a covered Wayland session (wlroots/GNOME) has a resolved bridge —
 // input/screenshot/windows all route through it and the ydotool path is skipped.
 function _useWlBridge(){return(_tgt||_wayland)&&!!_wlBridge()}
@@ -2087,6 +2346,12 @@ async function _dtResolve(bundleIds){
 // GNOME, ydotool, XWayland-only, COWORK_SCREENSHOT_CMD and the desktopCapturer
 // fallback have no masking bridge at all (_bcBridge null).
 var CU_BRIDGE_CAPS_TTL_MS=60000,CU_BRIDGE_DOCTOR_MS=8000;
+// A failed doctor is asked again on the next capture (_bcProbe), but the sync
+// capability reads (_bcNow: capabilitiesNow, the capabilities getter, which
+// upstream's supported-features build reads on every call) wait this long
+// before they start another one, so a doctor that keeps failing cannot be
+// spawned per read.
+var CU_BRIDGE_CAPS_FAIL_TTL_MS=30000;
 var _bcCache={};
 // windows=true: the bridge whose window list is used (COWORK_SCREENSHOT_CMD
 // only replaces the capture).
@@ -2121,9 +2386,12 @@ function _bcProbe(be){
     if(_bcCache[k]!==ent)return res;
     ent.p=null;
     // A failed doctor is asked again on the next capture, not kept a minute.
-    if(res.error){ent.res=null;ent.at=0}else{ent.res=res;ent.at=Date.now()}
+    if(res.error){ent.res=null;ent.at=0;ent.failAt=Date.now()}else{ent.res=res;ent.at=Date.now();ent.failAt=0}
     var line="[claude-cu] "+be.name+" capabilities: "+(res.error?res.error:"screenshot mask "+(res.mask?"yes"+(res.gaps.length?" (not covered: "+res.gaps.join(", ")+")":""):"no"+(res.why?" ("+res.why+")":""))+", window geometry "+(res.geometry?"yes":"no"));
     if(ent.line!==line){ent.line=line;globalThis.__cdbDiag(line)}
+    // The per-app access answer upstream's UI shows may follow the mask
+    // (js/cu_consent.js capChanged re-signals the renderer when it changed).
+    _cuCapChanged(be.name+" doctor answered");
     return res;
   });
   return ent.p;
@@ -2133,10 +2401,27 @@ function _bcProbe(be){
 function _bcNow(be){
   if(!be)return null;
   var c=_bcCache[_bcKey(be)];
-  if(!c||!c.res||Date.now()-c.at>=CU_BRIDGE_CAPS_TTL_MS){try{_bcProbe(be).catch(function(){})}catch(e){}}
+  var recentFail=!!(c&&!c.res&&c.failAt&&Date.now()-c.failAt<CU_BRIDGE_CAPS_FAIL_TTL_MS);
+  if(!recentFail&&(!c||!c.res||Date.now()-c.at>=CU_BRIDGE_CAPS_TTL_MS)){try{_bcProbe(be).catch(function(){})}catch(e){}}
   return c&&c.res||null;
 }
 function _bcWarm(){try{_bcNow(_bcBridge(!0))}catch(e){}}
+// Remote device (cloud Cowork / Dispatch): js/cu_mode_preamble.js decides once
+// at start whether a first-party bridge is usable on this Wayland session
+// (globalThis.__cdbCuWaylandAnnounce, which sub-patch 4g's
+// isBridgeComputerUsePlatform follows). A background display turned off or
+// broken at run time can leave only paths the preamble reserves for Code
+// sessions (XWayland x11-bridge, ydotool, spectacle), so the latch only ever
+// moves to false here (exec-free: env, globals and the latched target), with
+// one log line; a display turned on later stays refused until a restart.
+function _cuAnnounceCheck(why){
+  if(globalThis.__cdbCuWaylandAnnounce!==!0)return;
+  var ok=_tgt?!_tgt.refuse&&!!_tgt.bin:!!(_wayland&&_useWlBridge());
+  if(ok)return;
+  globalThis.__cdbCuWaylandAnnounce=!1;
+  globalThis.__cdbDiag("[claude-cu] remote device: computer tools withdrawn on Wayland ("+why+"): no first-party bridge usable now - cloud Cowork and Dispatch are refused until a restart");
+}
+function _cuCapChanged(why){try{var cc=globalThis.__cdbCuConsent;if(cc&&typeof cc.capChanged==="function")cc.capChanged(why)}catch(e){}}
 function _bcForget(be){if(be)delete _bcCache[_bcKey(be)]}
 function _filteringNow(){var r=_bcNow(_bcBridge());return r&&r.mask?"mask":"none"}
 // ── Allowlist mask (screenshot / zoom / resolvePrepareCapture) ──
@@ -2302,6 +2587,7 @@ var _ex=globalThis.__linuxExecutor={
     // (4b passes upstream's exclusiveHolder; 4b.2 releases without one).
     _gnomeHolder=held&&typeof holder==="string"?holder:null;
     globalThis.__cdbDiag?.("[claude-cu] "+(held?"lock taken by "+(_gnomeHolder||"none"):"lock released"));
+    if(held)_gnomeShareFireArmed=!0;
     if(!held)_gnomeCheckStop("lock released");
     // The ask-before-control notes ("screenshots are not filtered") are once
     // per session and lock (js/cu_consent.js).
@@ -2340,12 +2626,15 @@ var _ex=globalThis.__linuxExecutor={
   // Then it does what the idle expiry does: end the portal session and lift a
   // stop-sharing latch. Nothing up: silent, it fires on every turn end.
   async __cuTaskBoundary(id,source,holder){
+    // The turn ended: an Escape watcher (community switch) parks until the next action.
+    try{globalThis.__cdbCuEscWatch?.taskEnded?.(id,source,holder)}catch(ee){}
     globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): received id="+id+" holder="+holder+" active="+_gnomeSessionActive+" starting="+_gnomeSessionStarting+" daemonMayExist="+_gnomeDaemonMayExist+" stoppedByUser="+_gnomeStoppedByUser+" gnomeCovered="+_isGnomeCovered());
     if(!_isGnomeCovered()||!_gnomeBridgeBin())return;
     if(!_gnomeSessionActive&&!_gnomeSessionStarting&&!_gnomeDaemonMayExist&&!_gnomeStoppedByUser)return;
     function key(v){return String(v).toLowerCase().replace(/^(?:session_|cse_)/,"")}
     if(id!=null&&holder!=null&&key(id)!==key(holder)){globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): ignored, it names another session than the Computer Use lock holder");return}
     globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): ending the portal session");
+    _gnomeShareFireArmed=!0;
     _gnomeCheckStop("task boundary");
     await _gnomeSessionEnd("task boundary");
   },
@@ -2422,6 +2711,7 @@ var _ex=globalThis.__linuxExecutor={
   // unmasked; an array = mask mode (see "Allowlist mask"), which throws
   // rather than capture unmasked.
   async screenshot(opts){
+    _escAct();
     await _tgtPrime();
     var mon=_findMon(opts&&opts.displayId);
     var al=opts?opts.allowedBundleIds:void 0,mk=await _maskFor(al);
@@ -2446,6 +2736,7 @@ var _ex=globalThis.__linuxExecutor={
     }
   },
   async __resolvePrepareCapture(opts){
+    _escAct();
     await _tgtPrime();
     var did=opts&&opts.preferredDisplayId;
     if(did==null){var sdid=await _gnomeSharedDefaultDisplayId();if(sdid!=null)did=sdid}
@@ -2479,6 +2770,7 @@ var _ex=globalThis.__linuxExecutor={
   // (rect, 1, displayId) call) = unmasked, global coordinates, as before.
   // scale is not used: every tier downscales by the bridges' rule.
   async zoom(rect,allowedBundleIds,displayId,scale,opts){
+    _escAct();
     await _tgtPrime();
     var legacy=allowedBundleIds!==void 0&&!Array.isArray(allowedBundleIds);
     var mon=displayId!=null?_findMon(displayId):_findMonByPoint(rect.x,rect.y);
@@ -2635,6 +2927,7 @@ var _ex=globalThis.__linuxExecutor={
   appAliases(bundleId){return _aAliases(bundleId)},
   async getAppIcon(appPath){return null},
   async openApp(name){
+    _escAct();
     await _tgtPrime();
     var _appDirs=_xdgAppDirs();
     // Parse all .desktop entries once (shared parser: [Desktop Entry] group,
@@ -2835,11 +3128,13 @@ var _ex=globalThis.__linuxExecutor={
     // emits the original "Opened app" text byte-for-byte.
     return{action:"opened",app:name};
   },
-  async moveMouse(x,y){await _tgtPrime();_moveMouse(x,y)},
+  async moveMouse(x,y){_escAct();await _tgtPrime();_moveMouse(x,y)},
   async click(x,y,button,count,holdKeys){
+    _escAct();
     await _tgtPrime();
     _moveMouse(x,y);
     var rep=count||1;
+    return _escAround(_escKeys(holdKeys),function(){
     if(_useWlBridge()){
       _logFirstUse("click",_wlBridge().name);
       var _wbtn={left:"left",right:"right",middle:"middle"}[button]||"left";
@@ -2866,14 +3161,17 @@ var _ex=globalThis.__linuxExecutor={
       if(holdKeys&&holdKeys.length>0){for(var i=0;i<holdKeys.length;i++){_cargs.push("--modifier",holdKeys[i])}}
       _x11Bridge(_cargs);
     }
+    });
   },
   async mouseDown(){
+    _escAct();
     await _tgtPrime();
     if(_useWlBridge()){_logFirstUse("drag",_wlBridge().name);_wlBridgeCall(["left-mouse-down"])}
     else if(_wayland&&_checkYdotool()){_logFirstUse("drag","ydotool");_ydotool(["click","0x40"])}
     else{_logFirstUse("drag","x11-bridge");_x11Bridge(["left-mouse-down"])}
   },
   async mouseUp(){
+    _escAct();
     await _tgtPrime();
     if(_useWlBridge()){_wlBridgeCall(["left-mouse-up"])}
     else if(_wayland&&_checkYdotool()){_ydotool(["click","0x80"])}
@@ -2890,6 +3188,7 @@ var _ex=globalThis.__linuxExecutor={
     return{x:p.x,y:p.y};
   },
   async drag(start,end){
+    _escAct();
     await _tgtPrime();
     if(_useWlBridge()){
       _logFirstUse("drag",_wlBridge().name);
@@ -2914,6 +3213,7 @@ var _ex=globalThis.__linuxExecutor={
     }
   },
   async scroll(x,y,horizontal,vertical){
+    _escAct();
     await _tgtPrime();
     _moveMouse(x,y);
     if(_useWlBridge()){
@@ -2933,8 +3233,11 @@ var _ex=globalThis.__linuxExecutor={
     }
   },
   async key(combo,count){
+    _escAct();
     await _tgtPrime();
     var n=count||1;
+    return _escAround(_escKeys(combo),function(){
+    _escExpect(combo,n);
     if(_useWlBridge()){
       // Both Wayland bridges parse the CU key-spec grammar themselves — pass through.
       _logFirstUse("key",_wlBridge().name);
@@ -2959,10 +3262,14 @@ var _ex=globalThis.__linuxExecutor={
       if(n>1){_kargs.push("--repeat",String(n))}
       _x11Bridge(_kargs);
     }
+    });
   },
   async holdKey(keyName,seconds){
+    _escAct();
     await _tgtPrime();
     var secs=Math.min(seconds||0.5,10);
+    return _escAround(_escKeys(keyName),function(){
+    _escExpect([keyName],1);
     if(_useWlBridge()){
       _logFirstUse("key",_wlBridge().name);
       _wlBridgeCall(["hold-key","--key",keyName,"--duration-ms",String(Math.round(secs*1000))]);
@@ -2970,14 +3277,16 @@ var _ex=globalThis.__linuxExecutor={
       _logFirstUse("key","ydotool");
       var k=_mapKeyWayland(keyName);
       _ydotool(["key",k+":1"]);
-      _cp.execFileSync("sleep",[String(secs)]);
+      _cp.execFileSync(_toolCmd("sleep")||"sleep",[String(secs)]);
       _ydotool(["key",k+":0"]);
     }else{
       _logFirstUse("key","x11-bridge");
       _x11Bridge(["hold-key","--key",keyName,"--duration-ms",String(Math.round(secs*1000))]);
     }
+    },secs*1000);
   },
   async type(text,opts){
+    _escAct();
     await _tgtPrime();
     if(_tgt&&opts&&opts.viaClipboard){
       // Paste through the target's own clipboard (never the desktop's).
@@ -2992,7 +3301,7 @@ var _ex=globalThis.__linuxExecutor={
         await _electron.clipboard.writeText(text,"clipboard");
         _wlBridgeCall(["key-sequence","--keys","ctrl+v"]);
       }else{
-        _wlBridgeCall(["type","--text",text]);
+        return _escAround(_escText(text),function(){_wlBridgeCall(["type","--text",text])},text.length*12);
       }
     }else if(_wayland&&_checkYdotool()){
       _logFirstUse("type","ydotool"+(opts&&opts.viaClipboard?" (clipboard)":""));
@@ -3000,7 +3309,7 @@ var _ex=globalThis.__linuxExecutor={
         await _electron.clipboard.writeText(text,"clipboard");
         _ydotool(["key","29:1","47:1","47:0","29:0"]);
       }else{
-        _ydotool(["type","--",text]);
+        return _escAround(_escText(text),function(){_ydotool(["type","--",text])},text.length*12);
       }
     }else{
       _logFirstUse("type","x11-bridge"+(opts&&opts.viaClipboard?" (clipboard)":""));
@@ -3008,7 +3317,7 @@ var _ex=globalThis.__linuxExecutor={
         await _electron.clipboard.writeText(text,"clipboard");
         _x11Bridge(["key-sequence","--keys","ctrl+v"]);
       }else{
-        _x11Bridge(["type","--text",text]);
+        return _escAround(_escText(text),function(){_x11Bridge(["type","--text",text])},text.length*12);
       }
     }
   },
@@ -3027,4 +3336,7 @@ var _ex=globalThis.__linuxExecutor={
     await _electron.clipboard.writeText(text||"","clipboard");
   }
 };
+// Ask the capture bridge's doctor now (async), so the first prompt suffix and
+// supported-features answer (js/cu_consent.js) already know whether it masks.
+_bcWarm();
 })();

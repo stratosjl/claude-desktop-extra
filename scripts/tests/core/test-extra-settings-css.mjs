@@ -73,6 +73,11 @@ function buildModule() {
     // are evaluated. This is the pre-v3.1623.0 shape (both arms forward the
     // parameter directly); test-deployment-main.mjs carries the newer shape with
     // a `let` local, so both branches of the capture regex stay covered.
+    // Stand-ins for the anchors of the navigation and VM-probe capture
+    // sub-patches (C and D, 4.23118.0 shapes), which the patch also strictly
+    // requires. Declarations only: neither function is ever called here.
+    "var Hrr,Urr;function Yrr(){return Urr??=(async()=>{let t,n,r,s;return Hrr={qemuPath:t,firmwarePath:n,virtiofsdPath:r,virtiofsdAptInstallable:!0,kvm:s},Hrr})(),Urr}function Xrr(){return Hrr}\n" +
+    "function nav0(){let Uy=go(Hy,\"Navigation\",Xy,{events:[[\"navigate\",[[\"path\",I]]]]});return Uy}\n" +
     "function nfi(e=[]){a.app.isPackaged?sA(!0,e):Uk(e)}\n");
   execFileSync(PATCH_BIN, [mod], { stdio: "ignore" });
   const src = readFileSync(mod, "utf8");
@@ -301,6 +306,32 @@ section("[6] every webContents keeps its own sheet");
   ok(a.keys.indexOf(b.removed[0]) < 0, "which is never the other webContents' key",
      b.removed[0] + " not in " + JSON.stringify(a.keys));
   ok(a.removed.length === 0, "and the first webContents is still untouched");
+}
+
+{
+  const css = readFileSync(join(ROOT, "js/extra_settings_page.css"), "utf8");
+  ok(/\.cdbx-navgroup \{[^}]*animation: cdbx-rainbow[^}]*\}/.test(css) && /@keyframes cdbx-rainbow/.test(css),
+     "the Extra headline gradient is animated");
+  ok(/prefers-reduced-motion: reduce\) \{\s*\.cdbx-navgroup \{ animation: none/.test(css),
+     "reduced motion turns the rainbow animation off");
+  ok(/\.cdbx-sec-h \{[^}]*hsl\(var\(--accent-brand[^}]*background-size: 250%[^}]*animation: cdbx-sheen[^}]*\}/.test(css),
+     "every .cdbx-sec-h headline (all Extra pages): accent text on a wide gradient with the sheen animation");
+  ok(/\.cdbx-sec-h:not\(:empty\)::before \{[^}]*width: 3px[^}]*\}/.test(css),
+     "with a static 3px accent bar before the text");
+  ok(/@keyframes cdbx-sheen \{\s*0%, 55% \{[^}]*\}\s*100% \{[^}]*\}/.test(css),
+     "the sheen holds most of the cycle and sweeps once");
+  ok(/prefers-reduced-motion: reduce\) \{\s*\.cdbx-sec-h,/.test(css),
+     "reduced motion stops the sheen, accent and bar stay");
+  ok(/\.cdbx-sec-h\.cdbx-grouphdr-sub::before \{[^}]*opacity: 0\.55/.test(css),
+     "the Pull requests subheadline is quieter");
+  ok(/\.cdbx-sec-h:hover,\s*\.cdbx-sec-h\.cdbx-sheen-play \{[^}]*animation: cdbx-sheen-now 1\.2s/.test(css) && /@keyframes cdbx-sheen-now/.test(css),
+     "hover and the click class play the quick sweep at once");
+  ok(/prefers-reduced-motion: reduce\) \{\s*\.cdbx-sec-h,\s*\.cdbx-sec-h:hover,\s*\.cdbx-sec-h\.cdbx-sheen-play \{ animation: none/.test(css),
+     "reduced motion turns hover and click sweeps off too");
+  ok(!/\.cdbx-sec-h\.cdbx-grouphdr \{/.test(css) && !/\.cdbx-navgroup(?:,|\s)[^{]*\.cdbx-sec-h\b[^{]*\{/.test(css.replace(/\/\*[\s\S]*?\*\//g, "")),
+     "the effect is not tied to the Community-only class and leaves the nav headline alone");
+  ok(/\.cdbx-sec-n \{[^}]*-webkit-text-fill-color: var\(--cdbx-hdr[^}]*\}/.test(css) && !/\.cdbx-sec-n \{[^}]*transparent;/.test(css.replace(/color-mix[^;]*;/g, "")),
+     "the count badge restores a solid fill instead of inheriting the transparent one");
 }
 
 console.log("\n" + (fail ? `${pass} passed, ${fail} FAILED` : `ALL ${pass} CHECKS PASSED`));

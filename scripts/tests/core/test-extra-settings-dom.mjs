@@ -213,11 +213,11 @@ const FIXTURE_BARE = dialog(`
 const DRIVER = String.raw`
 var SVGNS = "http://www.w3.org/2000/svg";
 var ICON_SEL = '[data-cds="Icon"]';
-var LABELS = ["Themes", "Community", "Computer Use", "Models", "Anthropic", "Deployment"];
+var LABELS = ["Themes", "Community", "Cowork (Linux)", "Models", "Anthropic", "Deployment"];
 // Upstream's nav column is narrow and truncates, so the long names are
 // shortened there and carried in a tooltip instead. The panels keep the full
 // name in their h1 - asserted in featuresPanel()/modelsPanel()/flagsPanel() below.
-var TOOLTIPS = { Community: "Community Features", Models: "Custom models", Anthropic: "Anthropic Features" };
+var TOOLTIPS = { Community: "Community Features", "Cowork (Linux)": "Cowork and Computer Use on Linux", Models: "Custom models", Anthropic: "Anthropic Features" };
 
 function navbox() { return document.getElementById("navbox"); }
 
@@ -255,6 +255,18 @@ function labelSpans(control) {
 
 // The Themes panel: the 91 real palettes are grouped, so a built-in like mario
 // cannot get lost in the middle of the community ones.
+
+// Headline contract shared by every Extra page: the label sits in .cdbx-sec-t on a
+// .cdbx-sec-h (the one selector the accent/sheen style hangs on), and a count
+// badge is a separate .cdbx-sec-n span, never the label itself.
+function headlineContract(root, what) {
+  const heads = Array.from(root.querySelectorAll(".cdbx-sec-h")).filter(function (h) { return h.querySelector(".cdbx-sec-t"); });
+  ok(heads.length > 0 && heads.every(function (h) {
+    return h.firstElementChild.classList.contains("cdbx-sec-t") &&
+      Array.from(h.querySelectorAll(".cdbx-sec-n")).every(function (n) { return !n.classList.contains("cdbx-sec-t") && n.parentElement === h; });
+  }), what + ": headlines are .cdbx-sec-h > .cdbx-sec-t (+ separate .cdbx-sec-n badge), " + heads.length + " checked");
+}
+
 function sections() {
   const host = document.querySelector(".cdbx-sections");
   const out = [];
@@ -416,13 +428,95 @@ async function featuresPanel(featuresItem) {
        "the state line follows the flip: " + cmRow.querySelector(".cdbx-state").textContent);
   }
 
+  // The "Settings > Extra > Models" words are an inline link that opens our Models
+  // page in the same dialog; the strings behind the row (search haystack) stay plain.
+  {
+    const LINK = "Settings > Extra > Models";
+    const cur0 = function (it) { return it.getAttribute("aria-current") === "page" || !!it.querySelector('[aria-current="page"]'); };
+    const rowOf = function (p) { return p.querySelector(cmSel).closest(".cdbx-row"); };
+    const links = function (n) { return Array.prototype.slice.call(n.querySelectorAll(".cdbx-link")); };
+    const cmRow = rowOf(panel);
+    const noteLinks = links(cmRow.querySelector(".cdbx-note"));
+    ok(noteLinks.length === 1 && noteLinks[0].textContent === LINK,
+       "Custom models note: exactly one .cdbx-link reading " + LINK + " (" + noteLinks.length + ")");
+    ok(noteLinks.length === 1 && /^Adds models from .* set them up in $/.test(
+         cmRow.querySelector(".cdbx-note").firstChild.textContent) &&
+       /Applies live\.$/.test(cmRow.querySelector(".cdbx-note").textContent) &&
+       cmRow.querySelector(".cdbx-note").textContent.indexOf("set them up in " + LINK + ". Applies live.") > 0,
+       "the note text reads the same as before");
+    ok(noteLinks.length === 1 && (noteLinks[0].tagName === "BUTTON" || noteLinks[0].tagName === "A") &&
+       noteLinks[0].tabIndex >= 0, "the link is focusable");
+    ok(links(cmRow.querySelector(".cdbx-state")).length === 0, "configured: the state line carries no link");
+    const otherLinks = links(panel).filter(function (l) { return !cmRow.contains(l); });
+    ok(otherLinks.length === 0, "no other row grew a link (" + otherLinks.length + ")");
+    const sbox = panel.querySelector(".cdbx-search");
+    sbox.value = "endpoint"; sbox.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(30);
+    ok(cmRow.closest(".cdbx-list").style.display !== "none", "the filter 'endpoint' still matches the Custom models row");
+    sbox.value = ""; sbox.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(30);
+
+    window.__customModelsState = { ok: true, enabled: false, configured: false, lockedByJsonc: false, source: "default", surfaces: ["code"], models: 0, providers: [] };
+    window.__cmConfig = { ok: true, enabled: false, configured: false, lockedByJsonc: false, source: "default",
+      surfaces: ["code"], models: 0, providers: [], paths: {} };
+    featuresItem.click();
+    await sleep(120);
+    const p2 = document.querySelector(".cdbx-panel");
+    const r2 = rowOf(p2);
+    const sl = links(r2.querySelector(".cdbx-state"));
+    ok(sl.length === 1 && sl[0].textContent === LINK && r2.querySelector(".cdbx-state").textContent ===
+       "off - no model configured yet (" + LINK + ")",
+       "nothing configured: the state line carries the link: " + r2.querySelector(".cdbx-state").textContent);
+
+    const modelsItemEl = ourItems()[3];
+    const cmNow = function () { return document.querySelector(cmSel); };
+    ok(cur0(ourItems()[1]) && !cur0(modelsItemEl), "before: the Community item holds aria-current=page, Models does not");
+    const cmBefore = cmNow().getAttribute("aria-checked"), callsBefore = (window.__customModelsCalls || []).length;
+    // Space: opens only via the native click on keyup, so keydown alone must do nothing
+    const spaceEv = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    links(r2.querySelector(".cdbx-note"))[0].dispatchEvent(spaceEv);
+    await sleep(100);
+    ok(document.querySelector(".cdbx-panel .cdbx-h1").textContent === "Community Features" &&
+       cmNow().getAttribute("aria-checked") === cmBefore && (window.__customModelsCalls || []).length === callsBefore,
+       "Space keydown on the link opens nothing and flips nothing");
+    // click
+    links(r2.querySelector(".cdbx-note"))[0].click();
+    await sleep(150);
+    let np = document.querySelector(".cdbx-panel");
+    ok(!!np && np.querySelector(".cdbx-h1").textContent === "Custom models",
+       "clicking the note link opens the Models panel: " + (np && np.querySelector(".cdbx-h1").textContent));
+    const cur = function (it) { return it.getAttribute("aria-current") === "page" || !!it.querySelector('[aria-current="page"]'); };
+    ok(cur(modelsItemEl) && !cur(ourItems()[1]),
+       "and selectOurs moved aria-current=page from the Community item to the Models item");
+    ok(cmBefore === "false" && window.__customModelsCalls.length === callsBefore,
+       "clicking the note link did not flip the Custom models switch");
+    // Enter on the state-line link
+    featuresItem.click();
+    await sleep(120);
+    const r3 = rowOf(document.querySelector(".cdbx-panel"));
+    const sl3 = links(r3.querySelector(".cdbx-state"))[0];
+    sl3.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await sleep(150);
+    np = document.querySelector(".cdbx-panel");
+    ok(!!np && np.querySelector(".cdbx-h1").textContent === "Custom models",
+       "pressing Enter on the state-line link opens the Models panel too");
+    ok(window.__customModelsCalls.length === callsBefore, "and Enter did not call customModelsSet either");
+    featuresItem.click();
+    await sleep(120);
+    ok(document.querySelector(cmSel).getAttribute("aria-checked") === cmBefore, "the switch is still as it was after both link uses");
+    window.__customModelsState = null;
+    featuresItem.click();
+    await sleep(120);
+  }
+
   const author = panel.querySelector('#cdbx-autofix-authors');
   ok(!!author, "renders trusted-author list editor");
   if (author) {
     const row = author.closest(".cdbx-row"), save = row.querySelector("button");
     ok(author.value === "", "additional trust list defaults empty");
     ok(!!row.querySelector('label[for="cdbx-autofix-authors"]'), "editor has an accessible label");
-    ok(/count as the session's own PRs/.test(row.textContent) && /race checks remain/.test(row.textContent), "editor explains the scope");
+    ok(/^Lets Auto-fix also handle PRs opened by other GitHub users or bots\./.test(row.querySelector(".cdbx-note").textContent) &&
+       /only the signed-in gh user counts/.test(row.textContent), "editor explains the scope in plain words");
     author.value = "github.com/my-app[bot]\nghe.example/human";
     save.click(); save.click();
     await sleep(60);
@@ -450,11 +544,10 @@ async function featuresPanel(featuresItem) {
     ok(tl.getAttribute("aria-checked") === "false", "off by default (opt-in)");
     ok(!tl.disabled, "enabled when the .jsonc does not lock it");
     ok(tlState() === "off - Anthropic's limits", "the off state says Anthropic's limits apply: " + tlState());
-    ok(/browser screenshots/.test(tlNote), "the note names what it is for (long sessions with browser screenshots)");
-    ok(/exactly as Anthropic ships them/.test(tlNote), "the note promises off leaves Anthropic's limits as shipped");
+    ok(/^Opens very large sessions in full/.test(tlNote), "the note leads with what it does for the user");
+    ok(/off keeps Anthropic's limits/.test(tlNote), "the note promises off leaves Anthropic's limits as shipped");
     ok(/Takes effect after a restart/.test(tlNote), "the note says it needs a restart");
-    ok(/by default/.test(tlNote) && /adjustable in claude-desktop-extra\.jsonc/.test(tlNote),
-       "the note says the 256/192 are defaults and can be adjusted in the config file (file only, no GUI field)");
+    ok(!/256|192/.test(tlNote), "the visible note carries no byte figures (they are search keywords)");
     ok(tlNote.length < 700, "the note stays within the length range of the other rows (" + tlNote.length + " chars)");
     ok(!tlRow.querySelector("input"), "no number field in the row: the numbers stay in the file");
 
@@ -488,15 +581,15 @@ async function featuresPanel(featuresItem) {
       const afNote = afRow.querySelector(".cdbx-note").textContent;
       ok(afRow.querySelector(".cdbx-id").textContent === "Auto-fix notices: ready to merge, comments after merge",
          "titled Auto-fix notices: ready to merge, comments after merge");
-      ok(afRow.previousElementSibling === null && afRow.parentElement.previousElementSibling.textContent === "Code",
-         "under its own Code heading");
+      ok(afRow.parentElement.parentElement.firstElementChild.textContent === "Pull requests",
+         "under the Pull requests subheading");
       ok(af.getAttribute("aria-checked") === "false" && !af.disabled, "off by default (opt-in), not locked");
-      ok(/one GitHub read per Auto-fix PR/.test(afNote) && /one model turn per notice/.test(afNote),
+      ok(/^Tells the Code session when a PR with Auto-fix on is ready to merge/.test(afNote) &&
+         /one GitHub read per Auto-fix PR/.test(afNote) && /one model turn per notice/.test(afNote),
          "the note says what it costs: " + afNote);
       ok(/never merges/.test(afNote) && /Applies live/.test(afNote), "the note says it never merges and applies live");
-      ok(/After the PR is merged/.test(afNote) && /owners, members, collaborators and bots/.test(afNote) &&
-         /up to 7 days/.test(afNote) && /replies on GitHub/.test(afNote),
-         "the note covers post-merge comments, who is trusted, the 7-day window and no GitHub replies: " + afNote);
+      ok(/new comments after it merges/.test(afNote) && /never merges/.test(afNote),
+         "the note covers post-merge comments and that it never merges: " + afNote);
       af.click();
       await sleep(60);
       ok((window.__afmrCalls || []).length === 1 && window.__afmrCalls[0] === true,
@@ -545,11 +638,11 @@ async function featuresPanel(featuresItem) {
       const ssNote = ssRow.querySelector(".cdbx-note").textContent;
       ok(ssRow.querySelector(".cdbx-id").textContent === "Native dialog with 'Allow always' for starting other sessions",
          "titled Native dialog with 'Allow always' for starting other sessions");
-      ok(ssRow.parentElement.previousElementSibling.textContent === "Code", "under a Code heading");
+      ok(ssRow.parentElement.parentElement.firstElementChild.textContent === "Code", "directly under the Code group, not Pull requests");
       ok(ss.getAttribute("aria-checked") === "false" && !ss.disabled, "off by default (opt-in), not locked");
-      ok(/asking project and the displayed local destination only/.test(ssNote) && /different folder asks separately/.test(ssNote) && /nothing inside/.test(ssNote) &&
+      ok(/^Asks with a system dialog/.test(ssNote) && /Allow always/.test(ssNote) &&
          /Off \(the default\)/.test(ssNote) && /forgets every/.test(ssNote) && /Applies live/.test(ssNote),
-         "the note states scope, default, switch-off forgets and live: " + ssNote);
+         "the note states the dialog, default, switch-off forgets and live: " + ssNote);
       const forget = Array.from(ssRow.querySelectorAll("button")).find(function (b) { return b.textContent === "Forget remembered approvals"; });
       ok(!!forget && !forget.disabled, "two remembered approvals -> an enabled forget button");
       ok(/2 project\/destination approvals remembered/.test(ssRow.textContent), "the row counts scoped approvals, not distinct projects");
@@ -922,10 +1015,29 @@ async function featuresPanel(featuresItem) {
   // Transparent window is both: its switch needs a restart, its slider is live,
   // and its note has to say each.
   const MIXED_ROWS = ["Transparent window"];
-  // Computer Use has its own entry now: none of its rows is left here.
-  ok(!/Computer Use/.test(panel.textContent) &&
-     !Array.prototype.some.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return /Computer Use|Options/.test(n.textContent); }),
-     "no Computer Use row or heading in Community Features");
+  // Computer Use has its own entry now: none of its rows is left here. The one
+  // exception is the community switch "Escape stops Computer Use" under its own
+  // Computer Use group headline: without exactly that row and that headline,
+  // no "Computer Use" text may appear anywhere in Community Features.
+  (function () {
+    const copy = panel.cloneNode(true);
+    let escRows = 0, cuHeads = 0;
+    Array.prototype.forEach.call(copy.querySelectorAll(".cdbx-row"), function (r) {
+      const id = r.querySelector(".cdbx-id");
+      if (id && id.textContent === "Escape stops Computer Use") { escRows++; r.remove(); }
+    });
+    Array.prototype.forEach.call(copy.querySelectorAll(".cdbx-group"), function (g) {
+      if (g.firstElementChild && g.firstElementChild.textContent === "Computer Use") {
+        cuHeads++;
+        const sub = g.children[1];
+        g.firstElementChild.remove();
+        if (sub && sub.textContent === "Computer Use on Linux") sub.remove();
+      }
+    });
+    ok(escRows === 1 && cuHeads === 1 && !/Computer Use/.test(copy.textContent) &&
+       !Array.prototype.some.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return /Computer Use|Options/.test(n.textContent); }),
+       "no Computer Use text in Community Features except the one Escape switch row and its group headline (" + escRows + " row, " + cuHeads + " headline)");
+  })();
   const rowNotes = Array.from(panel.querySelectorAll(".cdbx-row")).map(function (r) {
     return {
       title: r.querySelector(".cdbx-id").textContent,
@@ -963,18 +1075,56 @@ async function featuresPanel(featuresItem) {
     ok(document.activeElement === box, "the filter has the caret when the panel opens, ready to type into");
     ok(/^Filter \d+ features by name or description$/.test(box.placeholder),
        "which says what it filters: " + box.placeholder);
-    const heads = Array.from(panel.querySelectorAll(".cdbx-sec-h"));
-    const visible = function () {
-      return heads.filter(function (h) { return h.style.display !== "none"; })
-        .map(function (h) { return h.textContent; });
+    // Group headlines: four, in order, with the Pull requests subgroup under Code.
+    const groupNodes = Array.from(panel.querySelectorAll(".cdbx-group"));
+    const topGroups = groupNodes.filter(function (g) { return !g.classList.contains("cdbx-group-sub"); });
+    const gtitle = function (g) { return g.firstElementChild.textContent; };
+    ok(topGroups.map(gtitle).join("|") === "Code|App and window|Models and 3P|Computer Use",
+       "four group headlines in order: " + topGroups.map(gtitle).join("|"));
+    ok(topGroups.map(function (g) { return g.children[1].textContent; }).join("|") ===
+       "Code tab: panels, files, diffs and sessions|Look and behavior of the app window, tray and theme|Extra models and gateway options|Computer Use on Linux",
+       "each headline has its one-line subtitle");
+    const subGroup = groupNodes.filter(function (g) { return g.classList.contains("cdbx-group-sub"); });
+    ok(subGroup.length === 1 && gtitle(subGroup[0]) === "Pull requests" && subGroup[0].parentElement === topGroups[0] &&
+       subGroup[0].children[1].textContent === "Auto-fix and auto-archive for your GitHub PRs",
+       "Pull requests is the one subgroup, inside Code, with its subtitle");
+    ok(groupNodes.every(function (g) { return g.firstElementChild.classList.contains("cdbx-grouphdr"); }) &&
+       subGroup[0].firstElementChild.classList.contains("cdbx-grouphdr-sub"),
+       "every Community group headline carries cdbx-grouphdr, the subgroup also cdbx-grouphdr-sub");
+    ok(Array.from(panel.querySelectorAll(".cdbx-grouphdr")).length === groupNodes.length &&
+       Array.from(panel.querySelectorAll(".cdbx-sec-h:not(.cdbx-grouphdr)")).every(function (h) { return !h.closest(".cdbx-group"); }),
+       "no other heading carries the class");
+    const titlesIn = function (g, own) {
+      return Array.from(g.querySelectorAll(".cdbx-row .cdbx-id")).filter(function (n) {
+        return !own || n.closest(".cdbx-group") === g;
+      }).map(function (n) { return n.textContent; });
     };
-    ok(visible().length === heads.length, "every row is visible before typing");
+    ok(titlesIn(topGroups[0], true).join("|") === "Panel tabs|Files quick open|Diff view modes|Load large sessions in full|Native dialog with 'Allow always' for starting other sessions",
+       "Code rows in order, the session dialog before the subgroup: " + titlesIn(topGroups[0], true).join("|"));
+    ok(titlesIn(subGroup[0]).join("|") === "Trusted Auto-fix PR authors|Auto-fix notices: ready to merge, comments after merge|Auto-archive delay after a PR merges or closes",
+       "Pull requests rows: " + titlesIn(subGroup[0]).join("|"));
+    // The harness bridge has no tray or developer-tools halves, so those two rows are skipped here.
+    const appOrder = ["Hide window controls", "Native titlebar", "Transparent window", "Always use the white tray icon", "Theme picker", "Developer tools"];
+    ok(titlesIn(topGroups[1]).join("|") === appOrder.filter(function (t) { return titlesIn(topGroups[1]).indexOf(t) >= 0; }).join("|") &&
+       titlesIn(topGroups[1]).length >= 4,
+       "App and window rows in order: " + titlesIn(topGroups[1]).join("|"));
+    ok(titlesIn(topGroups[2]).join("|") === "Custom models|Allow non-Anthropic models",
+       "Models and 3P rows: " + titlesIn(topGroups[2]).join("|"));
+    ok(!panel.querySelector(".cdbx-row ~ .cdbx-sec-h, .cdbx-list > .cdbx-sec-h") &&
+       Array.from(panel.querySelectorAll(".cdbx-sec-t")).length === 0,
+       "no per-row section label is left");
+
+    const heads = groupNodes;
+    const visible = function () {
+      return heads.filter(function (h) { return h.style.display !== "none"; }).map(gtitle);
+    };
+    ok(visible().length === heads.length, "every group is visible before typing");
     // The trusted-authors row is a list editor, not a switch, so count switches rather than heads.
     const switchesBefore = panel.querySelectorAll(".cdbx-switch").length;
 
     await type("panel tabs");
-    ok(visible().join(",") === "Layout",
-       "a title match leaves only that section: " + visible().join(","));
+    ok(visible().join(",") === "Code",
+       "a title match leaves only its group: " + visible().join(","));
     ok(!!panel.querySelector(".cdbx-row .cdbx-id"), "the matching row is still in the DOM");
     ok(panel.querySelectorAll(".cdbx-switch").length === switchesBefore,
        "no row was re-rendered - all switches survive the filter (" +
@@ -984,21 +1134,29 @@ async function featuresPanel(featuresItem) {
        JSON.stringify(window.__panelTabsCalls) + JSON.stringify(window.__pickerCalls));
 
     await type("ctrl+shift+t");
-    ok(visible().join(",") === "Shortcuts",
+    ok(visible().join(",") === "App and window",
        "a note match works too: " + visible().join(","));
 
-    await type("source control");
-    ok(visible().join(",") === "Source control", "so does a section match: " + visible().join(","));
+    // Words that only live in a row's note or keywords still find it.
+    await type("gallery");
+    ok(visible().join(",") === "App and window", "a word only in the note or keywords finds its row: " + visible().join(","));
+    await type("keep this session");
+    ok(visible().join(",") === "Code,Pull requests", "a word only in the archive-delay note finds it, under Code and Pull requests: " + visible().join(","));
+    await type("deepseek");
+    ok(visible().join(",") === "Models and 3P",
+       "a word in the model rows opens only Models and 3P: " + visible().join(","));
+    await type("pull requests");
+    ok(visible().join(",") === "", "a headline alone is not searchable text: " + visible().join(","));
 
     await type("no such feature");
-    ok(visible().length === 0, "a needle nothing matches hides every row");
+    ok(visible().length === 0, "a needle nothing matches hides every row and every group headline");
     const empty = panel.querySelector(".cdbx-empty");
     ok(!!empty && empty.style.display !== "none" &&
        empty.textContent === "No feature matches that filter.",
        "and the empty state says so");
 
     await type("");
-    ok(visible().length === heads.length, "clearing the filter brings every row back");
+    ok(visible().length === heads.length, "clearing the filter brings every group and row back");
     ok(panel.querySelector(".cdbx-empty").style.display === "none", "and hides the empty state");
   }
 
@@ -1083,6 +1241,27 @@ async function featuresPanel(featuresItem) {
     window.__tlState = undefined;
   }
   window.__pickerState = { ok: true, enabled: true, lockedByJsonc: null };
+
+  // The downstream Windows build carries this page; there the Escape switch's
+  // main side answers "Linux only": the row hides, and so does the "Computer
+  // Use" group it was the only row of (no empty headline left behind).
+  {
+    window.__cuEscState = { ok: false, error: "Escape stops Computer Use is Linux only" };
+    featuresItem.click();
+    await sleep(150);
+    const wp = document.querySelector(".cdbx-panel");
+    const heads = Array.from(wp.querySelectorAll(".cdbx-group")).filter(function (g) { return g.style.display !== "none"; })
+      .map(function (g) { return g.firstElementChild.textContent; });
+    const escRow = Array.from(wp.querySelectorAll(".cdbx-row .cdbx-id")).some(function (n) { return n.textContent === "Escape stops Computer Use"; });
+    ok(heads.indexOf("Computer Use") < 0 && !escRow && heads.join("|") === "Code|Pull requests|App and window|Models and 3P",
+       "win32 ('Linux only'): no Escape row and no 'Computer Use' headline; the other groups stay: " + heads.join("|"));
+    window.__cuEscState = undefined;
+    featuresItem.click();
+    await sleep(150);
+    const lp = document.querySelector(".cdbx-panel");
+    ok(Array.from(lp.querySelectorAll(".cdbx-group")).some(function (g) { return g.style.display !== "none" && g.firstElementChild.textContent === "Computer Use"; }),
+       "Linux again: the Computer Use group is back");
+  }
 }
 
 // Anthropic Features: everything that used to sit below our own switches -
@@ -1324,11 +1503,11 @@ async function cubgPanel(cuItem) {
   ok(!!st2 && /not running/.test(st2.textContent) && /refuses to act/.test(st2.textContent) && st2.classList.contains("cdbx-warn"),
      "on but not running: the status says Computer Use refuses: " + (st2 ? st2.textContent : ""));
 
-  ok(document.querySelector(".cdbx-cubg-back").textContent === "Back to Computer Use", "the setup page's Back says where it goes");
+  ok(document.querySelector(".cdbx-cubg-back").textContent === "Back to Cowork (Linux)", "the setup page's Back says where it goes");
   document.querySelector(".cdbx-cubg-back").click();
   await sleep(40);
-  ok(!!document.querySelector(".cdbx-panel " + SW) && document.querySelector(".cdbx-panel .cdbx-h1").textContent === "Computer Use",
-     "Back returns to the Computer Use page");
+  ok(!!document.querySelector(".cdbx-panel " + SW) && document.querySelector(".cdbx-panel .cdbx-h1").textContent === "Cowork (Linux)",
+     "Back returns to the Cowork (Linux) page");
 }
 
 // Computer Use: its own Extra entry. Pinned here: the page is the status
@@ -1339,6 +1518,47 @@ async function cubgPanel(cuItem) {
 // (in a closed "What this does") before anything runs, the actions call their
 // channel with no argument and re-read afterwards, and a failed Enable shows
 // the command to run instead.
+// "Escape stops Computer Use": one setting, two rows - Community Features (its
+// own Computer Use group) and the Cowork (Linux) page's Computer Use Options,
+// next to "Ask before Computer Use controls an app". Each page reads it when
+// drawn, so a flip on one page shows on the other.
+async function escTwoPages(featuresItem, cuItem) {
+  const ESC_SW = '.cdbx-switch[aria-label="Escape stops Computer Use"]';
+  const ASK_SW = '.cdbx-switch[aria-label="ask before Computer Use controls an app"]';
+  const BG_SW = '.cdbx-switch[aria-label="let Computer Use work on a background display instead of your desktop"]';
+  const open = async function (item) { document.getElementById("row-account").click(); await sleep(20); item.click(); await sleep(150); return document.querySelector(".cdbx-panel"); };
+  const before = function (a, b) { return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); };
+  window.__cuEscState = undefined;
+  window.__cuEscCalls = [];
+  let cu = await open(cuItem);
+  let sw = cu.querySelector(ESC_SW);
+  const row = sw && sw.closest(".cdbx-row");
+  ok(!!row && row.querySelector(".cdbx-id").textContent === "Escape stops Computer Use", "Computer Use page: the Escape row is there, same title");
+  ok(!!sw && sw.getAttribute("aria-checked") === "false" && /^off - /.test(row.querySelector(".cdbx-state").textContent), "  off by default");
+  ok(!!sw && sw.closest("[data-cdbx-section]") && sw.closest("[data-cdbx-section]").getAttribute("data-cdbx-section") === "cu" &&
+     before(cu.querySelector(ASK_SW), sw) && before(sw, cu.querySelector(BG_SW)),
+     "  under Computer Use -> Options, after the ask switch and before the background display");
+  ok(!!row && /Applies live, from the next Computer Use task/.test(row.querySelector(".cdbx-note").textContent), "  the same note (applies live)");
+  if (sw) { sw.click(); await sleep(60); }
+  ok(JSON.stringify(window.__cuEscCalls) === "[true]" && sw.getAttribute("aria-checked") === "true", "  clicking it calls cuEscSet(true)");
+  let cf = await open(featuresItem);
+  let csw = cf.querySelector(ESC_SW);
+  ok(!!csw && csw.getAttribute("aria-checked") === "true", "Community Features shows the flip made on the Computer Use page");
+  if (csw) { csw.click(); await sleep(60); }
+  cu = await open(cuItem);
+  sw = cu.querySelector(ESC_SW);
+  ok(JSON.stringify(window.__cuEscCalls) === "[true,false]" && !!sw && sw.getAttribute("aria-checked") === "false", "and the Computer Use page shows the flip made on Community Features");
+  window.__cuEscState = { ok: true, enabled: true, lockedByJsonc: true };
+  cu = await open(cuItem);
+  sw = cu.querySelector(ESC_SW);
+  ok(!!sw && sw.disabled && /set in claude-desktop-extra\.jsonc/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent), "a .jsonc value locks it on the Computer Use page too");
+  window.__cuEscState = { ok: false, error: "Escape stops Computer Use is Linux only" };
+  cu = await open(cuItem);
+  ok(!cu.querySelector(ESC_SW) && !!cu.querySelector(ASK_SW), "a 'Linux only' answer hides only this row on the Computer Use page");
+  window.__cuEscState = undefined;
+  window.__cuEscCalls = [];
+}
+
 async function cusPanel(cuItem) {
   async function remount() {
     document.getElementById("row-account").click();
@@ -1371,9 +1591,48 @@ async function cusPanel(cuItem) {
   window.__cubgState = Object.assign({}, window.__cubgBase);
   setState(window.__cusRows(), { tpmEnable: PK_EN });
   let panel = await remount();
-  ok(!!panel && !!panel.querySelector(".cdbx-cus"), "the Computer Use entry opens the status block directly");
+  ok(!!panel && !!panel.querySelector(".cdbx-cus"), "the Cowork (Linux) entry opens the status block directly");
   if (!panel || !panel.querySelector(".cdbx-cus")) return;
-  ok(panel.querySelector(".cdbx-h1").textContent === "Computer Use", "titled Computer Use");
+  ok(panel.querySelector(".cdbx-h1").textContent === "Cowork (Linux)", "titled Cowork (Linux)");
+  {
+    const secs = Array.prototype.map.call(panel.querySelectorAll("[data-cdbx-section]"), function (n) {
+      return n.getAttribute("data-cdbx-section") + ":" + n.querySelector(".cdbx-sec-t").textContent; });
+    ok(secs.join("|") === "cloud:Cloud Cowork|local:Local Cowork VM|cu:Computer Use",
+       "three sections in order, each with its heading: " + secs.join("|"));
+    // "How Cowork chooses where a task runs": closed, above the sections.
+    const help = panel.querySelector("details.cdbx-cus-help");
+    const firstSec = panel.querySelector("[data-cdbx-section]");
+    ok(!!help && help.open === false && help.querySelector("summary").textContent === "How Cowork chooses where a task runs" &&
+       !!(help.compareDocumentPosition(firstSec) & Node.DOCUMENT_POSITION_FOLLOWING),
+       "a closed help block 'How Cowork chooses where a task runs' sits above the three sections");
+    const hl = help ? Array.prototype.map.call(help.querySelectorAll(":scope > div.cdbx-note:not(.cdbx-cus-help-links)"), function (n) { return n.textContent; }) : [];
+    ok(hl.length === 5 && /^Cloud: Anthropic's cloud VM/.test(hl[0]) && /device key/.test(hl[0]) && /^Local: the VM on this computer/.test(hl[1]) &&
+       /only option in 3P mode/.test(hl[1]) && /"Connected"/.test(hl[2]) && /"Only on this computer"/.test(hl[2]) &&
+       /toggle \(Beta\)/.test(hl[3]) && /local folder or Space, Dispatch/.test(hl[3]) && /"Continue in cloud\.\.\."/.test(hl[3]) &&
+       /"Cowork in the cloud"/.test(hl[4]) && /"Chat and Cowork unified"/.test(hl[4]) && /"Computer access"/.test(hl[4]) &&
+       /"Require trusted devices"/.test(hl[4]) && hl.every(function (t) { return !/\u2014/.test(t); }),
+       "1P: cloud, local, the header icon, switching and the admin settings: " + hl.length);
+    const links = help ? Array.prototype.map.call(help.querySelectorAll("a.cdbx-cus-help-link"), function (a) {
+      return a.textContent + "=" + a.getAttribute("href") + "|" + a.target + "|" + a.rel; }) : [];
+    ok(links.join(" ; ") === [
+      "Admin settings - Cowork=https://claude.ai/admin-settings/cowork|_blank|noopener noreferrer",
+      "Admin settings - Capabilities=https://claude.ai/admin-settings/capabilities|_blank|noopener noreferrer",
+      "docs/cowork.md=https://github.com/patrickjaja/claude-desktop-extra/blob/master/docs/cowork.md#how-cowork-chooses-cloud-or-local|_blank|noopener noreferrer"].join(" ; "),
+       "three fixed links, each opening a new window: " + links.join(" ; "));
+    help.open = true;
+    window.__cusCalls.read--;
+    btn(panel, "Re-check").click();
+    await sleep(60);
+    ok(help.isConnected && help.open === true, "a re-read keeps the help block and whether it is open");
+    help.open = false;
+  }
+  {
+    const inSec = function (key) { const r = row(key); const w = r && r.closest("[data-cdbx-section]"); return w ? w.getAttribute("data-cdbx-section") : null; };
+    ok(inSec("tpm") === "cloud" && inSec("cloud") === "cloud" && inSec("desktop") === "cu",
+       "device key and cloud rows under Cloud Cowork, this desktop under Computer Use");
+    ok(!!panel.querySelector('[data-cdbx-section="local"] .cdbx-cus-old'),
+       "an older main side without local VM rows: one line saying so, no invented rows");
+  }
   ok(!!btn(panel, "Re-check") && !panel.querySelector(".cdbx-cubg-back") && !btn(panel, "Details"),
      "it has Re-check, and no Back or Details button");
   ok(window.__cusCalls.read === 1,
@@ -1436,13 +1695,18 @@ async function cusPanel(cuItem) {
   // Order: status block, then the one Options heading, then background
   // display, then read app controls.
   const heads = Array.prototype.map.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return n.textContent; });
-  ok(heads.join("|") === "Status|Options", "two headings, Status then Options: " + heads.join("|"));
+  ok(heads.join("|") === "Cloud Cowork|Local Cowork VM|Computer Use|Options",
+     "the three section headings, then Options: " + heads.join("|"));
+  headlineContract(panel, "Cowork (Linux) page");
   const optsHead = Array.prototype.filter.call(panel.querySelectorAll(".cdbx-sec-h"), function (h) { return h.textContent === "Options"; })[0];
   const bg = panel.querySelector(BG_SW);
   const ax = panel.querySelector(AX_SW);
   const before = function (a, b) { return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); };
-  ok(before(row("cloud"), optsHead) && before(optsHead, bg) && before(bg, ax),
+  ok(before(row("cloud"), optsHead) && before(row("desktop"), optsHead) && before(optsHead, bg) && before(bg, ax),
      "status rows, then Options, then the background display switch, then the read app controls switch");
+  ok(!!optsHead && optsHead.closest("[data-cdbx-section]") && optsHead.closest("[data-cdbx-section]").getAttribute("data-cdbx-section") === "cu" &&
+     !!bg && bg.closest("[data-cdbx-section]") === optsHead.closest("[data-cdbx-section]"),
+     "Options and the switches sit inside the Computer Use section");
   ok(!!ax && ax.closest(".cdbx-row").querySelector(".cdbx-id .cdbx-exp").textContent === "Experimental",
      "read app controls renders here with its Experimental badge");
 
@@ -1602,8 +1866,8 @@ async function cusPanel(cuItem) {
   const dpk = row("tpm").querySelector('.cdbx-cus-pk[data-verb="disable"]');
   const dwhat = dpk && dpk.querySelector("details.cdbx-cus-what");
   ok(!!dpk && pres(dpk)[0] === PK_DIS.command && !!dwhat && dwhat.open === false &&
-     pres(dwhat).indexOf(PK_DIS.link) >= 0 && pres(dwhat).indexOf(PK_DIS.apply) >= 0 && /until you log out/.test(dwhat.textContent),
-     "Disable: main's exact command, and What this does names the link it removes, the udev reload and that access lasts until logout");
+     pres(dwhat).indexOf(PK_DIS.link) >= 0 && pres(dwhat).indexOf(PK_DIS.apply) >= 0 && /clears the access entry right away; it takes effect after restarting Claude, no relogin or reboot/.test(dwhat.textContent),
+     "Disable: main's exact command, and What this does names the link it removes, the udev reload and that the access entry is cleared (restart, no relogin)");
   if (dis) { dis.click(); await sleep(60); }
   ok(window.__cusCalls.disable === 1 && toastText() === "Done: cdb-tpm-access: disabled", "Disable calls its channel once: " + toastText());
   setState(okRows, { tpmDisable: { kind: "command", text: "sudo rm -f /etc/udev/rules.d/x", where: "here" } });
@@ -1702,6 +1966,201 @@ async function cusPanel(cuItem) {
   ok(!!panel.querySelector(BG_SW) && Array.prototype.some.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return n.textContent === "Options"; }),
      "and the switches still render under Options");
   window.cdbExtra.cuStatusRead = savedRead;
+
+  // --- Local Cowork VM: the four rows, the KVM actions, 3P ------------------
+  const LOCAL = function (kvm, vsock, tools, vmr) {
+    return Object.assign(window.__cusRows(), {
+      kvm: kvm || { status: "ok", fact: "/dev/kvm accessible", note: "k" },
+      vsock: vsock || { status: "ok", fact: "/dev/vhost-vsock accessible", note: "v" },
+      vmTools: tools || { status: "ok", fact: "QEMU, OVMF and virtiofsd found", note: "t" },
+      vm: vmr || { status: "na", fact: "not running", note: "m" } });
+  };
+  const KPK_EN = window.__cusKvmPkEnable;
+  const KPK_DIS = window.__cusKvmPkDisable;
+  const inLocal = function (key) { const r = row(key); return !!r && !!r.closest('[data-cdbx-section="local"]'); };
+  setState(LOCAL(), {});
+  panel = await remount();
+  ok(["kvm", "vsock", "vmTools", "vm"].every(inLocal), "four local VM rows under Local Cowork VM");
+  ok(row("kvm").querySelector(".cdbx-id").firstChild.textContent === "KVM (/dev/kvm)" &&
+     row("vsock").querySelector(".cdbx-id").firstChild.textContent === "VM socket (/dev/vhost-vsock)" &&
+     row("vmTools").querySelector(".cdbx-id").firstChild.textContent === "QEMU, OVMF and virtiofsd" &&
+     row("vm").querySelector(".cdbx-id").firstChild.textContent === "Local VM", "with their titles");
+  ok(!panel.querySelector('[data-cdbx-section="local"] .cdbx-cus-old'), "no 'older main side' line when the rows are there");
+  // The four KVM states the main side reports.
+  const kstates = [
+    ["missing", { status: "na", fact: "missing - enable virtualization (VT-x / AMD-V) in the firmware settings", note: "k" }, null, "Not available"],
+    ["no_permission", { status: "action", fact: "no permission (root:kvm 660)", note: "k" }, null, "Needs action"],
+    ["vsock_module_missing", null, { status: "action", fact: "module not loaded (vhost_vsock)", note: "v" }, "OK"],
+    ["ok", null, null, "OK"]
+  ];
+  for (const [n, k, v, kw] of kstates) {
+    setState(LOCAL(k, v), n === "vsock_module_missing" ? { vsockCommand: "sudo modprobe vhost_vsock" } : {});
+    window.__cusState.vm = { atStart: null, now: n, running: false };
+    panel = await remount();
+    ok(word("kvm") === kw && row("kvm").querySelector(".cdbx-cus-fact").textContent === (k ? k.fact : "/dev/kvm accessible"),
+       n + ": the KVM row says " + kw + " with main's fact");
+    if (n === "vsock_module_missing") {
+      ok(word("vsock") === "Needs action" && pres(row("vsock")).indexOf("sudo modprobe vhost_vsock") >= 0,
+         n + ": the vhost-vsock row offers the modprobe command");
+    }
+  }
+  // Enable KVM access: button, security text, exact command, What this does.
+  window.__cusCalls.kvmEnable = 0; window.__cusCalls.kvmDisable = 0;
+  setState(LOCAL({ status: "action", fact: "no permission (root:kvm 660)", note: "k" }),
+    { kvmEnable: KPK_EN, kvmDisable: Object.assign({}, KPK_DIS, { disabled: "Nothing to remove - no link from this package is installed" }),
+      kvmGroupCommand: "sudo usermod -aG kvm \"$USER\"" });
+  panel = await remount();
+  const ken = btn(row("kvm"), "Enable KVM access");
+  const kdis = btn(row("kvm"), "Disable KVM access");
+  ok(!!ken && !ken.disabled && !!kdis && kdis.disabled, "Enable KVM access live, Disable greyed with its reason");
+  ok(/only to \/dev\/kvm and \/dev\/vhost-vsock/.test(row("kvm").querySelector(".cdbx-cus-sec").textContent) &&
+     /docs\/cowork\.md/.test(row("kvm").querySelector(".cdbx-cus-sec").textContent), "with the KVM security text");
+  const kpk = row("kvm").querySelector('.cdbx-cus-pk[data-verb="enable"][data-access="kvm"]');
+  const kwhat = kpk && kpk.querySelector("details.cdbx-cus-what");
+  const kwp = kwhat ? pres(kwhat) : [];
+  ok(!!kpk && pres(kpk)[0] === KPK_EN.command && /^Enable KVM access runs this command/.test(kpk.querySelector(".cdbx-note").textContent),
+     "the exact KVM command main runs");
+  ok(!!kwhat && kwhat.open === false && kwp.indexOf(KPK_EN.link + " -> " + KPK_EN.target) >= 0 && kwp.indexOf(KPK_EN.rule) >= 0 &&
+     kwp.indexOf(KPK_EN.mlink + " -> " + KPK_EN.mtarget) >= 0 && kwp.indexOf(KPK_EN.apply) >= 0 && kwp.indexOf(KPK_EN.undo) >= 0 &&
+     kwp.indexOf(KPK_EN.undoManual) >= 0 && /restart it afterwards/.test(kwhat.textContent),
+     "What this does: both links, the rule, modprobe + udev, the restart note and the undo: " + kwp.join(" || ").replace(/\n/g, " / "));
+  ok(pres(row("kvm")).indexOf("sudo usermod -aG kvm \"$USER\"") >= 0 && /no logind/.test(row("kvm").textContent),
+     "the kvm group as the manual alternative without a local seat");
+  ok(!btn(row("tpm"), "Enable KVM access") && !!row("tpm"), "the KVM actions never appear on the TPM row");
+  window.__cusKvmEnable = { ok: true, changed: true, message: "cdb-kvm-access: enabled (a -> b; c -> d)" };
+  const readsBeforeK = window.__cusCalls.read;
+  ken.click();
+  await sleep(60);
+  ok(window.__cusCalls.kvmEnable === 1 && window.__cusCalls.enable === 0, "Enable calls cuStatusKvmEnable once, with no argument, not the TPM channel");
+  ok(window.__cusCalls.read === readsBeforeK + 1 && /cdb-kvm-access: enabled/.test(toastText()), "then re-reads and toasts the helper's line: " + toastText());
+  window.__cusKvmEnable = { ok: false, code: "declined", error: "Enable was not confirmed", command: null };
+  btn(row("kvm"), "Enable KVM access").click();
+  await sleep(60);
+  ok(toastText() === "Not changed: Enable KVM access was not confirmed" && !panel.querySelector(".cdbx-cus-fail"), "declined: says so, no command block");
+  window.__cusKvmEnable = { ok: false, code: "helper-6", error: "cdb-kvm-access: links done, but modprobe vhost_vsock failed",
+    command: "sudo /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access enable" };
+  btn(row("kvm"), "Enable KVM access").click();
+  await sleep(60);
+  const kfail = row("kvm").querySelector(".cdbx-cus-fail");
+  ok(!!kfail && /modprobe vhost_vsock failed/.test(kfail.textContent) && !row("tpm").querySelector(".cdbx-cus-fail") &&
+     pres(row("kvm")).indexOf("sudo /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access enable") >= 0,
+     "a failed KVM Enable: the error and the command under the KVM row, not the TPM row");
+  // Restart after access was fixed (upstream caches its probe per run).
+  setState(LOCAL({ status: "action", fact: "accessible now - restart Claude so local Cowork can use it", note: "k" }), { vmRestart: true });
+  panel = await remount();
+  ok(!!btn(row("kvm"), "Restart now") && !btn(row("tpm"), "Restart now"), "vmRestart: Restart now on the KVM row only");
+  // NixOS / command variants, and an older preload without the KVM methods.
+  setState(LOCAL(), { kvmEnable: { kind: "nixos", text: "programs.claude-desktop-extra.kvmAccess.enable = true;" } });
+  panel = await remount();
+  ok(pres(row("kvm")).indexOf("programs.claude-desktop-extra.kvmAccess.enable = true;") >= 0 && !btn(panel, "Enable KVM access"), "NixOS: the module option, no button");
+  const savedKE = window.cdbExtra.cuStatusKvmEnable;
+  delete window.cdbExtra.cuStatusKvmEnable;
+  setState(LOCAL(), { kvmEnable: KPK_EN });
+  panel = await remount();
+  ok(!btn(panel, "Enable KVM access") && pres(row("kvm")).indexOf(KPK_EN.command) >= 0 && !!row("tpm"),
+     "an older preload without the KVM methods: the command to run, no button, the rest of the page intact");
+  window.cdbExtra.cuStatusKvmEnable = savedKE;
+  // 3P: main marks the device key and cloud rows; nothing TPM is offered.
+  setState(LOCAL(), {});
+  window.__cusState.mode = "3p";
+  window.__cusState.rows.tpm = { status: "na", fact: "Not used in 3P mode", note: "n" };
+  window.__cusState.rows.cloud = { status: "na", fact: "Not used in 3P mode", note: "n" };
+  panel = await remount();
+  ok(word("tpm") === "Not available" && row("tpm").querySelector(".cdbx-cus-fact").textContent === "Not used in 3P mode" &&
+     row("cloud").querySelector(".cdbx-cus-fact").textContent === "Not used in 3P mode" && !btn(panel, "Enable TPM access") &&
+     word("kvm") === "OK", "3P: Not used in 3P mode on the cloud section, the local VM section live");
+  {
+    const help = panel.querySelector("details.cdbx-cus-help");
+    const hl = help ? Array.prototype.map.call(help.querySelectorAll(":scope > div.cdbx-note:not(.cdbx-cus-help-links)"), function (n) { return n.textContent; }) : [];
+    const links = help ? Array.prototype.map.call(help.querySelectorAll("a"), function (a) { return a.getAttribute("href"); }) : [];
+    ok(hl.length === 2 && /^Local: the VM on this computer/.test(hl[0]) && hl[1] === "Cloud Cowork is not available in 3P mode." &&
+       links.length === 1 && /docs\/cowork\.md#how-cowork-chooses-cloud-or-local$/.test(links[0]) && !/admin-settings/.test(help.textContent + links.join()),
+       "3P help: the local line, cloud not available, no admin links: " + hl.join(" | ") + " / " + links.join());
+  }
+  window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: PK_EN } };
+}
+
+// The deep link (window.__cdbExtraOpen, used by the Cowork header icon): with
+// the settings dialog mounted it opens Cowork (Linux) at the asked section;
+// without it, it asks main to navigate (cdb-extra:open-settings) and the next
+// mount within 10 s finishes the job; a stale pending entry is dropped; a
+// failed navigation says where to go by hand.
+async function deepLink() {
+  function toastText() { const t = document.querySelector(".cdbx-toast"); return t ? t.textContent : ""; }
+  function h1() { const n = document.querySelector(".cdbx-panel .cdbx-h1"); return n ? n.textContent : ""; }
+  function focusedSection() {
+    const a = document.activeElement;
+    const w = a && a.closest ? a.closest("[data-cdbx-section]") : null;
+    return a && a.classList && a.classList.contains("cdbx-sec-h") && w ? w.getAttribute("data-cdbx-section") : null;
+  }
+  ok(typeof window.__cdbExtraOpen === "function", "the page defines window.__cdbExtraOpen");
+  if (typeof window.__cdbExtraOpen !== "function") return;
+  window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: window.__cusPkEnable } };
+  window.__openCalls = 0;
+  window.cdbExtra.extraOpenSettings = function () { window.__openCalls += arguments.length ? 100 : 1; return Promise.resolve(window.__openAnswer || { ok: true }); };
+
+  // mounted: opens at once, scrolled to the section, its heading focused
+  document.getElementById("row-account").click();
+  await sleep(20);
+  let r = window.__cdbExtraOpen("cu", "local");
+  await sleep(60);
+  ok(r === true && h1() === "Cowork (Linux)" && focusedSection() === "local" && window.__openCalls === 0,
+     "mounted: opens Cowork (Linux) at the Local Cowork VM section without asking main: " + [r, h1(), focusedSection(), window.__openCalls].join("|"));
+  r = window.__cdbExtraOpen("cu", "cloud");
+  await sleep(60);
+  ok(r === true && focusedSection() === "cloud", "and at the Cloud Cowork section: " + focusedSection());
+  r = window.__cdbExtraOpen("cu", "<img src=x>");
+  await sleep(60);
+  ok(r === true && h1() === "Cowork (Linux)" && focusedSection() === null, "an unknown section opens the page at the top");
+  ok(window.__cdbExtraOpen("nope", "cu") === false && window.__cdbExtraOpen("", "") === false, "an unknown kind is refused");
+
+  // not mounted: main navigates, the next mount opens the section. Upstream
+  // renders a NEW dialog each time settings opens: a clean clone stands in.
+  document.getElementById("row-account").click();
+  await sleep(20);
+  let dlg = document.querySelector('[role="dialog"]');
+  const host = dlg.parentNode;
+  const blank = dlg.cloneNode(true);
+  Array.prototype.forEach.call(blank.querySelectorAll(".cdbx-group,.cdbx-item,.cdbx-panel"), function (n) { n.remove(); });
+  function close() { const d = document.querySelector('[role="dialog"]'); if (d) d.remove(); }
+  function mount() { host.appendChild(blank.cloneNode(true)); }
+  close();
+  await sleep(40);
+  window.cdbExtra.extraOpenSettings = function () {
+    window.__openCalls += arguments.length ? 100 : 1;
+    mount(); // what upstream's settings route does: a settings dialog mounts
+    return Promise.resolve({ ok: true });
+  };
+  r = window.__cdbExtraOpen("cu", "cu");
+  ok(r === true && !!window.__cdbExtraPending && window.__cdbExtraPending.kind === "cu" && window.__cdbExtraPending.section === "cu",
+     "not mounted: a pending entry is queued");
+  await sleep(400);
+  ok(window.__openCalls === 1 && h1() === "Cowork (Linux)" && focusedSection() === "cu" && window.__cdbExtraPending === null,
+     "main is asked once with no argument; the mount opens the Computer Use section and clears the entry: " +
+     [window.__openCalls, h1(), focusedSection()].join("|"));
+
+  // a stale pending entry is dropped on the next mount
+  close();
+  await sleep(40);
+  window.__cdbExtraPending = { kind: "cu", section: "local", at: Date.now() - 20000 };
+  mount();
+  await sleep(400);
+  ok(!!document.querySelector(".cdbx-item") && !document.querySelector(".cdbx-panel") && window.__cdbExtraPending === null,
+     "a pending entry older than 10 s is ignored and cleared");
+
+  // navigation unavailable: toast the manual path, clear the entry
+  close();
+  await sleep(40);
+  window.cdbExtra.extraOpenSettings = function () { return Promise.resolve({ ok: false, error: "settings navigation unavailable" }); };
+  r = window.__cdbExtraOpen("cu", "local");
+  await sleep(60);
+  ok(r === true && toastText() === "Open Settings -> Extra -> Cowork (Linux)" && window.__cdbExtraPending === null,
+     "navigation unavailable: the manual path as a toast: " + toastText());
+  delete window.cdbExtra.extraOpenSettings;
+  ok(window.__cdbExtraOpen("cu", "local") === false && toastText() === "Open Settings -> Extra -> Cowork (Linux)",
+     "an older preload without the bridge method: false, and the manual path");
+  mount();
+  await sleep(300);
 }
 
 async function modelsPanel(modelsItem) {
@@ -2307,6 +2766,7 @@ async function deployPanel(deployItem) {
   const clearAll = panel.querySelector(".cdbx-sec-act");
   ok(!!clearAll, "the configuration section has a clear-all button");
   ok(!clearAll.classList.contains("cdbx-hide"), "shown, because keys are set");
+  headlineContract(panel, "Deployment page");
   const count = panel.querySelector(".cdbx-sec-h .cdbx-sec-n").textContent;
   ok(/^\d+ set$/.test(count), "next to how many keys are set: " + count);
   clearAll.click();
@@ -2399,6 +2859,17 @@ async function themesPanel(themesItem) {
   ok(!document.querySelector(".cdbx-panel .cdbx-switch[aria-label=\"show the Code tab's side panels as tabs instead of a split layout\"]"),
      "the panel tabs switch is NOT in the Themes panel");
 
+  headlineContract(document.querySelector(".cdbx-sections"), "Themes gallery");
+  {
+    const h = document.querySelector(".cdbx-sections .cdbx-sec-h");
+    const before = document.querySelector(".cdbx-panel").innerHTML.replace(/ cdbx-sheen-play/g, "");
+    h.querySelector(".cdbx-sec-t").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(h.classList.contains("cdbx-sheen-play"), "a click on a headline label adds cdbx-sheen-play");
+    ok(document.querySelector(".cdbx-panel").innerHTML.replace(/ cdbx-sheen-play/g, "") === before &&
+       document.querySelectorAll(".cdbx-sheen-play").length === 1, "and changes nothing else");
+    h.dispatchEvent(new window.Event("animationend"));
+    ok(!h.classList.contains("cdbx-sheen-play"), "animationend removes it again");
+  }
   const secs = sections();
   ok(labels() === "Your themes:1 | Gaming:3 | Common:5 | More:1",
      "section order and counts: " + labels());
@@ -2810,9 +3281,12 @@ async function run() {
       await featuresPanel(items[1]);
       await cubgPanel(items[2]);
       await cusPanel(items[2]);
+      await escTwoPages(items[1], items[2]);
       await modelsPanel(items[3]);
       await flagsPanel(items[4]);
       await deployPanel(items[5]);
+      // Last: it re-mounts the nav, so the items above are stale afterwards.
+      await deepLink();
     }
     return;
   }
@@ -3169,12 +3643,29 @@ window.__cusPkDisable = { kind: "pkexec",
   command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access disable",
   link: "/etc/udev/rules.d/70-claude-desktop-extra-tpm.rules",
   apply: "udevadm control --reload\\nudevadm trigger --action=change --subsystem-match=tpmrm" };
+window.__cusKvmPkEnable = { kind: "pkexec",
+  command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access enable",
+  link: "/etc/udev/rules.d/70-claude-desktop-extra-kvm.rules",
+  apply: "modprobe vhost_vsock\\nudevadm control --reload\\nudevadm trigger --action=change --subsystem-match=misc --sysname-match=kvm --sysname-match=vhost-vsock",
+  mlink: "/etc/modules-load.d/claude-desktop-extra-vsock.conf",
+  target: "/usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-kvm.rules",
+  rule: 'SUBSYSTEM=="misc", KERNEL=="kvm", ACTION!="remove", TAG+="uaccess"\\nSUBSYSTEM=="misc", KERNEL=="vhost-vsock", ACTION!="remove", TAG+="uaccess"',
+  mtarget: "/usr/lib/claude-desktop/resources/linux-udev/claude-desktop-extra-vsock.conf",
+  mconf: "vhost_vsock",
+  undo: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access disable",
+  undoManual: "sudo rm -f /etc/udev/rules.d/70-claude-desktop-extra-kvm.rules /etc/modules-load.d/claude-desktop-extra-vsock.conf && sudo udevadm control --reload" };
+window.__cusKvmPkDisable = { kind: "pkexec",
+  command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access disable",
+  link: "/etc/udev/rules.d/70-claude-desktop-extra-kvm.rules", apply: "udevadm control --reload",
+  mlink: "/etc/modules-load.d/claude-desktop-extra-vsock.conf" };
+window.__cusKvmEnable = { ok: true, changed: true, message: "cdb-kvm-access: enabled" };
+window.__cusKvmDisable = { ok: true, changed: true, message: "cdb-kvm-access: disabled" };
 window.__cuAxState = { ok: true, enabled: false, lockedByJsonc: null };
 window.__cuAskState = { ok: true, enabled: true, lockedByJsonc: null };
 window.__cuAskSets = [];
 window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: window.__cusPkEnable, tpmDisable: null,
   restart: false, resetScreenSharing: false, tssCommand: null } };
-window.__cusCalls = { read: 0, enable: 0, disable: 0, reset: 0 };
+window.__cusCalls = { read: 0, enable: 0, disable: 0, reset: 0, kvmEnable: 0, kvmDisable: 0 };
 window.__cusEnable = { ok: true, changed: true, message: "cdb-tpm-access: enabled (/etc/udev/rules.d/70-claude-desktop-extra-tpm.rules -> /usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-tpm.rules)" };
 window.__cusDisable = { ok: true, changed: true, message: "cdb-tpm-access: disabled" };
 window.__cusReset = { ok: true, lines: ["KWin screen sharing: forgot the remembered choice."] };
@@ -3301,6 +3792,14 @@ window.cdbExtra = {
   // Wake Auto-fix sessions when a PR is ready to merge: opt-in, live.
   autoFixMergeReadyRead: function () { return Promise.resolve(window.__afmrState || { ok: true, enabled: false, lockedByJsonc: null }); },
   autoFixMergeReadySet: function (enabled) { window.__afmrCalls = (window.__afmrCalls || []).concat([enabled]); return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/afmr.json" }); },
+  // Escape stops Computer Use: the one Computer Use row in Community Features (opt-in).
+  cuEscRead: function () { return Promise.resolve(window.__cuEscState || { ok: true, enabled: false, lockedByJsonc: null }); },
+  cuEscSet: function (enabled) {
+    window.__cuEscCalls = (window.__cuEscCalls || []).concat([enabled]);
+    // One stored setting behind both rows (Community Features and Computer Use).
+    window.__cuEscState = { ok: true, enabled: enabled === true, lockedByJsonc: null };
+    return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/cu-esc.json" });
+  },
   pickerRead: function () { return Promise.resolve(window.__pickerState); },
   pickerSet: function (enabled) {
     window.__pickerCalls.push(enabled);
@@ -3373,6 +3872,8 @@ window.cdbExtra = {
   cuStatusTpmEnable: function () { window.__cusCalls.enable += arguments.length ? 100 : 1; return Promise.resolve(window.__cusEnable); },
   cuStatusTpmDisable: function () { window.__cusCalls.disable += arguments.length ? 100 : 1; return Promise.resolve(window.__cusDisable); },
   cuStatusResetScreenSharing: function () { window.__cusCalls.reset += arguments.length ? 100 : 1; return Promise.resolve(window.__cusReset); },
+  cuStatusKvmEnable: function () { window.__cusCalls.kvmEnable = (window.__cusCalls.kvmEnable || 0) + (arguments.length ? 100 : 1); return Promise.resolve(window.__cusKvmEnable); },
+  cuStatusKvmDisable: function () { window.__cusCalls.kvmDisable = (window.__cusCalls.kvmDisable || 0) + (arguments.length ? 100 : 1); return Promise.resolve(window.__cusKvmDisable); },
   diag: function (m) { diags.push(String(m)); return Promise.resolve({ ok: true }); }
 };
 </script>
@@ -3427,10 +3928,10 @@ for (const [name, fixture] of scenarios) {
   try {
     // Virtual time, so the budget costs no wall clock: it only has to cover the
     // sum of the driver's sleep() calls in the longest scenario.
-    // 15 s since the background-display setup page tests (issue #300).
+    // 20 s: the background-display setup page tests (issue #300) and the Models link tests.
     dump = execFileSync(CHROMIUM, [
       "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
-      "--window-size=1000,700", "--virtual-time-budget=15000",
+      "--window-size=1000,700", "--virtual-time-budget=20000",
       "--dump-dom", "file://" + file
     ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {

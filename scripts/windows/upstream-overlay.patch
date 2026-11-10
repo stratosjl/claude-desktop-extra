@@ -1,5 +1,5 @@
 diff --git a/js/allow_non_anthropic_models.js b/js/allow_non_anthropic_models.js
-index c8ce7db..c8bbc7c 100644
+index dffbee5..1cabb5f 100644
 --- a/js/allow_non_anthropic_models.js
 +++ b/js/allow_non_anthropic_models.js
 @@ -34,7 +34,7 @@
@@ -12,7 +12,7 @@ index c8ce7db..c8bbc7c 100644
      return;
    }
 diff --git a/js/diff_views_main.js b/js/diff_views_main.js
-index dc7bb5d..aa85e3b 100644
+index 3214c79..93578a6 100644
 --- a/js/diff_views_main.js
 +++ b/js/diff_views_main.js
 @@ -97,7 +97,7 @@
@@ -24,7 +24,7 @@ index dc7bb5d..aa85e3b 100644
    if (globalThis.__cdbDiffViewsMain) return;
    globalThis.__cdbDiffViewsMain = true;
  
-@@ -719,12 +719,38 @@
+@@ -719,6 +719,27 @@
      return typeof e === "string" && e.indexOf(TRUNCATED_MARK) === 0;
    }
  
@@ -50,21 +50,26 @@ index dc7bb5d..aa85e3b 100644
 +  var WIN_GIT_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
 +
    // spawn-based collector: manual cap => clean truncation semantics.
-   function git(args, cwd, extraEnv, cb) {
-     var out = [], outLen = 0, errBuf = "", truncated = false, done = false;
-     var env = Object.assign({}, process.env, extraEnv || {});
+   //
+   // git is the ONE tool of ours treated the way upstream treats it: looked up
+@@ -741,7 +762,15 @@
+     var t = globalThis.__cdbToolPath;
+     var env = Object.assign({}, (t && t.appEnv()) || process.env, extraEnv || {});
      var child;
--    try { child = _cp.spawn("git", args, { cwd: cwd, env: env, stdio: ["ignore", "pipe", "pipe"] }); }
-+    var bin = gitBin();
+-    try { child = _cp.spawn(gitCmd(), args, { cwd: cwd, env: env, stdio: ["ignore", "pipe", "pipe"] }); }
++    // WIN and gitBin live above this collector; upstream's tool-path harness
++    // runs the collector on its own, without them.
++    var win = typeof WIN !== "undefined" && WIN;
++    var bin = win ? gitBin() : gitCmd();
 +    if (!bin) return cb("git.exe not found on PATH");
 +    try {
-+      child = _cp.spawn(bin, WIN ? WIN_GIT_CONFIG.concat(args) : args,
++      child = _cp.spawn(bin, win ? WIN_GIT_CONFIG.concat(args) : args,
 +        { cwd: cwd, env: env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 +    }
      catch (e) { return cb(String(e && e.message || e)); }
      var timer = setTimeout(function () { try { child.kill("SIGKILL"); } catch (e) {} }, GIT_TIMEOUT_MS);
      child.stdout.on("data", function (d) {
-@@ -854,6 +880,9 @@
+@@ -871,6 +900,9 @@
    function isSafeRelPath(p) {
      if (!isNonEmptyString(p)) return false;
      if (p.charAt(0) === "-" || p.charAt(0) === "/") return false;
@@ -75,10 +80,10 @@ index dc7bb5d..aa85e3b 100644
      // pathological; spaces are deliberately ALLOWED, because "my notes.md" is an
      // ordinary tracked file and rejecting it would drop that one file back to the
 diff --git a/js/extra_settings_main.js b/js/extra_settings_main.js
-index 4281495..1819684 100644
+index fff8dae..027d22e 100644
 --- a/js/extra_settings_main.js
 +++ b/js/extra_settings_main.js
-@@ -349,6 +349,8 @@
+@@ -628,6 +628,8 @@
    function __cdbEx_3pDir() {
      var ud = _app.getPath("userData");
      if (process.env.CLAUDE_USER_DATA_DIR) return ud;
@@ -88,35 +93,29 @@ index 4281495..1819684 100644
    }
  
 diff --git a/js/extra_settings_page.js b/js/extra_settings_page.js
-index e265f82..a3ef789 100644
+index 6dddbe0..10d21c6 100644
 --- a/js/extra_settings_page.js
 +++ b/js/extra_settings_page.js
-@@ -563,10 +563,10 @@
+@@ -576,12 +576,12 @@
      { kind: "flags", label: "Anthropic", icon: ICON_FLAGS, tooltip: "Anthropic Features" },
      { kind: "deploy", label: "Deployment", icon: ICON_DEPLOY }
    ];
 -  // On Windows (a downstream Windows build of this patch set) only custom
 -  // models is carried: the other panels drive Linux-only patches or Linux
--  // paths (/etc/claude-desktop) that do not exist there.
+-  // paths (/etc/claude-desktop) that do not exist there. Computer Use is one of
+-  // them: every cdb-cu-status / cdb-cubg / cdb-cu-ax / cdb-cu-ask channel answers "Linux
+-  // only" on win32, so the page would hold nothing.
 -  var WINDOWS_NAV = { models: true };
 +  // On Windows (a downstream Windows build of this patch set) the Deployment
 +  // panel is left out: it reads and writes /etc/claude-desktop, while Windows
 +  // takes managed settings from the registry (SOFTWARE\Policies\Claude).
++  // Computer Use is left out too: every cdb-cu-status / cdb-cubg / cdb-cu-ax /
++  // cdb-cu-ask channel answers "Linux only" on win32, so the page would hold nothing.
 +  var WINDOWS_NAV = { themes: true, features: true, models: true, flags: true };
    if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
      NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
    }
-@@ -1923,7 +1923,8 @@
-         "list. For 3P/gateway users who route to non-Anthropic models through their own gateway; " +
-         "with it off, those routes are silently removed and the session falls back to the default " +
-         "model. The setting is per mode: set it while in 3P mode, where it is saved in " +
--        "~/.config/Claude-3p. Takes effect after a restart - the model list is built at startup.",
-+        "%LOCALAPPDATA%\\Claude-3p (a --profile keeps both modes in its own folder). Takes effect after a " +
-+        "restart - the model list is built at startup.",
-       ariaLabel: "allow non-Anthropic models from a third-party gateway in the model list",
-       read: "allowNonAnthropicModelsRead",
-       write: "allowNonAnthropicModelsSet",
-@@ -2318,8 +2319,8 @@
+@@ -2919,8 +2919,8 @@
    function restartButton() {
      var restart = el("button", "cdbx-btn", "Restart now");
      restart.type = "button";
@@ -127,23 +126,35 @@ index e265f82..a3ef789 100644
      restart.addEventListener("click", function () {
        restart.disabled = true;
        restart.textContent = "Restarting...";
-@@ -2798,6 +2799,15 @@
-     renderDevToolsRow,
-     renderCuBackgroundRow
+@@ -3683,6 +3683,27 @@
+       renderCuEscapeAbortRow
+     ] }
    ];
 +  // The Windows build ships these rows' patches. Window controls, the native
 +  // titlebar and window transparency are Linux window handling (Windows draws
 +  // its own caption buttons), and a row added upstream stays hidden here until
-+  // its patch is ported and listed.
++  // its patch is ported and listed. A group left with no row is dropped.
 +  if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
 +    var WINDOWS_ROWS = [renderDiffViewsRow, renderPanelTabsRow, renderFilesQuickOpenRow, renderCustomModelsRow,
 +      renderAllowNonAnthropicModelsRow, renderTranscriptLimitsRow, renderThemePickerRow, renderDevToolsRow];
-+    FEATURE_ROWS = FEATURE_ROWS.filter(function (r) { return WINDOWS_ROWS.indexOf(r) >= 0; });
++    var keepWindowsRows = function (items) {
++      var out = [];
++      items.forEach(function (it) {
++        if (typeof it === "function") {
++          if (WINDOWS_ROWS.indexOf(it) >= 0) out.push(it);
++          return;
++        }
++        var kept = keepWindowsRows(it.items);
++        if (kept.length) out.push(Object.assign({}, it, { items: kept }));
++      });
++      return out;
++    };
++    FEATURE_GROUPS = keepWindowsRows(FEATURE_GROUPS);
 +  }
  
    function renderFeatures(panel) {
      clear(panel);
-@@ -3209,7 +3219,7 @@
+@@ -4129,7 +4150,7 @@
  
  
        var files = el("div", "cdbx-note cdbx-models-files",
@@ -152,7 +163,7 @@ index e265f82..a3ef789 100644
          "Routing changes (a key, a model, a provider) reach open sessions at once through " + (st.paths && st.paths.routes) +
          ". New models show in the picker after the Code tab reloads. Sub-agent types, the default sub-agent " +
          "model, the small/fast model and the system-prompt line are handed to each session as it opens. A " +
-@@ -3526,7 +3536,7 @@
+@@ -4446,7 +4467,7 @@
        var url = field(form, "Base URL", input("text", existing ? existing.baseUrl : "", "https://api.example.com/anthropic"),
          "The Anthropic-compatible endpoint; /v1/messages is appended.");
        var key = field(form, "API key", input("password", "", existing && existing.keyOk ? "stored - type to replace" : "API key"),
@@ -161,7 +172,7 @@ index e265f82..a3ef789 100644
        var modelsUrl = field(form, "Models list URL", input("text", existing ? existing.modelsUrl || "" : "", "optional - found automatically"),
          "Where the provider lists its models (GET, OpenAI or Anthropic shape), on the base URL's host - the key " +
          "goes nowhere else. Left empty, fetch models tries the preset's address, then <base URL>/v1/models, " +
-@@ -3745,9 +3755,8 @@
+@@ -4665,9 +4686,8 @@
      var notice = el("div", "cdbx-notice");
      notice.appendChild(el("div", "cdbx-notice-title", "Changes here require a restart of Claude Desktop"));
      notice.appendChild(el("div", "cdbx-notice-body",
@@ -174,7 +185,7 @@ index e265f82..a3ef789 100644
      notice.appendChild(restart);
      panel.appendChild(notice);
 diff --git a/js/files_quick_open_main.js b/js/files_quick_open_main.js
-index eb26a4d..548a698 100644
+index a724043..d43f9db 100644
 --- a/js/files_quick_open_main.js
 +++ b/js/files_quick_open_main.js
 @@ -13,7 +13,7 @@
@@ -253,7 +264,7 @@ index de45ab3..3e35ef8 100644
      try { ctx.onPreview(abs, line); }
      catch (e) { warnOnce("onpreview-threw", "onPreview threw: " + ((e && e.message) || e)); hint("Could not open " + it.rel); return; }
 diff --git a/js/panel_tabs_main.js b/js/panel_tabs_main.js
-index 7112875..1f4f399 100644
+index ddd96fb..4701d1d 100644
 --- a/js/panel_tabs_main.js
 +++ b/js/panel_tabs_main.js
 @@ -13,7 +13,7 @@
@@ -279,7 +290,7 @@ index 4b52bff..ad7c98b 100644
      }
      Promise.all([window.cdbThemes.list(), window.cdbThemes.active()]).then(function (res) {
 diff --git a/js/transcript_limits_main.js b/js/transcript_limits_main.js
-index 6a0a445..014f9cc 100644
+index 7f8b2ec..e944ca0 100644
 --- a/js/transcript_limits_main.js
 +++ b/js/transcript_limits_main.js
 @@ -54,7 +54,7 @@
@@ -292,7 +303,7 @@ index 6a0a445..014f9cc 100644
    globalThis.__cdbTranscriptLimitsMain = true;
  
 diff --git a/patches/Makefile b/patches/Makefile
-index 3b57d3b..f587074 100644
+index 6c70201..cc483c3 100644
 --- a/patches/Makefile
 +++ b/patches/Makefile
 @@ -1,9 +1,10 @@
@@ -316,15 +327,107 @@ index 3b57d3b..f587074 100644
  BINS := $(SRCS:.nim=)
  
  ifeq ($(strip $(SRCS)),)
-@@ -144,5 +145,8 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
- # .jsonc template at runtime.
- core/add_growthbook_overrides: ../js/growthbook_overrides.js
+@@ -177,5 +178,8 @@ core/add_tool_path_resolver: ../js/tool_path.js
+ 
+ linux/fix_open_external_tool_path: ../js/open_external_tool_path.js
  
 +# Windows build only: profile selection and sign-in callback routing.
 +windows/add_windows_profiles: ../js/windows_profiles_main.js
 +
  clean:
  	@rm -rf $(BINS) .nimcache
+diff --git a/patches/community/add_feature_allow_non_anthropic_models.nim b/patches/community/add_feature_allow_non_anthropic_models.nim
+index f16abb7..941110f 100644
+--- a/patches/community/add_feature_allow_non_anthropic_models.nim
++++ b/patches/community/add_feature_allow_non_anthropic_models.nim
+@@ -86,6 +86,16 @@ const EXPECTED_PATCHES = 5
+   # A module, B validator, C discovery, D tier pin, E setup-window signal
+ const GUARD_SITES = 4 # B, C, D, E
+ 
++# Windows 5.1231.0: the discovery rows are no longer filtered - every row with
++# a parsable id is kept, Anthropic or not, so site C has nothing to guard. This
++# is the positive shape of that unfiltered flatMap (it returns the row list
++# straight after the tier lookup); a guarded or filtered site never matches it.
++const C_UNFILTERED =
++  re2"""Gateway /v1/models returned an unexpected body\..{0,100}?.{0,100}?.{0,100}?\.data\.flatMap\(\([\w$]+=>[{]let [\w$]+=[\w$]+\?[\w$]+\([\w$]+\.id\):void 0;if\(![\w$]+\|\|![\w$]+\)return\[\];let [\w$]+=[\w$]+\([\w$]+\.anthropic_family_tier\);return\[[{]"""
++
++proc discoveryUnfiltered(s: string): bool =
++  findAll(s, C_UNFILTERED).len == 1
++
+ proc endState(s: string): array[5, int] =
+   [
+     s.count(MARKER),
+@@ -95,6 +105,13 @@ proc endState(s: string): array[5, int] =
+     s.count(MARK_E & "(" & GUARD & "?{..."),
+   ]
+ 
++# The patched end state: site C's guard only where upstream still filters.
++proc wantState(s: string): array[5, int] =
++  if discoveryUnfiltered(s): [1, 1, 0, 1, 1] else: [1, 1, 1, 1, 1]
++
++proc wantGuards(s: string): int =
++  if discoveryUnfiltered(s): GUARD_SITES - 1 else: GUARD_SITES
++
+ proc apply*(input: string): string =
+   result = input
+ 
+@@ -103,9 +120,9 @@ proc apply*(input: string): string =
+   # text must appear nowhere else (AGENTS.md Rule 6).
+   let have = endState(result)
+   let guardTotal = result.count(GUARD)
+-  if have == [1, 1, 1, 1, 1] and guardTotal == GUARD_SITES and
++  if have == wantState(result) and guardTotal == wantGuards(result) and
+       result.count(ION_FLAG) == 1:
+-    echo "  [OK] allow-non-anthropic-models: module and all 4 guards already present (idempotent)"
++    echo &"  [OK] allow-non-anthropic-models: module and all {guardTotal} guards already present (idempotent)"
+     return
+   if have != [0, 0, 0, 0, 0] or guardTotal != 0 or result.count(ION_FLAG) != 0:
+     echo &"  [FAIL] allow-non-anthropic-models: half-patched bundle (module x{have[0]}, validator x{have[1]}, discovery x{have[2]}, tier-pin x{have[3]}, setup-window x{have[4]}, guard text x{guardTotal}) - re-audit"
+@@ -135,15 +152,20 @@ proc apply*(input: string): string =
+       inc n
+       s[m.group(0)] & "!(" & MARK_C & GUARD & "||" & s[m.group(1)] & ")" & s[m.group(2)],
+   )
+-  if n != 1:
++  if n == 0 and discoveryUnfiltered(result):
++    echo "  [OK] C gateway /v1/models discovery: upstream keeps non-Anthropic rows (no filter left), nothing to guard"
++  elif n != 1:
+     echo &"  [FAIL] allow-non-anthropic-models: C gateway /v1/models discovery filter matched {n}/1 - re-audit"
+     quit(1)
+-  echo "  [OK] C gateway /v1/models discovery: guard added"
++  else:
++    echo "  [OK] C gateway /v1/models discovery: guard added"
+ 
+   # D. [custom-3p] tier-pin sanitizer, gateway branch, pinned by its warning.
++  # The warning goes out as `P.warn(...)` (4.23118) or through the sanitizer's
++  # reporter callback `r(...)` (Windows 5.1231.0); the guarded test is the same.
+   n = 0
+   result = result.replace(
+-    re2"""(if\(![\w$]+\)[{]if\()([\w$]+\([\w$]+\)&&![\w$]+\([\w$]+\)\)[{][\w$]+\.warn\(["`]\[custom-3p\] \$[{][\w$]+[}]: value matches a known non-Anthropic model fragment; ignoring\.)""",
++    re2"""(if\(![\w$]+\)[{]if\()([\w$]+\([\w$]+\)&&![\w$]+\([\w$]+\)\)[{][\w$]+(?:\.warn)?\(["`]\[custom-3p\] \$[{][\w$]+[}]: value matches a known non-Anthropic model fragment; ignoring\.)""",
+     proc(m: RegexMatch2, s: string): string =
+       inc n
+       s[m.group(0)] & "!" & MARK_D & GUARD & "&&" & s[m.group(1)],
+@@ -195,9 +217,9 @@ proc apply*(input: string): string =
+   for c in after:
+     if c == 1:
+       inc applied
+-  if applied < EXPECTED_PATCHES or result.count(GUARD) != GUARD_SITES or
++  if after != wantState(result) or result.count(GUARD) != wantGuards(result) or
+       result.count(ION_FLAG) != 1:
+-    echo &"  [FAIL] Only {applied}/{EXPECTED_PATCHES} allow-non-anthropic-models parts present exactly once after patching (guard text x{result.count(GUARD)}, want {GUARD_SITES})"
++    echo &"  [FAIL] Only {applied}/{EXPECTED_PATCHES} allow-non-anthropic-models parts present exactly once after patching (guard text x{result.count(GUARD)}, want {wantGuards(result)})"
+     quit(1)
+ 
+ when isMainModule:
+@@ -216,7 +238,7 @@ when isMainModule:
+     writeFile(filePath, output)
+     echo &"  [PASS] allow non-Anthropic models applied ({EXPECTED_PATCHES}/{EXPECTED_PATCHES} parts)"
+   else:
+-    if endState(output) != [1, 1, 1, 1, 1]:
++    if endState(output) != wantState(output):
+       echo "  [FAIL] No changes made and the patched end-state is absent"
+       quit(1)
+     echo "  [OK] Already applied (no changes needed)"
 diff --git a/patches/community/add_feature_theme_picker.nim b/patches/community/add_feature_theme_picker.nim
 index daeb9f4..34ee2ea 100644
 --- a/patches/community/add_feature_theme_picker.nim
@@ -387,8 +490,27 @@ index ede612a..38a4dbf 100644
  var __cdb_parseFailed=false;
  var __cdb_readCfg=function(p){var r=__cdb_readRaw(p);if(r===null)return null;try{return JSON.parse(__cdb_stripJsonc(r))}catch(e){__cdb_parseFailed=true;__cdb_log("Error parsing "+p+": "+e.message);return null}};
  // One theme per file from themes.d/. A file is either the theme object itself (name =
+diff --git a/patches/core/add_feature_extra_settings.nim b/patches/core/add_feature_extra_settings.nim
+index f03ea70..0c45304 100644
+--- a/patches/core/add_feature_extra_settings.nim
++++ b/patches/core/add_feature_extra_settings.nim
+@@ -305,6 +305,14 @@ proc apply*(input: string): string =
+     elif landed.len > 1:
+       echo "  [FAIL] VM probe capture: " & $landed.len & " end-state hits (expected 1)"
+       quit(1)
++    elif findAll(result, re2"""[{,]qemuPath:[\w$]+[,}]""").len == 0 and
++        findAll(result, re2"""[{,]virtiofsdPath:[\w$]+[,}]""").len == 0:
++      # The Windows package (5.1231.0) has no QEMU backend: no minified object
++      # carries a qemu or virtiofsd path at all (sub-patch A's module names
++      # them only with spaces or in calls). Its only consumer, the Linux
++      # Computer Use status page, answers "Linux only" on win32.
++      echo "  [OK] VM probe capture: no QEMU/virtiofsd probe in this bundle (Windows package), nothing to publish"
++      patchesApplied.inc
+     else:
+       # Groups: 0 the cache assigned, 1 the cache the IIFE returns, 2 the memo,
+       # 3 the getter, 4 the cache the getter returns. 0, 1 and 4 must agree.
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
-index a0e9aaf..5eb8236 100644
+index e6126bd..a3f8ab6 100644
 --- a/scripts/apply_patches.py
 +++ b/scripts/apply_patches.py
 @@ -11,7 +11,11 @@ target location.
@@ -406,7 +528,7 @@ index a0e9aaf..5eb8236 100644
  path that build-patched-tarball.sh uses as "$WORK_DIR/app".
 @@ -35,6 +39,37 @@ PATCH_SUBDIRS = ("linux", "core", "community")
  # remove a patch.
- EXPECTED_PATCH_COUNT = 59
+ EXPECTED_PATCH_COUNT = 72
  
 +# The Windows build (--windows). patches/windows/ holds the Windows-only
 +# patches; they are applied AFTER the shared ones (on a shared target, their
@@ -516,7 +638,7 @@ index a0e9aaf..5eb8236 100644
      nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
  
 diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
-index 9d86671..50d0d56 100755
+index c8f5677..142d7f8 100755
 --- a/scripts/run-feature-tests.sh
 +++ b/scripts/run-feature-tests.sh
 @@ -1,5 +1,5 @@
@@ -534,7 +656,7 @@ index 9d86671..50d0d56 100755
  
  set -uo pipefail
  
-@@ -34,17 +35,25 @@ EXPECTED_TEST_HARNESSES=56
+@@ -34,17 +35,25 @@ EXPECTED_TEST_HARNESSES=82
  CATEGORIES=(community core linux)
  
  usage() {
@@ -563,10 +685,10 @@ index 9d86671..50d0d56 100755
      echo "[ERROR] node is required to run the feature test harnesses" >&2
      exit 1
 diff --git a/scripts/tests/core/test-extra-settings-dom.mjs b/scripts/tests/core/test-extra-settings-dom.mjs
-index b3a9eea..908f428 100644
+index 771d79b..b59420e 100644
 --- a/scripts/tests/core/test-extra-settings-dom.mjs
 +++ b/scripts/tests/core/test-extra-settings-dom.mjs
-@@ -2142,12 +2142,30 @@ async function run() {
+@@ -3118,12 +3118,30 @@ async function run() {
    const box = navbox();
  
    // --- the Windows build: the page runs with navigator.platform "Win32" and

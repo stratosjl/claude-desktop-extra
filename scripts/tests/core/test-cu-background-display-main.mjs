@@ -33,6 +33,8 @@ import vm from "node:vm";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const MAIN_JS = process.env.CUBG_MAIN_JS || join(ROOT, "js", "extra_settings_main.js");
+// The core patch emits it ahead of the module above: the shared IPC sender guard.
+const GUARD_JS = join(ROOT, "js", "sender_guard.js");
 const BRIDGE_JS = process.env.CUBG_BRIDGE_JS || join(ROOT, "js", "extra_settings_bridge.js");
 // The executor's reader of the same key, for the cross-reader contract below.
 const PREAMBLE_JS = process.env.CU_PREAMBLE || join(ROOT, "js", "cu_mode_preamble.js");
@@ -140,6 +142,18 @@ const runAlias = join(base, "run-alias");
 symlinkSync(runtime, runAlias);
 const ownLink = join(base, "own-link");
 symlinkSync(join(runtime, "wayland-0"), ownLink);
+// A third runtime dir as the NixOS background-display module leaves it: a
+// stable-name symlink to the compositor's own socket (wayland-claude-extra ->
+// wayland-1), plus a dangling symlink, a symlink to a plain file and a symlink
+// to Claude's own socket.
+const runtime3 = join(base, "run3");
+mkdirSync(runtime3);
+await Promise.all([join(runtime3, "wayland-0"), join(runtime3, "wayland-1")].map(sock));
+symlinkSync("wayland-1", join(runtime3, "wayland-claude-extra"));
+symlinkSync("wayland-gone", join(runtime3, "wayland-dangling"));
+writeFileSync(join(runtime3, "plain"), "");
+symlinkSync("plain", join(runtime3, "wayland-tofile"));
+symlinkSync(join(runtime3, "wayland-0"), join(runtime3, "wayland-ownlink"));
 const OWN_ALIASES = [
   ["x11", ":00"], ["x11", ":098"], ["x11", ":0098"],
   ["wlroots", join(runAlias, "wayland-0")], ["wlroots", ownLink], ["wlroots", "/proc/self/root" + join(runtime, "wayland-0")]
@@ -159,7 +173,8 @@ process.resourcesPath = res;
 
 // --- load ----------------------------------------------------------------------
 function load({ platform } = {}) {
-  const src = readFileSync(MAIN_JS, "utf8").split('"/tmp/.X11-unix"').join(JSON.stringify(x11Dir));
+  const src = readFileSync(GUARD_JS, "utf8") +
+    readFileSync(MAIN_JS, "utf8").split('"/tmp/.X11-unix"').join(JSON.stringify(x11Dir));
   const dir = mkdtempSync(join(tmpdir(), "cdb-cubg-mod-"));
   const mod = join(dir, "extra.cjs");
   writeFileSync(mod, src);
@@ -768,6 +783,8 @@ section("cross-reader contract: the panel's verdict == the executor's (js/cu_mod
       ["symlink to own socket", W({ display: ownLink }), "own"],
       ["/proc/self/root alias of own socket", W({ display: "/proc/self/root" + join(runtime, "wayland-0") }), "own"],
       ["symlinked dir to another socket", W({ display: join(runAlias, "wayland-5") }), "valid wlroots " + join(runAlias, "wayland-5")],
+      ["stable-name symlink to another socket", W({ display: "wayland-claude-extra", env: { XDG_RUNTIME_DIR: runtime3 } }), "valid wlroots wayland-claude-extra"],
+      ["stable-name symlink to a plain file", W({ display: "wayland-tofile", env: { XDG_RUNTIME_DIR: runtime3 } }), "invalid"],
       ["wlroots socket not there yet", W({ display: "wayland-77" }), "valid wlroots wayland-77"],
       ["wlroots target not a socket", W({ display: join(runtime, "wayland-5.lock") }), "invalid"],
       ["x11 own", X({ display: ":98" }), "own"],
@@ -825,6 +842,67 @@ section("cross-reader contract: the panel's verdict == the executor's (js/cu_mod
   }
   writeFileSync(jsonPath, "{}");
   writeFileSync(jsoncPath, "{}\n");
+}
+
+section("candidates: stable-name symlinks (NixOS background display)");
+{
+  const hostRt = process.env.XDG_RUNTIME_DIR;
+  process.env.XDG_RUNTIME_DIR = runtime3;
+  const r = await m.call("cdb-cubg:candidates");
+  const wl = (r.candidates || []).filter((x) => x.kind === "wlroots");
+  const ids = wl.map((x) => x.display);
+  ok(JSON.stringify(ids) === JSON.stringify(["wayland-0", "wayland-1", "wayland-claude-extra", "wayland-ownlink"]),
+    "a symlink to a socket is listed next to its target; dangling and to-a-file symlinks are not", JSON.stringify(ids));
+  const link = wl.find((x) => x.display === "wayland-claude-extra");
+  ok(!!link && link.selectable === true && link.own === false,
+    "the stable name is selectable", JSON.stringify(link));
+  const ownLinkRow = wl.find((x) => x.display === "wayland-ownlink");
+  ok(!!ownLinkRow && ownLinkRow.own === true && ownLinkRow.selectable === false,
+    "a symlink to Claude's own socket is listed as your desktop, not selectable", JSON.stringify(ownLinkRow));
+  let s = await m.call("cdb-cubg:set", { enabled: true, kind: "wlroots", display: "wayland-claude-extra" });
+  ok(s.ok === true && readJson()[KEY] && readJson()[KEY].display === "wayland-claude-extra",
+    "the listed stable name is accepted when saved", JSON.stringify(s));
+  s = await m.call("cdb-cubg:set", { enabled: true, kind: "wlroots", display: "wayland-tofile" });
+  ok(refused(s) && /is not a Wayland socket/.test(s.error || ""), "a symlink to a plain file is refused when saved", JSON.stringify(s));
+  s = await m.call("cdb-cubg:set", { enabled: true, kind: "wlroots", display: "wayland-ownlink" });
+  ok(refused(s) && s.own === true, "a symlink to Claude's own socket is refused when saved", JSON.stringify(s));
+  await m.call("cdb-cubg:set", { enabled: false });
+  writeFileSync(jsonPath, "{}");
+  process.env.XDG_RUNTIME_DIR = hostRt;
+}
+
+section("tool lookups under upstream's PATH narrowing (shared resolver)");
+{
+  // Since 4.23118 process.env.PATH is upstream's narrowed one; the lists come
+  // from globalThis.__cdbToolPath (js/tool_path.js, tested in
+  // test-tool-path-resolver): the TOOL PATH for what Computer Use or this page
+  // runs (clipboard tools, xprop), the APP PATH for what the user starts from
+  // the recipes. A stand-in resolver answers here.
+  const toolDir = join(base, "tool-path"), appDir = join(base, "app-path");
+  mkdirSync(toolDir, { recursive: true }); mkdirSync(appDir, { recursive: true });
+  sh(join(toolDir, "wl-copy"), "exit 0\n"); sh(join(toolDir, "wl-paste"), "exit 0\n");
+  sh(join(appDir, "sway"), "exit 0\n"); sh(join(appDir, "wl-copy"), "exit 0\n"); sh(join(appDir, "xprop"), "exit 0\n");
+  const asked = [];
+  globalThis.__cdbToolPath = {
+    toolPath: () => { asked.push("tool"); return toolDir; },
+    appPath: () => { asked.push("app"); return appDir; }
+  };
+  try {
+    const r = await m.call("cdb-cubg:tools");
+    ok(r.ok && r.tools["wl-copy"] === join(toolDir, "wl-copy") && r.tools["wl-paste"] === join(toolDir, "wl-paste"),
+      "clipboard tools: looked up on the TOOL PATH (what the executor runs)", JSON.stringify(r.tools));
+    ok(r.tools.xprop === null && r.tools.xclip === null,
+      "xprop / xclip (run by us): not taken from the APP PATH or process.env.PATH", JSON.stringify(r.tools));
+    ok(r.tools.sway === join(appDir, "sway") && r.tools.Xvfb === null,
+      "recipe tools (the user starts them): looked up on the APP PATH", JSON.stringify(r.tools));
+    ok(asked.includes("tool") && asked.includes("app"), "both lists come from the resolver", JSON.stringify(asked));
+    globalThis.__cdbToolPath = { toolPath: () => null, appPath: () => null };
+    const r2 = await m.call("cdb-cubg:tools");
+    ok(r2.tools.Xvfb === join(bin, "Xvfb") && r2.tools.xclip === join(bin, "xclip"),
+      "narrowing off (appPath null): process.env.PATH, as before", JSON.stringify(r2.tools));
+  } finally {
+    delete globalThis.__cdbToolPath;
+  }
 }
 
 section("win32 build (downstream): channels refuse");

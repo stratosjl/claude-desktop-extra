@@ -21,11 +21,27 @@
  */
 
 .cdbx-navgroup {
-  background: linear-gradient(90deg, #ff5f6d, #ffa751, #f7e14b, #47d178, #4aa8ff, #a56cf0, #ff5f6d);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
+  /* Same first and last stop and a 200% wide ramp: the drift loops seamlessly. */
+  background: linear-gradient(90deg, #f2707a, #f0a463, #e8d765, #62c987, #63a9ee, #a982e6, #f2707a);
+  background-size: 200% 100%;
+  background-position: 0% 50%;
+  color: #c98fd8; /* fallback where background-clip:text is unsupported */
+  animation: cdbx-rainbow 7s linear infinite;
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .cdbx-navgroup {
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+@keyframes cdbx-rainbow { to { background-position: -200% 50%; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .cdbx-navgroup { animation: none; }
 }
 
 /* Fabricated group header only - the cloned header brings its own metrics. It
@@ -207,7 +223,88 @@
   margin-top: 2px;
 }
 
+/* Community Features groups: a headline with a one-line subtitle under it, and
+ * the Pull requests subgroup, which only sits a little quieter. */
+.cdbx-group > .cdbx-sec-h + .cdbx-sub {
+  margin: -3px 0 8px;
+}
+
+.cdbx-sec-h2 {
+  margin-top: 13px;
+  opacity: 0.45;
+}
+
+/* Every section/group headline on every Extra page (.cdbx-sec-h; ours only, the
+ * sidebar .cdbx-navgroup keeps its rainbow): accent-colored text with a periodic light sheen and a small accent bar, so they
+ * read as ours next to upstream's own muted section headings. The accent is the
+ * host's brand variable when present, else a fixed warm fallback; the sheen mixes
+ * toward white, so it reads in light and dark. */
+.cdbx-sec-h {
+  --cdbx-hdr: hsl(var(--accent-brand, 15 63.1% 59.6%));
+  opacity: 1;
+  color: var(--cdbx-hdr);
+  background: linear-gradient(90deg, var(--cdbx-hdr) 0%, var(--cdbx-hdr) 40%,
+    color-mix(in srgb, var(--cdbx-hdr) 40%, #fff) 50%, var(--cdbx-hdr) 60%, var(--cdbx-hdr) 100%);
+  background-size: 250% 100%;
+  background-position: 100% 50%;
+  animation: cdbx-sheen 6s ease-in-out infinite;
+}
+
+.cdbx-sec-h:not(:empty)::before {
+  content: "";
+  flex: none;
+  width: 3px;
+  height: 0.9em;
+  border-radius: 2px;
+  background: var(--cdbx-hdr);
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .cdbx-sec-h {
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+/* The Pull requests subgroup: same effect, quieter bar and a slower sheen. */
+.cdbx-sec-h.cdbx-grouphdr-sub {
+  animation-duration: 9s;
+}
+
+.cdbx-sec-h.cdbx-grouphdr-sub::before {
+  opacity: 0.55;
+}
+
+/* Holds the plain accent for the first half of the cycle, then one sweep. */
+@keyframes cdbx-sheen {
+  0%, 55% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* On interaction the sweep plays right away instead of waiting for the hold:
+ * hover starts it, a click on the label replays it (.cdbx-sheen-play, JS). */
+@keyframes cdbx-sheen-now {
+  from { background-position: 100% 50%; }
+  to { background-position: 0% 50%; }
+}
+
+.cdbx-sec-h:hover,
+.cdbx-sec-h.cdbx-sheen-play {
+  animation: cdbx-sheen-now 1.2s ease-in-out 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cdbx-sec-h,
+  .cdbx-sec-h:hover,
+  .cdbx-sec-h.cdbx-sheen-play { animation: none; }
+}
+
+/* The count badge keeps its own look: solid accent text, no sheen. */
 .cdbx-sec-n {
+  color: var(--cdbx-hdr, currentColor);
+  -webkit-text-fill-color: var(--cdbx-hdr, currentColor);
   padding: 0 6px;
   font-size: 10px;
   font-weight: 600;
@@ -364,6 +461,28 @@
   font-size: 12px;
   opacity: 0.66;
   overflow-wrap: anywhere;
+}
+
+/* An inline text link inside a note or state line: the words, underlined, in the
+   brand accent that already colours the headlines; no button chrome. */
+.cdbx-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: hsl(var(--accent-brand, 15 63.1% 59.6%));
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.cdbx-link:hover { text-decoration-thickness: 2px; }
+
+.cdbx-link:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .cdbx-state {
@@ -858,9 +977,10 @@
 .cdbx-cubg-code .cdbx-cubg-copy { flex: 0 0 auto; margin-top: 0; }
 
 /* --- Computer Use status ------------------------------------------------- *
- * The status block at the top of the Computer Use panel: three status rows,
- * each a word pill, a fact line and an explanation, with only the actions that
- * apply. Commands wrap instead of widening the panel (.cdbx-cubg-code).
+ * The status rows of the Cowork (Linux) panel (kind "cu"), in three sections
+ * (Cloud Cowork, Local Cowork VM, Computer Use): each row a word pill, a fact
+ * line and an explanation, with only the actions that apply. Commands wrap
+ * instead of widening the panel (.cdbx-cubg-code).
  */
 .cdbx-cus-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cdbx-cus .cdbx-row { flex-wrap: wrap; }
@@ -897,6 +1017,14 @@
 .cdbx-cus-cmd { margin-top: 6px; }
 .cdbx-cus-fail { margin-top: 6px; }
 .cdbx-cus-foot { margin-top: 12px; }
+/* A section of the page; a deep link scrolls it into view (scroll-margin keeps
+ * its heading clear of the dialog's top edge). */
+.cdbx-cus-section { scroll-margin-top: 12px; }
+.cdbx-cus-status:empty { display: none; }
+.cdbx-cus-old { margin-top: 6px; }
+/* "How Cowork chooses where a task runs": closed by default, above the sections. */
+.cdbx-cus-help { margin: 8px 0 4px; }
+.cdbx-cus-help-link { color: inherit; text-decoration: underline; }
 /* "What this does" under an Enable/Disable command: closed by default. */
 .cdbx-cus-what { margin-top: 6px; }
 .cdbx-cus-what > summary { cursor: pointer; user-select: none; }

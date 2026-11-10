@@ -325,7 +325,10 @@ await test("settings: autoFixMergeReady predicate, channels, lock and win32 refu
   const run = async (platform, body) => {
     const dir = mkdtempSync(join(tmpdir(), "cdb-afmr-extra-"));
     const mod = join(dir, "extra.cjs");
-    writeFileSync(mod, '"use strict";\nfunction FHa(e=[]){let t=G().type==="3p"&&ou()==="1p"?[...e,j$t]:e;a.app.isPackaged?Mj(!0,t):fj(t)}\n');
+    writeFileSync(mod, '"use strict";\nfunction FHa(e=[]){let t=G().type==="3p"&&ou()==="1p"?[...e,j$t]:e;a.app.isPackaged?Mj(!0,t):fj(t)}\n' +
+      // ...and the navigation / VM-probe capture anchors (sub-patches C, D); never called.
+      'var Hrr,Urr;function Yrr(){return Urr??=(async()=>{let t,n,r,s;return Hrr={qemuPath:t,firmwarePath:n,virtiofsdPath:r,virtiofsdAptInstallable:!0,kvm:s},Hrr})(),Urr}function Xrr(){return Hrr}\n' +
+      'function nav0(){let Uy=go(Hy,"Navigation",Xy,{events:[["navigate",[["path",I]]]]});return Uy}\n');
     execFileSync(EXTRA_BIN, [mod], { stdio: "ignore" });
     const userData = join(dir, "Claude"); mkdirSync(userData, { recursive: true });
     const handlers = {};
@@ -382,11 +385,11 @@ await test("settings: bridge methods and the Community page row", async () => {
   const page = readFileSync(join(ROOT, "js/extra_settings_page.js"), "utf8");
   const row = /function renderAutoFixMergeReadyRow\(panel\) \{[\s\S]*?\n {2}\}\n/.exec(page);
   assert.ok(row);
-  assert.match(row[0], /section: "Code",\s*title: "Auto-fix notices: ready to merge, comments after merge"/);
-  assert.match(row[0], /After the PR is merged/); assert.match(row[0], /up to 7 days/); assert.match(row[0], /never merges/);
+  assert.match(row[0], /title: "Auto-fix notices: ready to merge, comments after merge"/);
+  assert.match(row[0], /passes on new comments after it merges/); assert.match(row[0], /7 days/); assert.match(row[0], /never merges/);
   assert.match(row[0], /read: "autoFixMergeReadyRead",\s*write: "autoFixMergeReadySet"/);
   assert.match(row[0], /one GitHub read per Auto-fix PR/); assert.match(row[0], /one model turn per notice/); assert.match(row[0], /Applies live/);
   assert.equal(row[0].includes(String.fromCharCode(0x2014)), false);
-  assert.match(page, /var FEATURE_ROWS = \[[^\]]*renderAutoFixMergeReadyRow/);
+  assert.match(page, /var FEATURE_GROUPS = [\s\S]*?renderAutoFixMergeReadyRow/);
 });
 console.log(`${passed} merge-ready tests passed`);

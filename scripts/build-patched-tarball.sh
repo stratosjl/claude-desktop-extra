@@ -523,6 +523,34 @@ if ! {
 fi
 log_info "JavaScript syntax validation passed"
 
+# Census of upstream Linux-session gates (issue #323): every consumer of a
+# tracked predicate - through export aliases, lazy chunks and namespace
+# members - must be covered by our patches or listed in
+# baseline/predicate-consumers.json; every platform/session refusal string
+# must be pinned in baseline/refusal-strings.json. Both read the PATCHED tree.
+# The baselines live in baseline/, which the CI build containers copy next to
+# scripts/ - a missing file is a broken checkout/copy, not a pass.
+CENSUS_PRED_BASELINE="$PROJECT_DIR/baseline/predicate-consumers.json"
+CENSUS_REFUSAL_BASELINE="$PROJECT_DIR/baseline/refusal-strings.json"
+for f in "$CENSUS_PRED_BASELINE" "$CENSUS_REFUSAL_BASELINE"; do
+    if [ ! -f "$f" ]; then
+        log_error "Census baseline missing: $f - copy baseline/ next to scripts/ (CI: the 'cp -r scripts patches js packaging baseline' line)"
+        exit 1
+    fi
+done
+log_info "Checking upstream Linux-session predicate consumers..."
+if ! python3 -I "$SCRIPT_DIR/check-predicate-consumers.py" --quiet \
+    --baseline "$CENSUS_PRED_BASELINE" "$APP_DIR/app.asar.contents"; then
+    log_error "Predicate census failed - patch the predicate at its definition, or add an allowlist entry (needs @patrickjaja)"
+    exit 1
+fi
+log_info "Checking platform/session refusal strings..."
+if ! python3 -I "$SCRIPT_DIR/check-refusal-strings.py" --baseline "$CENSUS_REFUSAL_BASELINE" \
+    --js-dir "$PROJECT_DIR/js" "$APP_DIR/app.asar.contents"; then
+    log_error "Refusal-string census failed - review the new/stale strings and update baseline/refusal-strings.json"
+    exit 1
+fi
+
 # Drop upstream's V8 bytecode compile-cache (new in v1.34493.1). index.pre.js
 # feeds each .jsc to `new vm.Script(..., {cachedData})`; V8 validates it against
 # the source and silently recompiles on mismatch, so patched code runs correctly
@@ -739,40 +767,51 @@ else
     log_warn "gnome-portal-bridge not available — skipping (GNOME Wayland Computer Use will require manual install)"
 fi
 
-# Opt-in TPM access for cloud Cowork / Dispatch Computer Use (the device identity
-# key lives in /dev/tpmrm0). Shipped DISABLED next to upstream's resources/linux-mime/:
-# the udev rule, the root helper that links it into /etc/udev/rules.d (pkexec or
-# sudo), and the helper's polkit action, which deb/rpm/pacman also install to
-# /usr/share/polkit-1/actions/. No package scriptlet touches any of them.
+# Opt-in device access, shipped DISABLED next to upstream's resources/linux-mime/:
+#   - TPM (cloud Cowork / Dispatch Computer Use; the device identity key lives in
+#     /dev/tpmrm0): a udev rule and cdb-tpm-access, which links it into
+#     /etc/udev/rules.d;
+#   - KVM (local Cowork VM: /dev/kvm + /dev/vhost-vsock): a udev rule, a
+#     modules-load file for vhost_vsock, and cdb-kvm-access, which links both
+#     into /etc/udev/rules.d and /etc/modules-load.d.
+# Each helper runs as root through pkexec or sudo; their polkit actions are also
+# installed to /usr/share/polkit-1/actions/ by deb/rpm/pacman. No package
+# scriptlet touches any of them.
 UDEV_SRC_DIR="$PROJECT_DIR/packaging/udev"
 UDEV_DST_DIR="$TREE_DIR/resources/linux-udev"
-UDEV_POLICY="io.github.patrickjaja.claude-desktop-extra.tpm-access.policy"
+UDEV_HELPERS="cdb-tpm-access cdb-kvm-access"
+UDEV_DATA="70-claude-desktop-extra-tpm.rules 70-claude-desktop-extra-kvm.rules claude-desktop-extra-vsock.conf"
 if [ -e "$UDEV_DST_DIR" ]; then
-    log_error "upstream now ships resources/linux-udev/ - re-audit before overlaying our TPM access files"
+    log_error "upstream now ships resources/linux-udev/ - re-audit before overlaying our device access files"
     exit 1
 fi
-for f in 70-claude-desktop-extra-tpm.rules cdb-tpm-access "$UDEV_POLICY"; do
+for f in $UDEV_HELPERS $UDEV_DATA; do
     if [ ! -f "$UDEV_SRC_DIR/$f" ]; then
         log_error "packaging/udev/$f missing"
         exit 1
     fi
 done
-if ! grep -qF '<annotate key="org.freedesktop.policykit.exec.path">/usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access</annotate>' \
-        "$UDEV_SRC_DIR/$UDEV_POLICY"; then
-    log_error "packaging/udev/$UDEV_POLICY: exec.path is not the installed helper path"
-    exit 1
-fi
-install -d -m 0755 "$UDEV_DST_DIR"
-install -m 0644 "$UDEV_SRC_DIR/70-claude-desktop-extra-tpm.rules" "$UDEV_DST_DIR/70-claude-desktop-extra-tpm.rules"
-install -m 0755 "$UDEV_SRC_DIR/cdb-tpm-access" "$UDEV_DST_DIR/cdb-tpm-access"
-install -m 0644 "$UDEV_SRC_DIR/$UDEV_POLICY" "$UDEV_DST_DIR/$UDEV_POLICY"
-if command -v shellcheck &>/dev/null; then
-    if ! shellcheck -S error "$UDEV_DST_DIR/cdb-tpm-access"; then
-        log_error "cdb-tpm-access failed shellcheck - fix packaging/udev/cdb-tpm-access"
+for h in tpm kvm; do
+    if ! grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/usr/lib/claude-desktop/resources/linux-udev/cdb-$h-access</annotate>" \
+            "$UDEV_SRC_DIR/io.github.patrickjaja.claude-desktop-extra.$h-access.policy"; then
+        log_error "packaging/udev/io.github.patrickjaja.claude-desktop-extra.$h-access.policy: missing, or exec.path is not the installed helper path"
         exit 1
     fi
-fi
-log_info "Bundled TPM access rule + helper + polkit action (resources/linux-udev/, disabled)"
+done
+install -d -m 0755 "$UDEV_DST_DIR"
+for f in $UDEV_DATA io.github.patrickjaja.claude-desktop-extra.tpm-access.policy io.github.patrickjaja.claude-desktop-extra.kvm-access.policy; do
+    install -m 0644 "$UDEV_SRC_DIR/$f" "$UDEV_DST_DIR/$f"
+done
+for h in $UDEV_HELPERS; do
+    install -m 0755 "$UDEV_SRC_DIR/$h" "$UDEV_DST_DIR/$h"
+    if command -v shellcheck &>/dev/null; then
+        if ! shellcheck -S error "$UDEV_DST_DIR/$h"; then
+            log_error "$h failed shellcheck - fix packaging/udev/$h"
+            exit 1
+        fi
+    fi
+done
+log_info "Bundled TPM + KVM access rules, helpers and polkit actions (resources/linux-udev/, disabled)"
 
 # Every ELF in the shipped tree (upstream's and the bridges we just added) must
 # match the .deb's arch. Hard failure: a foreign binary is dead weight at best

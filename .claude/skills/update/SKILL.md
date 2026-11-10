@@ -61,6 +61,8 @@ If patches fail (upstream renamed identifiers / refactored / removed a feature):
    The staged concatenation never passes `node --check` as a whole; the per-chunk `node --check` in the build is authoritative. A syntax error there means the patch replaced only part of a construct.
 4. Re-run the build until all patches pass. **Every sub-patch must succeed or `quit(1)`** - never `[WARN]`+continue. If a feature was upstreamed, **remove the patch** (`git rm`, bump `EXPECTED_PATCH_COUNT` in `scripts/apply_patches.py`). The absorption probe (`scripts/check-upstream-absorbed.py`, run by the build) flags ABSORBED/PARTIAL patches: audit that upstream ships the same behavior on Linux, then remove. FAILED means re-fit, not remove. A PARTIAL verdict can also be a false "already patched" in our own idempotency check (a prefix regex matching new, unrelated upstream code): read the matched site before removing anything. See AGENTS.md Rules 4/6.
 
+5. The build then runs the two census gates on the patched tree (`python3 -I scripts/check-predicate-consumers.py <patched tree>`, `python3 -I scripts/check-refusal-strings.py --strict <patched tree>`, which turns warnings (weak-topic new strings, stale pins, `accepted` site-count changes) into failures so the pins are refreshed on every bump; see `docs/census-gates.md`). Red after a bump means a new consumer or refusal string, or a stale anchor/shape: audit the new code path, patch it at the definition, or add a reviewed baseline entry (loosening needs @patrickjaja in the commit); re-fit a stale anchor like a patch anchor.
+
 ## Step 2 - Linux-compat analysis (new gates?)
 Diff old vs new for newly darwin/win32-gated features that need Linux support (`OLD`/`NEW` = the two concatenations from the search rules):
 ```bash
@@ -117,7 +119,9 @@ grep -aoE '.{0,60}processPlatform\(\).{0,60}' "$NEW" | sort -u   # injected gate
 Classify each: PATCHED (maps to a patch) / NATIVE (real Apple/Win API) / STUB (disabled on all platforms) / **PORTABLE** (mac/win-only, no native dep, not patched - the only actionable class). **Verify before reporting:** trace every PORTABLE candidate yourself and quote the verbatim snippet; past sub-agent audits hallucinated removed features and fake UUIDs. Update the baseline's `Last audited`, counts and rows.
 
 ## Step 7 - Cowork backend
-Cowork runs on the `.deb`'s bundled native VM backend (cowork-linux-helper + virtiofsd + smol-bin + QEMU/OVMF; requires `/dev/kvm`). Nothing to update on a bump.
+Cowork runs on the `.deb`'s bundled native VM backend (cowork-linux-helper + virtiofsd + smol-bin + QEMU/OVMF; the local VM requires `/dev/kvm`). Nothing to update on a bump. Cowork has two backends: cloud Cowork (1P only; no KVM, desktop tools need a keyed device = TPM access) and the local Cowork VM (optional in 1P, the only Cowork in 3P). Settings -> Extra -> Cowork (Linux) shows both.
+
+Re-check on every bump: `baseline/COWORK_HEADER_ICON_ANCHORS.md` (the claude.ai header icon anchors of `fix_cowork_device_icon_web.nim`) and the two core captures in `add_feature_extra_settings.nim` (`globalThis.__cdbNavigation`, `globalThis.__cdbCoworkVmProbe`) that the Cowork (Linux) page uses.
 
 ## Step 8 - docs
 Update only what changed:

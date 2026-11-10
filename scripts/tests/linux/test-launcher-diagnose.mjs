@@ -85,7 +85,7 @@ function writeExe(path, body) {
 // so a case controls exactly which host tools exist.
 const coreBin = join(scratch, "core");
 mkdirSync(coreBin, { recursive: true });
-for (const t of ["timeout", "head", "sed", "uname", "tr", "od", "cat", "sleep", "printf"]) {
+for (const t of ["timeout", "head", "sed", "uname", "tr", "od", "cat", "sleep", "printf", "stat", "readlink"]) {
   const p = (spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout || "").trim();
   if (p.startsWith("/")) writeExe(join(coreBin, t), `#!/bin/sh\nexec ${p} "$@"\n`);
 }
@@ -105,15 +105,52 @@ safe("D1", () => {
   writeExe(join(abs, "busctl"), "#!/bin/sh\n");
   writeExe(join(onPath, "busctl"), "#!/bin/sh\n");
   writeExe(join(onPath, "gjs"), "#!/bin/sh\n");
-  const env = { PATH: `${onPath}:${coreBin}` };
-  const cap = (args) => runFns(["_diag_cap"],
-    `_diag_problems=(); _diag_cap ${args}; printf 'P=%s\\n' "\${_diag_problems[@]:-}"`, env).out;
+  // _DIAG_NARROWED stands in for upstream's narrowed PATH (scratch dirs
+  // cannot be root-owned): onPath plays a system folder the app searches.
+  const env = { PATH: `${onPath}:${coreBin}`, _DIAG_NARROWED: onPath };
+  const TP_FNS = ["_diag_trust_rule", "_diag_chain_real", "_diag_narrowed_path", "_diag_tool_path", "_diag_which_in", "_diag_cap"];
+  const cap = (args, e = env) => runFns(TP_FNS,
+    `_diag_problems=(); _diag_cap ${args}; printf 'P=%s\\n' "\${_diag_problems[@]:-}"`, e).out;
   const up = cap(`fallback busctl ${abs}/busctl 1 'portal probe' 'hotkeys off'`);
   check("upstream path wins", /^\[ok\] +busctl = .*usr\/bin\/busctl \(upstream path\)/.test(up), true);
   const fb = cap(`fallback busctl ${root}/none/busctl 1 'portal probe' 'hotkeys off'`);
-  check("PATH only is reported as our fallback",
-    fb.includes(`busctl = ${onPath}/busctl (not at ${root}/none/busctl; works through our PATH fallback)`), true);
-  check("PATH only is not a problem", fb.endsWith("P="), true);
+  check("found in a folder the app searches is reported as our fallback",
+    fb.includes(`busctl = ${onPath}/busctl (not at ${root}/none/busctl; found by our fallback in a system or root-owned read-only folder)`), true);
+  check("found by the fallback is not a problem", fb.endsWith("P="), true);
+  // Since 4.23118 the app ignores a copy in a folder the user can write
+  // (upstream narrows PATH; our resolver adds only root-owned read-only dirs).
+  const userEnv = { PATH: `${onPath}:${coreBin}`, _DIAG_NARROWED: `${root}/nothing-here` };
+  const ign = cap(`fallback busctl ${root}/none/busctl 1 'portal probe' 'hotkeys off'`, userEnv);
+  check("a copy only in a user-writable folder is MISSING, and named",
+    ign.includes(`[MISS] busctl = MISSING - hotkeys off (found ${onPath}/busctl, a user-writable folder the app does not run its own tools from - install busctl system-wide)`), true);
+  // A real root-owned, read-only folder outside the narrowed list, when the
+  // host has one: the trust walk takes it.
+  const trustedDir = ["/usr/lib/systemd", "/usr/libexec", "/usr/lib/git-core"].find((d) => {
+    try { return lstatSync(d).isDirectory() && lstatSync(d).uid === 0 && readdirSync(d).some((f) => { try { const st = lstatSync(join(d, f)); return st.isFile() && (st.mode & 0o111) && /^[a-z][a-z0-9_-]+$/.test(f); } catch { return false; } }); } catch { return false; }
+  });
+  if (trustedDir && process.getuid() !== 0) {
+    const exe = readdirSync(trustedDir).sort().find((f) => { try { const st = lstatSync(join(trustedDir, f)); return st.isFile() && (st.mode & 0o111) && /^[a-z][a-z0-9_-]+$/.test(f); } catch { return false; } });
+    const tr = cap(`fallback ${exe} ${root}/none/${exe} 1 'x' 'y'`, { PATH: `${trustedDir}:${coreBin}`, _DIAG_NARROWED: `${root}/nothing-here` });
+    check(`a root-owned read-only started-PATH folder (${trustedDir}) is searched`,
+      tr.includes(`${exe} = ${trustedDir}/${exe} (not at`), true);
+    const ln = join(root, "user-link");
+    spawnSync("ln", ["-s", trustedDir, ln]);
+    const tl = cap(`fallback ${exe} ${root}/none/${exe} 1 'x' 'y'`, { PATH: `${ln}:${coreBin}`, _DIAG_NARROWED: `${root}/nothing-here` });
+    check("the same folder through a user-owned symlink is not", tl.startsWith(`[MISS] ${exe} = MISSING`), true);
+  } else {
+    console.log("  (no root-owned read-only folder with a tool on this host: trusted-folder case skipped)");
+  }
+  // A PATH entry with glob characters is one literal entry (the app never
+  // globs): /tmp/x/g* must not expand to /tmp/x/ga.
+  writeExe(join(root, "ga", "globtool"), "#!/bin/sh\n");
+  const g = runFns(TP_FNS, `_diag_which_in globtool '${root}/g*' || echo none; _diag_tool_path '${root}/g*:/nonexistent' '${onPath}'`, env).out;
+  check("glob entry: not expanded by _diag_which_in or _diag_tool_path", g, `none\n${onPath}`);
+  // tool mode (xdg-open: our openExternal hook widens the call to the TOOL PATH).
+  const toolOk = cap(`tool busctl '' 1 'links' 'links do nothing'`);
+  check("tool mode: found in a folder the app searches", toolOk.startsWith(`[ok]   busctl = ${onPath}/busctl - links`), true);
+  const toolMiss = cap(`tool busctl '' 1 'links' 'links do nothing'`, userEnv);
+  check("tool mode: a user-writable copy is MISSING, and named",
+    toolMiss.startsWith("[MISS] busctl = MISSING - links do nothing (found ") && toolMiss.includes("a user-writable folder the app does not run its own tools from"), true);
   const miss = cap(`fallback secret-tool ${abs}/secret-tool 1 'cookie import' 'cookies skipped'`);
   check("missing + needed is MISSING", /^\[MISS\] secret-tool = MISSING - cookies skipped/.test(miss), true);
   check("missing + needed is a problem", miss.includes("P=secret-tool missing: cookies skipped"), true);
@@ -312,6 +349,18 @@ safe("D5b", () => {
   check("helper: relative file name is left alone", fns.includes("C=usable"), true);
   check("helper: path list with one existing dir is usable", fns.includes("D=usable"), existsSync("/etc/fonts"));
   check("helper: unset variable is usable", fns.includes("E=usable"), true);
+
+  // Colon lists are split without globbing: an entry with `*` is one literal path.
+  const gl = join(scratch, "d5glob");
+  mkdirSync(join(gl, "real"), { recursive: true });
+  const globRun = (list) => runFns(["_fontconfig_var_usable"],
+    `FONTCONFIG_PATH=${JSON.stringify(list)}; _fontconfig_var_usable FONTCONFIG_PATH && echo usable || echo unusable`,
+    { PATH: "/usr/bin:/bin" }).out;
+  check("helper: `*` entry is NOT glob-expanded onto a sibling dir", globRun(join(gl, "*")), "unusable");
+  check("helper: `*` entry is unusable even after a missing entry", globRun(`/nonexistent/claude-test:${join(gl, "*")}`), "unusable");
+  mkdirSync(join(gl, "*"), { recursive: true });
+  check("helper: a directory literally named `*` is found", globRun(join(gl, "*")), "usable");
+  check("helper: empty entries are skipped, real dir still found", globRun(`::${join(gl, "real")}:`), "usable");
 });
 
 // ---------------------------------------------------------------- D6
@@ -493,7 +542,7 @@ esac
   });
   const out = r.stdout || "";
   check("exit status", r.status, 0);
-  const sec = out.slice(out.indexOf("--- Computer Use bridges (CLI contract) ---"), out.indexOf("--- Cowork VM"));
+  const sec = out.slice(out.indexOf("--- Computer Use bridges (CLI contract) ---"), out.indexOf("--- Local Cowork VM"));
   check("section present", sec.length > 0, true);
   const g = sec.slice(sec.indexOf("[gnome-portal-bridge]"), sec.indexOf("[kwin-portal-bridge]"));
   const k = sec.slice(sec.indexOf("[kwin-portal-bridge]"));
@@ -747,7 +796,7 @@ safe("D12", () => {
     const owner = spawnSync("stat", ["-c", "%U:%G", devDenied], { encoding: "utf8" }).stdout.trim();
     check("denied line names owner, group and octal mode", lines(o)[0], `device key (TPM) = NOT ACCESSIBLE (${owner} 0000)`);
     check("denied: the fix problem", problems(o)[0],
-      `cloud Cowork and Dispatch get no Computer Use: the device key needs ${devDenied} - Settings -> Extra -> Computer Use, or sudo ${udev}/cdb-tpm-access enable; without logind: sudo usermod -aG tss $USER and log in again`);
+      `cloud Cowork and Dispatch get no Computer Use: the device key needs ${devDenied} - Settings -> Extra -> Cowork (Linux) -> Enable TPM access, or sudo ${udev}/cdb-tpm-access enable; without logind: sudo usermod -aG tss $USER and log in again`);
     o = dk(devDenied, link, fixture, "CLAUDE_APPIMAGE_PATH=/x/Claude.AppImage;");
     check("denied on AppImage: the copy command instead of the image's helper",
       problems(o)[0].includes(`or sudo install -m 0644 ${rule} ${link} && sudo udevadm control --reload && sudo udevadm trigger --action=change --subsystem-match=tpmrm;`), true);
@@ -794,7 +843,7 @@ safe("D12", () => {
   check("regular file: not managed", l, "TPM access rule = enabled (file, not managed by claude-desktop-extra)");
   rmSync(link, { force: true });
 
-  // The real --diagnose prints the three lines inside --- Computer Use ---.
+  // The real --diagnose prints the three lines inside --- Cloud Cowork device key ---.
   const home = join(root, "home");
   mkdirSync(join(home, ".config", "Claude", "logs"), { recursive: true });
   writeFileSync(join(home, ".config", "Claude", "logs", "main.log"), readFileSync(fixture));
@@ -804,8 +853,8 @@ safe("D12", () => {
            DISPLAY: ":0", XDG_SESSION_TYPE: "x11" }, encoding: "utf8", timeout: 90000 });
   const d = r.stdout || "";
   check("diagnose: exit 0", r.status, 0);
-  const cu = d.slice(d.indexOf("--- Computer Use ---"), d.indexOf("--- Computer Use bridges"));
-  check("diagnose: device key line in the Computer Use section", /^device key \(TPM\) = (ok \(\/dev\/tpmrm0 rw\)|NOT ACCESSIBLE \(.+ [0-7]{4}\)|absent \(no TPM 2\.0 resource manager\))$/m.test(cu), true);
+  const cu = d.slice(d.indexOf("--- Cloud Cowork device key ---"), d.indexOf("--- Computer Use bridges"));
+  check("diagnose: device key line in the Cloud Cowork device key section", /^device key \(TPM\) = (ok \(\/dev\/tpmrm0 rw\)|NOT ACCESSIBLE \(.+ [0-7]{4}\)|absent \(no TPM 2\.0 resource manager\))$/m.test(cu), true);
   check("diagnose: rule line follows", /^device key \(TPM\) = .*\nTPM access rule = .*\nlast remote-device connect = /m.test(cu), true);
   check("diagnose: last connect read from the profile's main.log", cu.includes("last remote-device connect = keyed (2026-11-03 12:21:03)"), true);
 });
@@ -835,10 +884,14 @@ safe("D13", () => {
     ['[ "$("$ID" -u)" = 0 ]', `[ "$("$ID" -u)" = ${uid} ]`],
     ['[ "$_uid" = 0 ] || return 1', `{ [ "$_uid" = 0 ] || [ "$_uid" = ${uid} ]; } || return 1`],
     ["CONTAINER_MARKERS='/run/systemd/container\n/.dockerenv\n/run/.containerenv\n/.flatpak-info'", `CONTAINER_MARKERS='${root}/nothing-here\n${root}/containerenv'`],
-    ['[ -S /run/udev/control ]', `[ -e ${root}/udev-control ]`],
+    ['UDEV_CONTROL=/run/udev/control', `UDEV_CONTROL=${root}/udev-control`],
+    ['[ -S "$UDEV_CONTROL" ]', '[ -e "$UDEV_CONTROL" ]'],
+    // No tpmrm node in the scratch /dev: disable has no ACL step here
+    // (scripts/tests/linux/test-tpm-access-helper.mjs covers it).
+    ['DEV_DIR=/dev', `DEV_DIR=${root}/dev`],
     ['UDEVADM=$(tool udevadm)', `UDEVADM=${fakeUdevadm}`],
-    ['[ -e /etc/NIXOS ]', `[ -e ${etc}/NIXOS ]`],
-    ['[ -L /etc/udev ]', `[ -L ${etc}/udev ]`],
+    ['NIXOS_MARKER=/etc/NIXOS', `NIXOS_MARKER=${etc}/NIXOS`],
+    ['ETC_UDEV=/etc/udev', `ETC_UDEV=${etc}/udev`],
   ];
   const known = ['"$PKG_SRC") return 0 ;;', `"$PKG_SRC"|'${inst}/'"$RULE") return 0 ;;`];
   const stickyOk = ['[ "$1" = /nix/store ]', `{ ${["/nix/store", ...sticky].map((d) => `[ "$1" = '${d}' ]`).join(" || ")}; }`];
@@ -899,7 +952,7 @@ safe("D13", () => {
   check("disable: reload + trigger", udevCalls().split("\n").slice(0, 2).join("|"), "control --reload|trigger --action=change --subsystem-match=tpmrm");
   rmSync(calls, { force: true });
   r = run("disable");
-  check("disable again: already disabled, udev untouched", `${r.rc}|${r.out.trim()}|${udevCalls()}`, "0|cdb-tpm-access: already disabled|");
+  check("disable again: already disabled, udev re-applied (clears a left-behind ACL)", `${r.rc}|${r.out.trim()}|${udevCalls().split("\n").length}`, "0|cdb-tpm-access: already disabled|3");
 
   // Dangling link to the deb/rpm/pacman path (uninstalled package) is ours.
   spawnSync("ln", ["-s", "/usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-tpm.rules", link]);
@@ -1003,6 +1056,86 @@ safe("D13", () => {
   // Unmodified helper from the source tree: not a known rule path, exit 5 before anything.
   const real = spawnSync(join(repo, "packaging", "udev", "cdb-tpm-access"), ["enable"], { encoding: "utf8" });
   check("real helper from the source tree: exit 5, nothing on stdout", `${real.status}|${real.stdout}`, "5|");
+});
+
+console.log("D14: --diagnose names the window identity this launch would use");
+safe("D14", () => {
+  const root = join(scratch, "d14");
+  const home = join(root, "home");
+  const electron = fakeTree(join(root, "tree"), {});
+  const apps = join(home, ".local", "share", "applications");
+  const diag = (args, extra = {}) => spawnSync(BASH, [launcherPath, ...args, "--diagnose"], {
+    env: { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron,
+           XDG_RUNTIME_DIR: join(root, "run"), XDG_DATA_DIRS: join(root, "nodata"), ...extra },
+    encoding: "utf8", timeout: 90000,
+  });
+  const idLine = (r) => ((r.stdout || "").split("\n").find((l) => l.startsWith("window identity = ")) || "");
+  const def = diag([]);
+  check("default profile: base id only", idLine(def), "window identity = com.anthropic.Claude");
+  const shared = diag(["--profile=work"]);
+  check("named profile without the file: shared, with the reason",
+    idLine(shared), "window identity = com.anthropic.Claude (shared: no com.anthropic.Claude-work.desktop in the XDG applications dirs)");
+  mkdirSync(apps, { recursive: true });
+  const f = join(apps, "com.anthropic.Claude-work.desktop");
+  writeFileSync(f, "[Desktop Entry]\nName=Claude (work)\n");
+  const own = diag(["--profile=work"]);
+  check("named profile with the file: per-profile id and the file path", idLine(own), `window identity = com.anthropic.Claude-work (${f})`);
+  writeFileSync(f, "[Desktop Entry]\nHidden=true\n");
+  check("Hidden=true counts as absent", idLine(diag(["--profile=work"])).includes("(shared:"), true);
+  rmSync(f);
+  const dd = join(root, "datadir");
+  mkdirSync(join(dd, "applications"), { recursive: true });
+  writeFileSync(join(dd, "applications", "com.anthropic.Claude-work.desktop"), "[Desktop Entry]\nName=x\n");
+  check("found through XDG_DATA_DIRS", idLine(diag(["--profile=work"], { XDG_DATA_DIRS: dd })),
+    `window identity = com.anthropic.Claude-work (${join(dd, "applications", "com.anthropic.Claude-work.desktop")})`);
+  // A `*` in XDG_DATA_DIRS is one literal path, never expanded onto siblings.
+  const gd = join(root, "globdirs");
+  mkdirSync(join(gd, "sib", "applications"), { recursive: true });
+  writeFileSync(join(gd, "sib", "applications", "com.anthropic.Claude-work.desktop"), "[Desktop Entry]\nName=x\n");
+  check("XDG_DATA_DIRS entry with `*` is not glob-expanded",
+    idLine(diag(["--profile=work"], { XDG_DATA_DIRS: join(gd, "*") })).includes("(shared:"), true);
+  mkdirSync(join(gd, "*", "applications"), { recursive: true });
+  writeFileSync(join(gd, "*", "applications", "com.anthropic.Claude-work.desktop"), "[Desktop Entry]\nName=x\n");
+  check("XDG_DATA_DIRS entry that is literally `*` is found as itself",
+    idLine(diag(["--profile=work"], { XDG_DATA_DIRS: join(gd, "*") })),
+    `window identity = com.anthropic.Claude-work (${join(gd, "*", "applications", "com.anthropic.Claude-work.desktop")})`);
+  check("XDG_DATA_DIRS with empty entries still finds the real dir",
+    idLine(diag(["--profile=work"], { XDG_DATA_DIRS: `::${dd}:` })).startsWith("window identity = com.anthropic.Claude-work ("), true);
+  check("a relative XDG_DATA_HOME is ignored (falls back to ~/.local/share)",
+    idLine(diag(["--profile=work"], { XDG_DATA_HOME: "rel" })).includes("(shared:"), true);
+  check("default profile output keeps its single added line",
+    (def.stdout || "").split("\n").filter((l) => l.startsWith("window identity")).length, 1);
+});
+
+// ---------------------------------------------------------------- D15
+console.log("D15: _appimage_release_scheme splits XDG_DATA_DIRS without globbing");
+safe("D15", () => {
+  const root = join(scratch, "d15");
+  const bin = join(root, "bin");
+  const marker = join(root, "handed-back");
+  mkdirSync(join(root, "home"), { recursive: true });
+  // Fake xdg-mime: the default is this profile's entry until `default` is called.
+  writeExe(join(bin, "xdg-mime"), `#!/bin/sh
+if [ "$1" = query ]; then
+  if [ -e ${marker} ]; then echo com.anthropic.Claude.desktop; else echo work.desktop; fi
+else touch ${marker}; fi
+`);
+  const run = (dirs) => {
+    rmSync(marker, { force: true });
+    runFns(["_appimage_release_scheme"],
+      `DESKTOP_ID=work; _appimage_release_scheme || true`,
+      { PATH: `${bin}:/usr/bin:/bin`, HOME: join(root, "home"), XDG_DATA_HOME: join(root, "nohome"), XDG_DATA_DIRS: dirs });
+    return existsSync(marker);
+  };
+  const dd = join(root, "dd");
+  mkdirSync(join(dd, "sib", "applications"), { recursive: true });
+  writeFileSync(join(dd, "sib", "applications", "com.anthropic.Claude.desktop"), "x");
+  check("plain list entry holding the default entry: scheme handed back", run(join(dd, "sib")), true);
+  check("`*` entry is not glob-expanded onto a sibling: nothing handed back", run(join(dd, "*")), false);
+  mkdirSync(join(dd, "*", "applications"), { recursive: true });
+  writeFileSync(join(dd, "*", "applications", "com.anthropic.Claude.desktop"), "x");
+  check("a directory literally named `*` is found", run(join(dd, "*")), true);
+  check("empty entries are skipped", run(`::${join(dd, "sib")}:`), true);
 });
 
 rmSync(scratch, { recursive: true, force: true });

@@ -7,7 +7,6 @@ The upstream **Developer → Configure Third-Party Inference** wizard works on L
 > **Looking for the full `managed-settings.json` key reference?** This page is the Linux *how-to*. For the complete, authoritative list of every config key, see Anthropic's official docs:
 > - [Configuration reference](https://claude.com/docs/cowork/3p/configuration) - every key, all providers, credential helpers, security profiles.
 > - [Enterprise configuration for Claude Desktop](https://support.claude.com/en/articles/12622667-enterprise-configuration-for-claude-desktop) - managed-preferences overview.
-> - [Extend Claude Cowork with third-party platforms](https://support.claude.com/en/articles/14680753-extend-claude-cowork-with-third-party-platforms) - how MCP/plugins/skills differ on 3P.
 
 ## Three routes
 
@@ -250,7 +249,6 @@ The quickstart above is intentionally minimal. Below is a **feature-complete** g
   "managedMcpServers": [
     { "name": "atlassian-rovo", "transport": "http", "url": "https://mcp.atlassian.com/v1/mcp/authv2" }
   ],
-  "organizationPluginsUrl": "https://plugins.acme.example/registry",  // org plugin/skill registry
   "isDesktopExtensionEnabled": true,
   "isDesktopExtensionSignatureRequired": true,    // only load signed extensions
 
