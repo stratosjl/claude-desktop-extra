@@ -75,8 +75,10 @@ byte-order mark (Notepad's default).
 Good to know
 ------------
 
-  * No automatic updates. Download the next build and run Install.cmd again
-    (your data and sign-in are kept).
+  * No automatic updates. When a newer build is out, the app says so once
+    (a dialog with "Open download page"); download it and run Install.cmd
+    again (your data and sign-in are kept). To turn the notice off, set the
+    environment variable CDB_UPDATE_NOTICE=0.
   * "Start at login" in Claude's settings starts the default profile.
   * Logs: %APPDATA%\Claude\logs (claude-patches.log, custom-models.log), or
     %APPDATA%\Claude-<name>\logs for a profile.

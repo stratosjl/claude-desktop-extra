@@ -25,7 +25,7 @@ Everything else is Anthropic's Windows app as shipped. Left out because Windows 
 
 The app ships zipped inside the download because its deepest files are about 100 characters below the app folder. Unzipped by Explorer under a download folder, they can pass Windows' 260-character path limit ("Error 0x80010135: Path too long"); the installer unpacks them under its own short folder instead.
 
-To update, install the next zip the same way; data and sign-in are kept. `Install.cmd -Uninstall` removes the app and its shortcuts and keeps the data.
+To update, install the next zip the same way; data and sign-in are kept. The app does not update itself, but it tells you when there is a newer build: about a minute after start, then every 12 hours, it reads this repository's release list on GitHub, and when a `windows-v<version>` release is newer than the installed version it shows one dialog whose **Open download page** opens that release. It asks once per version (remembered in `claude-desktop-extra-update.json` in the profile's data folder), never downloads anything, and logs its checks to `claude-patches.log` (`[win-update]`). `CDB_UPDATE_NOTICE=0` in the environment turns it off. `Install.cmd -Uninstall` removes the app and its shortcuts and keeps the data.
 
 **With the official app installed too:** the default profile uses the same data folder (`%APPDATA%\Claude`), so you stay signed in, but only one of the two runs at a time - quit the official app first. Sign-in links (`claude://`) may open either app; quit the one you are not signing in to.
 
@@ -87,7 +87,7 @@ Save hand-edited files as **UTF-8 without a byte-order mark**: Notepad's default
 
 1. Reads `https://downloads.claude.ai/releases/win32/<arch>/RELEASES` (what the official installer reads), downloads the full Squirrel `.nupkg` and checks its size and SHA1 against it.
 2. Prepares the sources: `scripts/windows/prepare-sources.sh` copies the repo to a temp folder and applies `scripts/windows/upstream-overlay.patch` there (see [Staying in sync with upstream](#staying-in-sync-with-upstream)).
-3. Extracts `app.asar` and applies the Windows patch set from that copy:
+3. Extracts `app.asar` and the 3P setup window, and runs upstream's absorption probe (`scripts/check-upstream-absorbed.py`) on the pristine files over the Windows patch set only: a patch that changes nothing there means Anthropic now ships that feature on Windows itself, and the build fails until it is audited and taken out of `WINDOWS_PATCH_SET` (AGENTS.md Rule 4). Then it applies the Windows patch set from that copy:
    - `apply_patches.py --windows` runs the shared patches listed in `WINDOWS_PATCH_SET` (every core and community feature except the Linux window handling, the Quick Entry socket and the Linux profile URL routing), then everything in `patches/windows/`;
    - the allow-non-Anthropic-models patch of the 3P setup window runs on its files: since v4.29.0 they ship as `resources/ion-dist.asar`, which is extracted, patched and repacked to its place (older packages have a `resources/ion-dist` folder, patched in place). The strictness rules are the same as on Linux: a patch that does not match fails the build, and so does a layout that is neither of the two.
 4. Repacks `app.asar` (same unpacked file set as Anthropic's, checked) and rewrites the asar integrity hash in `claude.exe`. On Windows, Electron's `EnableEmbeddedAsarIntegrityValidation` fuse is enforced, unlike on Linux: the exe refuses an archive whose header hash differs from the one it carries. `scripts/windows/asar_integrity.py` replaces that fixed-length hash in place, after checking that the old value matches the original archive. With the fuse on, Electron also aborts when it opens any other archive below the exe's folder whose record is missing or stale, so `ion-dist.asar`'s record is rewritten the same way (a package whose exe has none fails the build), and the build checks at the end that every record names its archive's hash. The exe is otherwise byte-identical; its Authenticode signature no longer verifies.
@@ -99,7 +99,7 @@ scripts/windows/build-windows.sh --arch arm64
 scripts/windows/build-windows.sh --nupkg AnthropicClaude-3.6556.2-full.nupkg --sha1 <SHA1>
 ```
 
-Needs Node 24+, Nim with the `regex` package, `asar` (or `npx`), `curl`, `unzip` and `zip`. The **Build Windows** workflow (`.github/workflows/build-windows.yml`) builds both architectures, boots the x64 build on a Windows runner with a test profile (checking that the patched bundle loads and logs its startup lines), and publishes a release when run with `publish`.
+Needs Node 24+, Nim with the `regex` package, `asar` (or `npx`), `curl`, `unzip` and `zip`. The **Build Windows** workflow (`.github/workflows/build-windows.yml`) builds both architectures, boots each on a Windows runner of its own architecture (x64 on `windows-latest`, arm64 on `windows-11-arm`) with a test profile (checking that the patched bundle loads and logs its startup lines), and publishes a release when run with `publish`.
 
 The Windows version stream is not the Linux one (Windows usually ships first), so a Windows build can meet a bundle the patches were not yet re-fitted to; the build then fails like a Linux build would.
 
