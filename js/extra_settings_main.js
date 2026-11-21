@@ -677,7 +677,7 @@
     };
   }
 
-  // The managed-config key catalog of Claude Desktop v5.11492.5 (217 keys), read out of the
+  // The managed-config key catalog of Claude Desktop v6.28899.2 (237 keys), read out of the
   // bundle's own schema (flat key, zod leaf type, scopes, title). Upstream drives
   // its 3P Setup wizard from that schema; we cannot reach it from here (it is
   // module-scoped in index.pre.js), so this is a PINNED COPY and is therefore
@@ -1015,6 +1015,31 @@
     { key: "allowManagedHooksOnly", kind: "bool", group: "sandbox", scope: "3p",
       label: "Allow managed hooks only",
       note: "Locks Claude Code to hooks from managed settings (the host hands the lock to Claude Code on self-hosted sessions); added in v4.23118.0, availableInVersion @next." },
+    { key: "allowManagedPermissionRulesOnly", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Allow managed permission rules only",
+      note: "Locks Claude Code to permission rules from managed settings (added in v6.28899.2, available since 6.6395.0)." },
+    { key: "codeDefaultPermissionMode", kind: "enum", group: "sandbox", scope: "3p",
+      label: "Default permission mode in Code",
+      options: ["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"],
+      note: "Permission mode new Code sessions start in; upstream reads the older value default as manual (added in v6.28899.2, available since 6.6395.0)." },
+    { key: "claudeCodeManagedSettingsOverride", kind: "enum", group: "sandbox", scope: "3p",
+      label: "Replace Claude Code's managed settings", options: ["off", "cowork-only", "code-only", "both"],
+      note: "Where this configuration replaces the device's Claude Code managed settings: off = nowhere, cowork-only = Cowork and Chat, code-only = Code, both = Cowork, Chat and Code (upstream still reads cowork, code and all) (added in v6.28899.2, available since 6.6395.0)." },
+    { key: "autoModeRules", kind: "json", group: "sandbox", scope: "3p",
+      label: "Auto mode rules",
+      note: "JSON object { allow, soft_deny, hard_deny, environment, classifyAllShell } for Auto mode: rule lists for what it allows, blocks unless asked, always blocks and trusts, plus whether it checks every shell command; at most 16,384 characters (added in v6.28899.2, availableInVersion @next)." },
+    { key: "claudeCodeSignInEnabled", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Allow sign-in from Claude Code in terminals and IDEs", note: "Added in v6.28899.2, availableInVersion @next." },
+    { key: "claudeCodeBrowserInsteadOfBroker", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Allow Claude Code to sign in with the browser instead of the Entra broker",
+      note: "Only offered with Claude Code sign-in on and a gateway that signs in through the Entra broker (added in v6.28899.2, availableInVersion @next)." },
+    { key: "officeSignInEnabled", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Allow sign-in from the Claude add-in", note: "Added in v6.28899.2, availableInVersion @next." },
+    { key: "promptSuggestionEnabled", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Allow prompt suggestions", note: "Added in v6.28899.2, available since 6.6395.0." },
+    { key: "workAcrossAppsEnabled", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Let Claude work across apps",
+      note: "Self-hosted sessions: the session host hands a task's conversation to the Microsoft 365 add-in only when this is on; applies to a running app (added in v6.28899.2, available since 6.6395.0)." },
     { key: "disableDesktopLocalSessions", kind: "bool", group: "sandbox", scope: "3p",
       label: "Disable local Code sessions",
       note: "Code sessions run only on SSH hosts, never on this computer; without an SSH host allowlist Code may have nowhere to start a session (available since v2.42304.0)." },
@@ -1030,6 +1055,20 @@
     { key: "sshClientPath", kind: "text", group: "sandbox", scope: "3p",
       label: "SSH client program",
       note: "Absolute path to the OpenSSH ssh program used for SSH sessions; unset uses the first ssh on PATH (available since v1.46388.1)." },
+    { key: "sshHostProgramsPreinstalled", kind: "bool", group: "sandbox", scope: "both",
+      label: "Use preinstalled programs on SSH hosts",
+      note: "SSH sessions use the programs already installed on the host instead of having the app copy its own there; applies to a running app (added in v6.28899.2, available since 6.6395.0)." },
+    { key: "sshHostSandboxUnavailable", kind: "enum", group: "sandbox", scope: "3p",
+      label: "When the sandbox cannot start on an SSH host", options: ["warn", "refuse"],
+      note: "warn = run the session with a warning, refuse = don't run the session (added in v6.28899.2, availableInVersion @next)." },
+    { key: "disableSshSavedPasswords", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Disable saved SSH passwords",
+      note: "Users cannot save SSH passwords in the app (added in v6.28899.2, available since 6.6395.0)." },
+    { key: "disableRemotePreviewScripts", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Disable scripts in SSH and WSL file previews", note: "Added in v6.28899.2, available since 6.6395.0." },
+    { key: "remoteComponentsBaseUrl", kind: "text", group: "sandbox", scope: "3p",
+      label: "SSH and WSL download mirror",
+      note: "URL of a mirror the app downloads the programs it installs on SSH and WSL hosts from; applies to a running app (added in v6.28899.2, available since 6.6395.0)." },
     { key: "builtinBrowserEnabled", kind: "bool", group: "sandbox", scope: "3p",
       label: "Allow the built-in browser",
       note: "Offers the built-in browser in Cowork and Code sessions; takes effect after an app restart." },
@@ -1045,6 +1084,9 @@
     { key: "builtinBrowserClientCertificateHosts", kind: "lines", group: "sandbox", scope: "both",
       label: "Sites allowed a client certificate in the built-in browser and preview panes",
       note: "One site pattern per line (host, host:port, *.example.com or *) that may receive a client certificate from the device's store in the built-in browser or preview panes; machine-wide managed configuration only (added in v5.11492.0, availableInVersion @next)." },
+    { key: "disableBrowserCertificateExceptions", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Disable certificate exceptions in the built-in browser",
+      note: "Users cannot proceed past a certificate error in the built-in browser (added in v6.28899.2, available since 6.6395.0)." },
     { key: "officeDisabledHosts", kind: "lines", group: "sandbox", scope: "3p",
       label: "Disabled Office applications",
       note: "One of sheet, slide, doc, mail per line - Office hosts where the Claude add-in for Microsoft 365 is turned off (upstream gates this @next)." },
@@ -1084,6 +1126,18 @@
     { key: "artifactsRetentionDays", kind: "int", group: "sandbox", scope: "3p", max: 3650,
       label: "Reserved setting 8 (Claude Docs/Slides/Designs editors: retention days)",
       lock: "upstream titles it \"Reserved setting 8\" with no wizard group and a one-line description, availableInVersion @next (added in v5.1231.0); it belongs to the Docs, Slides, Designs, Dashboards and Motion editors, whose 3P switches are not documented yet, so this page never writes it" },
+    { key: "artifactsWhiteboardEnabled", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Reserved setting 9 (Claude Docs/Slides/Designs editors: Whiteboard)",
+      lock: "upstream titles it \"Reserved setting 9\" (public-undocumented, available since 6.6395.0, added in v6.28899.2); it belongs to the editors above, whose 3P switches are not documented yet, so this page never writes it" },
+    { key: "conversationServiceEnabled", kind: "bool", group: "sandbox", scope: "3p",
+      label: "Reserved setting 10 (conversation service)",
+      lock: "upstream titles it \"Reserved setting 10\" (public-undocumented, available since 6.6395.0, added in v6.28899.2) and no released session host reads it, so this page never writes it" },
+    { key: "isArtifactAppsEnabled", kind: "bool", group: "sandbox", scope: "1p",
+      label: "Allow installing artifacts as apps", note: "Added in v6.28899.2, available since 6.6395.0." },
+    { key: "isArtifactAppPermissionsEnabled", kind: "bool", group: "sandbox", scope: "1p",
+      label: "Allow notifications, shortcuts, tray items and floating windows for artifact apps", note: "Added in v6.28899.2, available since 6.6395.0." },
+    { key: "isArtifactAppFullAccessEnabled", kind: "bool", group: "sandbox", scope: "1p",
+      label: "Allow artifact apps full access to the computer", note: "Added in v6.28899.2, available since 6.6395.0." },
     { key: "ExtensionSettings", kind: "json", group: "sandbox", scope: "both",
       label: "Administrator setting (browser extension policy)",
       lock: "internal-only upstream (hidden in its own wizard, read from the device's own configuration, availableInVersion @next in v5.1231.0), so this page never writes it" },
@@ -3068,6 +3122,83 @@
   // wlroots-bridge); kwin mode's static capabilities (upstream always asks
   // there). "unknown" when no executor runs or it does not say. No I/O beyond
   // the switch's two small files.
+  // The policy gates of upstream's Computer Use enable gate, as the Linux
+  // branch of that gate applies them (fix_computer_use_linux sub-patch 11
+  // publishes the readers as globalThis.__cdbCuPolicy when the gate's chunk
+  // loads). Each answer is "unknown" when the reader is missing or throws,
+  // never "none".
+  //   allowedApps: the allowed-apps list Anthropic's server sends for the
+  //     organization: "none" | "list" (+ count, the first app ids as given)
+  //     | "unreadable" | "unknown" (also before the server's values loaded).
+  //   managed: the administrator's computerUseEnabled key: "none" | "off" |
+  //     "unreadable" (device management could not be read at start) | "unknown".
+  //   compliance: the organization's compliance (HIPAA) restriction:
+  //     "none" | "restricted" | "unknown".
+  var __cdbEx_CUS_POLICY_APPS = 20;
+  var __cdbEx_CUS_POLICY_APP_LEN = 120;
+  var __cdbEx_cusPolicyLogged = "";
+  function __cdbEx_cusPolicy() {
+    var P = globalThis.__cdbCuPolicy;
+    var out = { allowedApps: { state: "unknown" }, managed: { state: "unknown" }, compliance: { state: "unknown" }, sshCli: { state: "unknown" } };
+    if (!P || typeof P !== "object") return out;
+    function call(fn) { if (typeof fn !== "function") throw new Error("missing reader"); return fn(); }
+    try {
+      if (call(P.loaded) !== true) out.allowedApps = { state: "unknown" };
+      else if (call(P.allowReadable) !== true) out.allowedApps = { state: "unreadable" };
+      else if (call(P.allowHasEntry) !== true) out.allowedApps = { state: "none" };
+      else {
+        var list = call(P.allowApps);
+        var ids = Array.isArray(list) ? list.filter(function (x) { return typeof x === "string" && x.trim() !== ""; }) : [];
+        // What the list does here: upstream turns Computer Use off on Wayland;
+        // on X11 this build cannot enforce the list per app yet (its app ids
+        // are desktop-file ids, upstream matches the list against resolved
+        // executable paths), so the gate keeps it off there too.
+        var wl;
+        try { wl = call(P.wayland); } catch (ew) { wl = undefined; }
+        out.allowedApps = { state: "list", count: ids.length,
+          apps: ids.slice(0, __cdbEx_CUS_POLICY_APPS).map(function (x) { return x.trim().slice(0, __cdbEx_CUS_POLICY_APP_LEN); }),
+          effect: wl === true ? "off-wayland" : wl === false ? "off-cannot-enforce" : "off" };
+      }
+    } catch (e) { out.allowedApps = { state: "unknown" }; }
+    try {
+      if (call(P.managedAllows) !== false) out.managed = { state: "none" };
+      else out.managed = { state: call(P.managedUnreadable) === true ? "unreadable" : "off" };
+    } catch (e2) { out.managed = { state: "unknown" }; }
+    try {
+      var h = call(P.hipaa);
+      out.compliance = { state: h === true ? "restricted" : h === false ? "none" : "unknown" };
+    } catch (e3) { out.compliance = { state: "unknown" }; }
+    // Not a policy: the per-call SSH-host deny's server switch, a standing
+    // fact (per-session state is not in main): "on" | "off" | "unknown".
+    try {
+      out.sshCli = { state: call(P.loaded) !== true ? "unknown" : call(P.sshCliDeny) === true ? "on" : "off" };
+    } catch (e4) { out.sshCli = { state: "unknown" }; }
+    // One log line per change, so the state the page drew is also in
+    // claude-patches.log (states and the list's size only, never the app ids).
+    var key = "allowed-apps=" + out.allowedApps.state + (out.allowedApps.state === "list" ? "(" + out.allowedApps.count + "," + out.allowedApps.effect + ")" : "") +
+      " managed=" + out.managed.state + " compliance=" + out.compliance.state;
+    if (key !== __cdbEx_cusPolicyLogged) { __cdbEx_cusPolicyLogged = key; __cdbEx_log("cu-status: policy " + key); }
+    return out;
+  }
+
+  // Who holds Computer Use right now: upstream's lock instance (published by
+  // fix_computer_use_linux sub-patch 4b on its first acquire of the run, so
+  // unset = nobody took it yet). "free" | "held" (+ kind "code" for a Code
+  // session, whose ids start with local_; "session" otherwise) | "unknown".
+  // The lock lives only in the running app: every turn end, stop and session
+  // end releases it, and a restart starts without it.
+  function __cdbEx_cusLock() {
+    try {
+      var L = globalThis.__cdbCuLock;
+      if (L === undefined) return { state: "free" };
+      if (!L || typeof L !== "object") return { state: "unknown" };
+      var h = L.currentHolder;
+      if (h === undefined || h === null) return { state: "free" };
+      if (typeof h !== "string") return { state: "unknown" };
+      return { state: "held", kind: h.indexOf("local_") === 0 ? "code" : "session" };
+    } catch (e) { return { state: "unknown" }; }
+  }
+
   function __cdbEx_cusShots() {
     var d = __cdbEx_cusDecision();
     var out = { ask: true, kwin: false, filtering: "unknown", gaps: [], session: d ? __cdbEx_cusSession(d) : "", backend: d ? d.backend : null, glow: null };
@@ -3441,7 +3572,7 @@
         rows: { desktop: s.desktop.row, tpm: s.tpm.row, cloud: s.cloud,
           kvm: __cdbEx_cusKvmRow(k, s.vmRestart), vsock: __cdbEx_cusVsockRow(k), vmTools: __cdbEx_cusVmToolsRow(s.vmAt),
           vm: __cdbEx_cusVmRow(s.vm.running) },
-        actions: actions, screenshots: __cdbEx_cusShots(), vm: s.vm };
+        actions: actions, screenshots: __cdbEx_cusShots(), policy: __cdbEx_cusPolicy(), lock: __cdbEx_cusLock(), vm: s.vm };
     });
     __cdbEx_cusReadP = p;
     __cdbEx_cusReadMode = mode;
