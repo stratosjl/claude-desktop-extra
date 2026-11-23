@@ -464,10 +464,11 @@ function loadMainHarness(opts = {}) {
 
   const st0 = h.ipcHandlers["cdb-shortcuts:pref-read"](h.trustedEv());
   ok(st0.ok === true && st0.enabled === false && st0.enabledLocked === false &&
-     st0.lockedByJsonc === false && st0.actions.length === 3 &&
+     st0.lockedByJsonc === false && st0.actions.length === 4 &&
+     st0.actions.some((a) => a.id === "sendNow" && a.slug === "send-now") &&
      st0.actions.every((a) => a.accelerator === "" && a.scope === "app") &&
      st0.session.sessionType === "x11",
-     "default state is off, 3 unbound app-scoped actions, X11 detected");
+     "default state is off, 4 unbound app-scoped actions (including sendNow), X11 detected");
 
   ok(h.execJsCalls.length === 0,
      "opt-in gating: dom-ready does NOT inject page script while customShortcuts is disabled");
@@ -563,6 +564,21 @@ function loadMainHarness(opts = {}) {
   await h.api.trigger("newVoiceChat", "socket");
   ok(h.navCalls.includes("/new") && h.winFocusCalls() >= 1 && h.execJsCalls.length > execBefore,
      "newVoiceChat dispatches /new navigation and focuses window when triggered externally");
+
+  // Bind sendNow to Alt+Enter (normalized -> Alt+Return), match Enter & NumpadEnter, and verify socket trigger does not steal window focus
+  const bindSendNow = h.ipcHandlers["cdb-shortcuts:bind"](h.trustedEv(), "sendNow", "alt+enter");
+  const sendNowRow = bindSendNow.actions && bindSendNow.actions.find((a) => a.id === "sendNow");
+  const hitSendEnter = h.fireBeforeInput({ type: "keyDown", alt: true, key: "Enter", code: "Enter" });
+  const hitSendNumpad = h.fireBeforeInput({ type: "keyDown", alt: true, key: "Enter", code: "NumpadEnter" });
+  const focusBeforeSend = h.winFocusCalls();
+  const execBeforeSend = h.execJsCalls.length;
+  const sockSend = await h.api.trigger("send-now", "socket");
+  ok(bindSendNow.ok && sendNowRow && sendNowRow.accelerator === "Alt+Return" &&
+     hitSendEnter && hitSendNumpad &&
+     sockSend.ok && h.execJsCalls.length > execBeforeSend &&
+     h.execJsCalls[h.execJsCalls.length - 1].includes('"sendNow"') &&
+     h.winFocusCalls() === focusBeforeSend,
+     "sendNow binds Alt+Enter -> Alt+Return, matches Enter/NumpadEnter, and triggers via send-now slug without stealing focus");
 
   // Reset prunes customShortcuts cleanly when off
   h.ipcHandlers["cdb-shortcuts:reset"](h.trustedEv());
@@ -787,6 +803,205 @@ try {
     if (k !== "__error") ok(v === true, "Read Aloud: " + k);
   }
 
+  // Scenario A2: Code tab (epitaxy) - upstream portals the NEWEST turn's message
+  // actions out of its assistant-message into [data-testid="transcript-tail-actions"]
+  // below the transcript rows, after any turn box / approval / question card in the
+  // tail (issue #359). DOM mirrors the live 6.28899.6 Code tab skeleton.
+  const resA2 = await runChromeScenario("read-aloud-code-tail", buildScenarioHtml(`
+    const root = document.getElementById("root");
+    const CARD = '<div data-inline-approval-slot><div data-turn-box><div data-turn-next><p>recap</p>' +
+      '<span data-turn-dismiss><button aria-label="Dismiss"></button></span><p>Turn on Auto-fix?</p>' +
+      '<div role="group" aria-label="Suggested next actions" data-approval-card-root>' +
+      '<button aria-keyshortcuts="Control+Enter">Yes, Auto-fix</button><button>No, I will watch</button></div></div></div></div>';
+    function codeTab(opts) {
+      root.innerHTML = \`
+        <textarea id="composer"></textarea>
+        <div data-testid="epitaxy-virtual-transcript"><div role="feed" aria-label="Chat messages">
+          <div data-testid="transcript-sizer">
+            <div data-testid="transcript-rows">
+              <div data-testid="transcript-row" data-perf-row="assistant"><div role="article"><div data-transcript-row>
+                <div data-cds="AssistantMessage" data-testid="assistant-message" data-turn-key="msg_old" data-is-streaming="false">
+                  <h3>Claude responded</h3><div>older reply</div>
+                  <div><div data-cds="MessageActions" data-testid="message-actions">
+                    <button aria-label="Copy"></button>
+                    <button id="raOld" data-testid="epitaxy-read-aloud" aria-label="Read aloud"></button>
+                  </div></div>
+                </div></div></div></div>
+              <div data-testid="transcript-row" data-perf-row="assistant" data-last-message="true"><div role="article"><div data-transcript-row>
+                <div data-cds="AssistantMessage" data-testid="assistant-message" data-turn-key="\${opts.newKey === undefined ? "msg_new" : opts.newKey}" data-is-streaming="\${opts.streaming ? "true" : "false"}">
+                  <h3>Claude responded</h3><div>newest reply</div>
+                </div></div></div></div>
+            </div>
+            <div data-testid="transcript-after-rows"><div data-transcript-tail>
+              <div data-testid="transcript-trailing-slot" data-transcript-cards>\${opts.trailing || ""}</div>
+              <div><div id="tailTurn" data-transcript-tail-turn>
+                <div data-testid="transcript-tail-slot">\${opts.card ? CARD : ""}</div>
+                <div data-testid="transcript-tail-actions" data-transcript-last-row-controls>
+                  <div data-cds="AssistantMessage"><div>\${opts.actions}</div></div>
+                </div>
+              </div></div>
+            </div></div>
+          </div>
+        </div></div>\`;
+    }
+    const BAR = '<div data-cds="MessageActions" data-testid="message-actions"><button aria-label="Copy"></button>' +
+      '<button id="raNew" data-testid="epitaxy-read-aloud" aria-label="Read aloud"></button></div>';
+    // Fake React fibers mirroring the live 6.28899.6 tree: Copy -> ... -> turn renderer {turn:{key}};
+    // Read Aloud -> SpeakAction {playing,label} -> {messageUuid: entryId, text} -> {turn:{key}}.
+    // opts.stale: the button's chain keeps a stale SpeakAction; only its alternate tracks the DOM.
+    function wireNew(opts) {
+      const b = document.getElementById("raNew");
+      const copy = b.parentElement.querySelector('[aria-label="Copy"]');
+      const speak = { memoizedProps: { playing: false, label: "Read aloud" }, alternate: null };
+      if (opts && opts.stale) speak.alternate = { memoizedProps: { playing: false, label: "Read aloud" } };
+      if (opts) {
+        const turnR = { memoizedProps: { turn: { key: opts.turnKey } }, return: null };
+        const wrap = { memoizedProps: { messageUuid: opts.entryId, text: () => "x" }, return: turnR };
+        speak.return = wrap;
+        b.__reactFiber$test = { memoizedProps: { "aria-label": "Read aloud" }, return: speak };
+        if (copy) copy.__reactFiber$test = { memoizedProps: { "aria-label": "Copy" }, return: { memoizedProps: { onClick: () => {} }, return: turnR } };
+      }
+      let clicks = 0;
+      b.addEventListener("click", () => {
+        clicks++;
+        const playing = b.getAttribute("aria-label") !== "Pause";
+        const label = playing ? "Pause" : "Resume";
+        b.setAttribute("aria-label", label);
+        if (opts && opts.stale) speak.alternate.memoizedProps = { playing: playing, label: label };
+        else speak.memoizedProps = { playing: playing, label: label };
+      });
+      return () => clicks;
+    }
+    const OWN = { turnKey: "msg_new", entryId: "msg_new" };
+    function wireOld() {
+      let c = 0;
+      document.getElementById("raOld").addEventListener("click", () => { c++; });
+      return () => c;
+    }
+
+    // 1. Tail outlet without a card (every Code tab reply).
+    codeTab({ actions: BAR });
+    let nNew = wireNew(OWN), nOld = wireOld();
+    const r1 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r1.ok && /^clicked:/.test(r1.detail) && nNew() === 1 && nOld() === 0, "code_tail_outlet_without_card_clicks_newest");
+
+    // 2. Same with the Auto-fix turn box (issue #359 screenshot) and an approval card in the trailing slot.
+    codeTab({ actions: BAR, card: true, trailing: '<div data-inline-approval-slot><div data-approval-cluster-host></div></div>' });
+    nNew = wireNew(OWN); nOld = wireOld();
+    const r2 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r2.ok && nNew() === 1 && nOld() === 0, "code_tail_outlet_with_turn_box_card_clicks_newest");
+
+    // 3. Second press toggles the playing Code tab button (no data-state; fiber playing + label).
+    const st = window.__cdbCustomShortcuts.state();
+    const r3 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(st.readAloudPlaying === 1 && r3.ok && r3.detail === "toggled-active:playing" && nNew() === 2 && nOld() === 0,
+        "code_tail_outlet_second_press_toggles_playing");
+
+    // 4. No sibling leak: tail outlet owned by another turn (fiber key mismatch) is never clicked,
+    //    and the older inline button is never used for the newest reply.
+    codeTab({ actions: BAR, card: true });
+    nNew = wireNew({ turnKey: "msg_someone_else", entryId: "entry_someone_else" }); nOld = wireOld();
+    const r4 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(!r4.ok && r4.reason === "missing-button" && nNew() === 0 && nOld() === 0, "code_tail_outlet_foreign_owner_never_leaks");
+
+    // 5. Without fiber data the outlet belongs to the newest assistant-message only.
+    codeTab({ actions: BAR, card: true });
+    nNew = wireNew(null); nOld = wireOld();
+    const r5 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r5.ok && nNew() === 1 && nOld() === 0, "code_tail_outlet_dom_rule_newest_only");
+
+    // 6. Streaming newest reply with an empty outlet keeps the streaming rule: falls back to the
+    //    latest COMPLETED reply (the older one, whose actions are inline again).
+    codeTab({ actions: "", streaming: true });
+    nOld = wireOld();
+    const r6 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r6.ok && nOld() === 1, "code_tail_outlet_streaming_rule_kept");
+
+    // 7. Deferred actions inside the outlet hydrate (pointerenter on the tail turn) preserving focus.
+    codeTab({ card: true, actions: '<div id="defTail" data-cds="MessageActions" data-testid="message-actions" data-deferred="true"><button id="srT" class="sr-only">Show message actions</button></div>' });
+    nOld = wireOld();
+    const comp = document.getElementById("composer");
+    comp.focus();
+    let tailEnter = 0, defClicks = 0;
+    document.getElementById("tailTurn").addEventListener("pointerenter", () => { tailEnter++; });
+    const srT = document.getElementById("srT");
+    srT.__reactFiber$test = { memoizedProps: {}, return: { memoizedProps: { turn: { key: "msg_new" } }, return: null } };
+    srT.addEventListener("click", () => {
+      document.getElementById("defTail").removeAttribute("data-deferred");
+      document.getElementById("defTail").innerHTML = '<button id="raH" data-testid="epitaxy-read-aloud" aria-label="Read aloud"></button>';
+      document.getElementById("raH").addEventListener("click", () => { defClicks++; });
+    });
+    const r7 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r7.ok && r7.detail === "clicked-after-hydrate" && defClicks === 1 && nOld() === 0 && tailEnter >= 1 &&
+        document.activeElement === comp, "code_tail_outlet_deferred_hydrates_no_leak");
+
+    // 8. Ownership by turn.key when the Read Aloud wrapper's messageUuid (entry id) differs.
+    codeTab({ actions: BAR, card: true });
+    nNew = wireNew({ turnKey: "msg_new", entryId: "entry_1" }); nOld = wireOld();
+    const r8 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r8.ok && nNew() === 1 && nOld() === 0, "code_tail_outlet_owned_by_turn_key_when_entry_id_differs");
+
+    // 9. Both fiber keys foreign -> never clicked.
+    codeTab({ actions: BAR, card: true });
+    nNew = wireNew({ turnKey: "msg_x", entryId: "entry_x" }); nOld = wireOld();
+    const r9 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(!r9.ok && r9.reason === "missing-button" && nNew() === 0 && nOld() === 0, "code_tail_outlet_both_keys_foreign_never_clicked");
+
+    // 10. Known fiber owner but the reply has no data-turn-key -> refuse, no position fallback.
+    codeTab({ actions: BAR, newKey: "" });
+    nNew = wireNew(OWN); nOld = wireOld();
+    const r10 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(!r10.ok && r10.reason === "missing-button" && nNew() === 0 && nOld() === 0, "code_tail_outlet_known_owner_without_turn_key_refuses");
+
+    // 11. Stale current fiber: only the alternate carries {playing:true, label:"Pause"} -> second press toggles.
+    codeTab({ actions: BAR });
+    nNew = wireNew({ turnKey: "msg_new", entryId: "msg_new", stale: true }); nOld = wireOld();
+    const r11a = await window.__cdbCustomShortcuts.trigger("readAloud");
+    const r11b = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r11a.ok && r11b.ok && r11b.detail === "toggled-active:playing" && nNew() === 2 && nOld() === 0,
+        "code_read_aloud_state_from_alternate_fiber");
+
+    // 12. A general action bar whose fiber has {messageUuid, text: fn, onFork} but no Read Aloud is not a match.
+    root.innerHTML = '<div data-testid="assistant-message" data-turn-key="m1" data-is-streaming="false">' +
+      '<div data-cds="MessageActions" data-testid="message-actions"><button id="cp" aria-label="Copy"></button>' +
+      '<button id="fk" aria-label="Fork from here"></button></div></div>';
+    let cpClicks = 0, fkClicks = 0;
+    const barFiber = { memoizedProps: { messageUuid: "m1", text: () => "x", onFork: () => {} }, return: null };
+    document.getElementById("cp").__reactFiber$test = { memoizedProps: {}, return: barFiber };
+    document.getElementById("fk").__reactFiber$test = { memoizedProps: {}, return: barFiber };
+    document.getElementById("cp").addEventListener("click", () => { cpClicks++; });
+    document.getElementById("fk").addEventListener("click", () => { fkClicks++; });
+    const r12 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(!r12.ok && r12.reason === "missing-button" && cpClicks === 0 && fkClicks === 0,
+        "read_aloud_fiber_fallback_ignores_general_action_bar");
+
+    // 13. Streaming is per turn: a 2-row streaming turn (only its first row carries data-is-streaming)
+    //     after a completed reply -> the completed reply is read, nothing of the streaming turn is clicked.
+    const LIVE = '<div data-testid="assistant-message" data-turn-key="msg_live" data-is-streaming="true"><div>item 1</div></div>' +
+      '<div data-testid="assistant-message" data-turn-key="msg_live"><div>item 2</div>' +
+      '<div data-cds="MessageActions"><button id="liveCopy" aria-label="Copy"></button></div></div>';
+    root.innerHTML = '<div data-testid="epitaxy-virtual-transcript"><div role="feed">' +
+      '<div data-testid="assistant-message" data-turn-key="msg_old" data-is-streaming="false">' +
+      '<div data-cds="MessageActions" data-testid="message-actions"><button id="raOld2" data-testid="epitaxy-read-aloud" aria-label="Read aloud"></button></div></div>' +
+      LIVE + '<div data-testid="transcript-tail-actions" data-transcript-last-row-controls></div></div></div>';
+    let old2 = 0, liveCopy = 0;
+    document.getElementById("raOld2").addEventListener("click", () => { old2++; });
+    document.getElementById("liveCopy").addEventListener("click", () => { liveCopy++; });
+    const r13 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(r13.ok && old2 === 1 && liveCopy === 0, "streaming_multi_row_turn_falls_back_to_previous_reply");
+
+    // 14. Only the streaming multi-row turn -> "Wait for Claude to finish responding".
+    root.innerHTML = '<div data-testid="epitaxy-virtual-transcript"><div role="feed">' + LIVE + '</div></div>';
+    liveCopy = 0;
+    document.getElementById("liveCopy").addEventListener("click", () => { liveCopy++; });
+    const r14 = await window.__cdbCustomShortcuts.trigger("readAloud");
+    tOk(!r14.ok && r14.reason === "streaming" && liveCopy === 0, "streaming_multi_row_turn_only_waits");
+  `), 3000);
+  ok(!resA2.__error, "Read Aloud Code tab scenarios ran without error", resA2.__error);
+  for (const [k, v] of Object.entries(resA2)) {
+    if (k !== "__error") ok(v === true, "Read Aloud (Code tab): " + k);
+  }
+
   // Scenario B: Voice Mode (OR direct, qR active fiber onEnd, xR Phone item, /code guard, Settings close, recorder focusin)
   const resB = await runChromeScenario("voice-mode", buildScenarioHtml(`
     const root = document.getElementById("root");
@@ -875,6 +1090,87 @@ try {
   ok(!resC.__error, "New Voice Chat headless scenario ran without error");
   for (const [k, v] of Object.entries(resC)) {
     if (k !== "__error") ok(v === true, "New Voice Chat: " + k);
+  }
+
+  // Scenario D: Send Now (primary testid on /code preserving composer focus, newest visible,
+  // busy/disabled guards without fallback leak, fiber fallback without clicking sibling Remove,
+  // label fallback with "Send N now" + <kbd> ignoring Settings dialog, and empty state)
+  const resD = await runChromeScenario("send-now", buildScenarioHtml(`
+    history.pushState({}, "", "/code/session-42");
+    const root = document.getElementById("root");
+    root.innerHTML = \`
+      <textarea id="composer"></textarea>
+      <button id="hiddenSn" data-testid="awaiting-turn-send-now" style="display:none;width:80px;height:24px;">Send now</button>
+      <button id="oldSn" data-testid="awaiting-turn-send-now" style="width:80px;height:24px;">Send now</button>
+      <button id="newSn" data-testid="awaiting-turn-send-now" style="width:80px;height:24px;">Send 2 now</button>
+    \`;
+    const comp = document.getElementById("composer");
+    comp.focus();
+    let hiddenClicks = 0, oldClicks = 0, newClicks = 0;
+    document.getElementById("hiddenSn").addEventListener("click", () => { hiddenClicks++; });
+    document.getElementById("oldSn").addEventListener("click", () => { oldClicks++; });
+    document.getElementById("newSn").addEventListener("click", () => { newClicks++; });
+    const stBefore = window.__cdbCustomShortcuts.state();
+    const r1 = await window.__cdbCustomShortcuts.trigger("sendNow");
+    tOk(stBefore.sendNowButtons === 3 && stBefore.sendNowAvailable === true &&
+        r1.ok && r1.detail === "clicked:testid" &&
+        hiddenClicks === 0 && oldClicks === 0 && newClicks === 1 &&
+        document.activeElement === comp,
+        "sendNow_clicks_newest_visible_testid_preserving_composer_focus");
+
+    // Busy button refuses cleanly without double-clicking or falling through to unrelated buttons
+    root.innerHTML = \`
+      <button id="busySn" data-testid="awaiting-turn-send-now" aria-busy="true" disabled style="width:80px;height:24px;">Send now</button>
+      <button id="otherSn" style="width:80px;height:24px;">Send now</button>
+    \`;
+    let busyClicks = 0, otherClicks = 0;
+    document.getElementById("busySn").addEventListener("click", () => { busyClicks++; });
+    document.getElementById("otherSn").addEventListener("click", () => { otherClicks++; });
+    const r2 = await window.__cdbCustomShortcuts.trigger("sendNow");
+    tOk(!r2.ok && r2.reason === "busy" && busyClicks === 0 && otherClicks === 0 &&
+        !!document.querySelector(".cdb-sc-toast"),
+        "sendNow_reports_busy_without_double_click_or_fallback_leak");
+
+    // Fiber fallback when data-testid moved: skips sibling Remove button sharing parent onSendNow fiber
+    root.innerHTML = \`
+      <button id="snFiber" data-press-renders-now="true" style="width:80px;height:24px;">Jetzt senden</button>
+      <button id="removeSibling" aria-label="Remove queued message" style="width:24px;height:24px;">X</button>
+    \`;
+    const snFiber = document.getElementById("snFiber");
+    const remBtn = document.getElementById("removeSibling");
+    const sharedParentFiber = { memoizedProps: { onSendNow: () => {} }, return: null };
+    snFiber.__reactFiber$test = { return: sharedParentFiber };
+    remBtn.__reactFiber$test = { return: sharedParentFiber };
+    let fiberClicks = 0, remClicks = 0;
+    snFiber.addEventListener("click", () => { fiberClicks++; });
+    remBtn.addEventListener("click", () => { remClicks++; });
+    const r3 = await window.__cdbCustomShortcuts.trigger("sendNow");
+    tOk(r3.ok && r3.detail === "clicked:fiber" && fiberClicks === 1 && remClicks === 0 &&
+        window.__diagLines.some((l) => l.includes("send-now-fiber-fallback")),
+        "sendNow_fiber_fallback_requires_marker_and_never_clicks_sibling_remove");
+
+    // Label fallback handles "Send 3 now" + <kbd> shortcut hint and ignores Settings dialog buttons
+    root.innerHTML = \`
+      <div role="dialog"><div class="cdbx-item"></div><button id="dlgSn" style="width:80px;height:24px;">Send now</button></div>
+      <button id="lblSn" style="width:120px;height:24px;">Send 3 now<kbd>Ctrl+↵</kbd></button>
+    \`;
+    let dlgClicks = 0, lblClicks = 0;
+    document.getElementById("dlgSn").addEventListener("click", () => { dlgClicks++; });
+    document.getElementById("lblSn").addEventListener("click", () => { lblClicks++; });
+    const r4 = await window.__cdbCustomShortcuts.trigger("sendNow");
+    tOk(r4.ok && r4.detail === "clicked:label" && dlgClicks === 0 && lblClicks === 1 &&
+        window.__diagLines.some((l) => l.includes("send-now-label-fallback")),
+        "sendNow_label_fallback_strips_kbd_and_ignores_settings_dialog");
+
+    // Empty state shows toast and returns no-queued-message
+    root.innerHTML = '<div>No queued messages</div>';
+    const r5 = await window.__cdbCustomShortcuts.trigger("sendNow");
+    tOk(!r5.ok && r5.reason === "no-queued-message" && !window.__cdbCustomShortcuts.state().sendNowAvailable,
+        "sendNow_reports_no_queued_message_when_absent");
+  `), 2500);
+  ok(!resD.__error, "Send Now headless scenarios ran without error");
+  for (const [k, v] of Object.entries(resD)) {
+    if (k !== "__error") ok(v === true, "Send Now: " + k);
   }
 } finally {
   server.close();

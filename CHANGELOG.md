@@ -2,6 +2,26 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-11-23
+
+### Custom Shortcuts: Send queued message now (`send-now`)
+
+- Added **Send queued message now** (`sendNow`, CLI slug `send-now`) to **Settings → Extra → Custom Shortcuts** (`js/custom_shortcuts_main.js`, `js/custom_shortcuts_page.js`, `scripts/claude-desktop-launcher.sh`, [guide](docs/custom-shortcuts.md)). Upstream disables the `Send now` keyboard chord in Code and Chat sessions; binding a key (e.g. `Alt+Enter`) or running `claude-desktop --trigger-shortcut send-now` clicks the newest visible enabled `Send now` / `Send N now` button (`button[data-testid="awaiting-turn-send-now"]`, with fiber and label fallbacks) without stealing focus from the composer.
+
+### Custom Shortcuts: Read aloud latest reply works in Code-tab sessions (#359)
+
+- The **Read aloud latest reply** shortcut now works in Code-tab sessions, not only in Chat. There the newest reply's action bar sits below the transcript, after any card (an Auto-fix offer, an approval or a question card), and has its own Read Aloud button; the shortcut finds that button, ties it to the newest reply, and a second press pauses it. Chat behaviour is unchanged ([guide](docs/custom-shortcuts.md)).
+
+### Settings modal search includes Extra pages and items
+
+- Upstream's Settings search box (`SettingsNavSearch`) now also indexes and displays matching **Extra** sections and items — Themes, Community Features, Cowork (Linux), Custom Models (providers and models), Custom Shortcuts, Anthropic Features, and Deployment keys — jumping directly to and highlighting the selected row (`js/extra_settings_page.js`, `js/extra_settings_page.css`).
+
+### GTA VI theme redrawn
+
+- The palette follows the VI logo's indigo, magenta, coral and orange sunset gradient: a plum night with cream text and a coral-pink accent in dark mode, a golden-hour peach and blush with a magenta accent in light mode. The pink, cyan and gold neon look is gone.
+- The spinner is the block VI with a violet rim, a cream keyline and the sunset gradient in six bands; the second flip frame adds a diagonal gleam, like light across a sticker.
+- Backdrop scenes redrawn: dark has a striped sunset sun at the horizon, a lit skyline, palms and a water reflection; light has a golden-hour sky, lilac palms and pastel hotels.
+
 ## 2026-11-22
 
 ### Transparent window: question cards, the session rail and page headers see-through again on 6.28899
