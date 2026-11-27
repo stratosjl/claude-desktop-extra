@@ -102,7 +102,7 @@ index 3214c79..93578a6 100644
      // pathological; spaces are deliberately ALLOWED, because "my notes.md" is an
      // ordinary tracked file and rejecting it would drop that one file back to the
 diff --git a/js/extra_settings_main.js b/js/extra_settings_main.js
-index 82461c4..ac980d3 100644
+index 8a47701..8809289 100644
 --- a/js/extra_settings_main.js
 +++ b/js/extra_settings_main.js
 @@ -477,7 +477,7 @@
@@ -123,7 +123,7 @@ index 82461c4..ac980d3 100644
      return /-3p$/.test(ud) ? ud : ud + "-3p";
    }
  
-@@ -4624,8 +4626,6 @@
+@@ -4755,8 +4757,6 @@
          __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix author option is Linux only" }; };
        } else if (ch.indexOf("cdb-tray:") === 0) {
          __cdbEx_handlers[ch] = function () { return { ok: false, error: "the tray icon switch is Linux only" }; };
@@ -133,7 +133,7 @@ index 82461c4..ac980d3 100644
          __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix ready-to-merge wake is Linux only" }; };
        } else if (ch.indexOf("cdb-session-start:") === 0) {
 diff --git a/js/extra_settings_page.js b/js/extra_settings_page.js
-index 6e5f2ba..986a5a3 100644
+index a81fa02..fee5656 100644
 --- a/js/extra_settings_page.js
 +++ b/js/extra_settings_page.js
 @@ -588,12 +588,12 @@
@@ -155,7 +155,7 @@ index 6e5f2ba..986a5a3 100644
    if (/^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "")) {
      NAV_ITEMS = NAV_ITEMS.filter(function (it) { return WINDOWS_NAV[it.kind] === true; });
    }
-@@ -2972,8 +2972,8 @@
+@@ -3077,8 +3077,8 @@
    function restartButton() {
      var restart = el("button", "cdbx-btn", "Restart now");
      restart.type = "button";
@@ -166,7 +166,7 @@ index 6e5f2ba..986a5a3 100644
      restart.addEventListener("click", function () {
        restart.disabled = true;
        restart.textContent = "Restarting...";
-@@ -4170,6 +4170,28 @@
+@@ -4281,6 +4281,28 @@
        renderCuEscapeAbortRow
      ] }
    ];
@@ -193,9 +193,9 @@ index 6e5f2ba..986a5a3 100644
 +    FEATURE_GROUPS = keepWindowsRows(FEATURE_GROUPS);
 +  }
  
-   function renderFeatures(panel) {
+   function renderFeatures(panel, target) {
      clear(panel);
-@@ -4616,7 +4638,7 @@
+@@ -4730,7 +4752,7 @@
  
  
        var files = el("div", "cdbx-note cdbx-models-files",
@@ -204,7 +204,7 @@ index 6e5f2ba..986a5a3 100644
          "Routing changes (a key, a model, a provider) reach open sessions at once through " + (st.paths && st.paths.routes) +
          ". New models show in the picker after the Code tab reloads. Sub-agent types, the default sub-agent " +
          "model, the small/fast model and the system-prompt line are handed to each session as it opens. A " +
-@@ -4934,7 +4956,7 @@
+@@ -5048,7 +5070,7 @@
        var url = field(form, "Base URL", input("text", existing ? existing.baseUrl : "", "https://api.example.com/anthropic"),
          "The Anthropic-compatible endpoint; /v1/messages is appended.");
        var key = field(form, "API key", input("password", "", existing && existing.keyOk ? "stored - type to replace" : "API key"),
@@ -213,7 +213,7 @@ index 6e5f2ba..986a5a3 100644
        var modelsUrl = field(form, "Models list URL", input("text", existing ? existing.modelsUrl || "" : "", "optional - found automatically"),
          "Where the provider lists its models (GET, OpenAI or Anthropic shape), on the base URL's host - the key " +
          "goes nowhere else. Left empty, fetch models tries the preset's address, then <base URL>/v1/models, " +
-@@ -5440,9 +5462,8 @@
+@@ -5554,9 +5576,8 @@
      var notice = el("div", "cdbx-notice");
      notice.appendChild(el("div", "cdbx-notice-title", "Changes here require a restart of Claude Desktop"));
      notice.appendChild(el("div", "cdbx-notice-body",
@@ -304,32 +304,6 @@ index de45ab3..3e35ef8 100644
      var line = parseQuery(inputEl.value).line;
      try { ctx.onPreview(abs, line); }
      catch (e) { warnOnce("onpreview-threw", "onPreview threw: " + ((e && e.message) || e)); hint("Could not open " + it.rel); return; }
-diff --git a/js/files_quick_open_worker.js b/js/files_quick_open_worker.js
-index 7380eb1..7280278 100644
---- a/js/files_quick_open_worker.js
-+++ b/js/files_quick_open_worker.js
-@@ -69,7 +69,10 @@ function __cdbQoScorePath(path, pieces) {
-   for (var c = 0; c < path.length; c++) if (path.charAt(c) === "/") score -= 2;   // depth penalty
-   return score;
- }
--function __cdbQoSearch(index, query, limit) {
-+// `knownTotal` (optional) is the number of indexed paths for scorers that no
-+// longer expose `readyCount` (Anthropic's Windows 6.28899 worker: the call site
-+// passes the host's `this.files.size`, which is exactly what the index was built from).
-+function __cdbQoSearch(index, query, limit, knownTotal) {
-   "use strict";
-   var raw = String(query == null ? "" : query);
-   var on = false;
-@@ -111,7 +114,8 @@ function __cdbQoSearch(index, query, limit) {
-   // Every piece scans the WHOLE ready set: intersecting two top-N lists would
-   // drop a file that is a mediocre match for one piece and a great one for the
-   // other, which is precisely the "user service" case.
--  var total = (typeof index.readyCount === "number" && index.readyCount > 0) ? index.readyCount : 0;
-+  var total = (typeof index.readyCount === "number" && index.readyCount > 0) ? index.readyCount
-+    : (typeof knownTotal === "number" && knownTotal > 0) ? knownTotal : 0;
-   if (total === 0) return [];
- 
-   // Seed from the first piece: path -> { rank sum, positions }.
 diff --git a/js/jira_tracker_client.js b/js/jira_tracker_client.js
 index 1647048..32678d7 100644
 --- a/js/jira_tracker_client.js
@@ -343,7 +317,7 @@ index 1647048..32678d7 100644
    var SITE_RE = /^https:\/\/[a-z0-9][a-z0-9-]*\.atlassian\.net\/?$/;
    var CLOUD_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 diff --git a/js/jira_tracker_main.js b/js/jira_tracker_main.js
-index 7bf049b..45e6ae5 100644
+index 2c96b2e..e154151 100644
 --- a/js/jira_tracker_main.js
 +++ b/js/jira_tracker_main.js
 @@ -1,6 +1,6 @@
@@ -379,7 +353,7 @@ index 29cb199..5453aa5 100644
    var NAVIGATE_TO_SESSION = true;
    var START_ATTENDED = true;
 diff --git a/js/jira_tracker_store.js b/js/jira_tracker_store.js
-index d15c231..e600d25 100644
+index ab8797c..d6f3db3 100644
 --- a/js/jira_tracker_store.js
 +++ b/js/jira_tracker_store.js
 @@ -1,6 +1,6 @@
@@ -406,7 +380,7 @@ index d15c231..e600d25 100644
        });
        return out;
      }
-@@ -226,7 +228,7 @@
+@@ -231,7 +233,7 @@
        }
        if (patch.folder !== undefined) {
          var f = patch.folder;
@@ -467,7 +441,7 @@ index 7f8b2ec..e944ca0 100644
    globalThis.__cdbTranscriptLimitsMain = true;
  
 diff --git a/patches/Makefile b/patches/Makefile
-index f79c42f..f120456 100644
+index 4dca16d..f2ca567 100644
 --- a/patches/Makefile
 +++ b/patches/Makefile
 @@ -1,9 +1,10 @@
@@ -491,7 +465,7 @@ index f79c42f..f120456 100644
  BINS := $(SRCS:.nim=)
  
  ifeq ($(strip $(SRCS)),)
-@@ -209,5 +210,11 @@ community/add_feature_jira_tracker: \
+@@ -211,5 +212,11 @@ community/add_feature_jira_tracker: \
    ../js/jira_tracker_web_page.js
  
  
@@ -504,22 +478,10 @@ index f79c42f..f120456 100644
  clean:
  	@rm -rf $(BINS) .nimcache
 diff --git a/patches/community/add_feature_auto_archive_grace.nim b/patches/community/add_feature_auto_archive_grace.nim
-index 45c4fc1..d41c4fa 100644
+index 1166c31..cda8e22 100644
 --- a/patches/community/add_feature_auto_archive_grace.nim
 +++ b/patches/community/add_feature_auto_archive_grace.nim
-@@ -81,9 +81,10 @@ proc apply*(input: string): string =
-   let now = input[heads.group(1)]
-   # checkAndArchive's try-block locals: own bindings, terminal state `d` and
-   # the unconfirmed-close binding `_`. This anchor survives our own patching.
-+  # Anthropic's Windows 6.28899 has one `!1` flag before that binding, not two.
-   let locals = one(
-     input,
--    re2"""async checkAndArchive\([\w$]+,[\w$]+,[\w$]+,[\w$]+\)\{let [\w$]+=[\w$]+\?"inactive":"pr";try\{let ([\w$]+)=this\.ownPrBindings\([\w$]+\.prs\),([\w$]+)=null,[\w$]+=!1,[\w$]+=!1,([\w$]+);""",
-+    re2"""async checkAndArchive\([\w$]+,[\w$]+,[\w$]+,[\w$]+\)\{let [\w$]+=[\w$]+\?"inactive":"pr";try\{let ([\w$]+)=this\.ownPrBindings\([\w$]+\.prs\),([\w$]+)=null,[\w$]+=!1,(?:[\w$]+=!1,)?([\w$]+);""",
-     "checkAndArchive locals",
-   )
-   let own = input[locals.group(0)]
-@@ -92,17 +93,17 @@ proc apply*(input: string): string =
+@@ -92,17 +92,17 @@ proc apply*(input: string): string =
    let inactive = input[heads.group(2)]
  
    let observe =
@@ -541,7 +503,7 @@ index 45c4fc1..d41c4fa 100644
      own & "," & now & ").terminal&&this.__cdbGrace().pending(" & session & "))return;"
  
    let sweepHead = re2"async sweep\(([\w$]+)=!1\)\{"
-@@ -110,7 +111,7 @@ proc apply*(input: string): string =
+@@ -110,7 +110,7 @@ proc apply*(input: string): string =
    let kicked = input[sweeps.group(0)]
    let sweepWrapper =
      "async sweep(" & kicked &
@@ -550,7 +512,7 @@ index 45c4fc1..d41c4fa 100644
      kicked &
      ")}finally{__cdbOwn&&!this.sweeping&&await this.__cdbGrace().reconcileAll()}}async __cdbOriginalArchiveSweep(" &
      kicked & "=!1){"
-@@ -121,7 +122,7 @@ proc apply*(input: string): string =
+@@ -121,7 +121,7 @@ proc apply*(input: string): string =
      "confirmed-reopen",
    )
    let cancel =
@@ -559,242 +521,6 @@ index 45c4fc1..d41c4fa 100644
      ".sessionId),"
  
    # What C, D, E and G sit in front of; asserted on the patched result too.
-diff --git a/patches/community/add_feature_auto_archive_grace_ion.nim b/patches/community/add_feature_auto_archive_grace_ion.nim
-index f3c4fa2..efa8d5d 100644
---- a/patches/community/add_feature_auto_archive_grace_ion.nim
-+++ b/patches/community/add_feature_auto_archive_grace_ion.nim
-@@ -22,7 +22,7 @@
- # notice chunk's import list, and that export to the rail chunk's own local
- # name through the rail chunk's import list; the rail's own `aside` call must
- # use the same jsxs.
--import std/[os, strutils, tables]
-+import std/[os, sequtils, strutils, tables]
- import regex
- 
- const source = staticRead("../../js/auto_archive_grace_ui.js")
-@@ -62,10 +62,59 @@ type Aliases = object
-   vendor: string
-   exports: array[5, string] # in `placeholders` order
- 
--proc resolveAliases(notice: string): Aliases =
-+# The vendor-frame bundle's export names for the jsx-runtime's Fragment, jsx and
-+# jsxs. The runtime binds them next to each other, on one object:
-+#   le=ce.Fragment,q=ce.jsx,ue=ce.jsxs
-+# and the bundle's `export{le as Ba,...}` clause renames them. Minified inner
-+# names repeat across scopes, so only this triple (not a lone `x=y.Fragment`)
-+# identifies them.
-+type RuntimeExports = object
-+  fragment, jsx, jsxs: string
-+
-+proc jsxRuntimeExports(vendor: string): RuntimeExports =
-+  let triple = vendor.findAll(
-+    re2"""([\w$]+)=([\w$]+)\.Fragment,([\w$]+)=([\w$]+)\.jsx,([\w$]+)=([\w$]+)\.jsxs[,;]"""
-+  )
-+  if triple.len != 1 or vendor[triple[0].group(1)] != vendor[triple[0].group(3)] or
-+      vendor[triple[0].group(1)] != vendor[triple[0].group(5)]:
-+    raise newException(ValueError, "vendor-frame: jsx-runtime bindings not found")
-+  let clause = vendor.findAll(re2"""export\{([^}]+)\}""")
-+  if clause.len != 1:
-+    raise newException(ValueError, "vendor-frame: expected one export clause")
-+  var exported: Table[string, string] # internal name -> export name
-+  for entry in vendor[clause[0].group(0)].split(','):
-+    let parts = entry.split(" as ")
-+    if parts.len == 2:
-+      exported[parts[0]] = parts[1]
-+  for (internal, role) in [
-+    (vendor[triple[0].group(0)], 0),
-+    (vendor[triple[0].group(2)], 1),
-+    (vendor[triple[0].group(4)], 2),
-+  ]:
-+    if internal notin exported:
-+      raise newException(ValueError, "vendor-frame: " & internal & " is not exported")
-+    case role
-+    of 0:
-+      result.fragment = exported[internal]
-+    of 1:
-+      result.jsx = exported[internal]
-+    else:
-+      result.jsxs = exported[internal]
-+
-+proc resolveAliases(notice, assetsDir: string): Aliases =
-+  # Anthropic's Windows 6.28899 shape: the subscriber is memoised by the React
-+  # compiler's cache and registers through a helper instead of
-+  # onPreferencesChanged:
-+  #   [t,n]=N(),r,i;return J1($,0,e)?(r=()=>{if(!e)return;let t=e=>{n(e.ccAutoArchiveOnPrClose===!0)};
-+  #   return ...},i=[e],K2($,0,e,r,i)):(r=$[1],i=$[2]),S(r,i),t}
-+  let subscriberCompiled =
-+    re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[\w$]+,[\w$]+;return [\w$]+\([\w$]+,\d+,[\w$]+\)\?\([\w$]+=\(\)=>\{if\(![\w$]+\)return;let [\w$]+=[\w$]+=>\{[\w$]+\([\w$]+\.ccAutoArchiveOnPrClose===!0\)\};return [^;]*?\},[\w$]+=\[[\w$]+\],[\w$]+\([^;]*?\)\):\([^;]*?\),([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}"""
-   let subscriber = unique(
-     notice,
--    re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?onPreferencesChanged[^;]*?,([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}""",
-+    if notice.findAll(subscriberCompiled).len == 1:
-+      subscriberCompiled
-+    else:
-+      re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?onPreferencesChanged[^;]*?,([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}""",
-     "preference subscriber",
-   )
-   let jsx = unique(
-@@ -73,19 +122,45 @@ proc resolveAliases(notice: string): Aliases =
-     re2"""([\w$]+)\("div",\{role:"status","aria-live":"polite","data-find-omitted":"",className:""",
-     "notice jsx",
-   )
--  let fragment = unique(
--    notice,
--    re2"""function [\w$]+\([\w$]+,[\w$]+\)\{let [\w$]+=[\w$]+\(\d+\),\{repoKey:[\w$]+,sessionRef:[\w$]+,sessionRepo:[\w$]+,isPrimary:[\w$]+,[\s\S]*?([\w$]+)\(([\w$]+),\{children:\[[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+\]\}\)\):[\w$]+\[\d+\]\}""",
--    "PR bar row fragment",
-+  let imports = vendorImports(notice)
-+  # jsxs and Fragment. Up to 5.11492 they were read off the PR bar row's closing
-+  # fragment (a `function X(a,b){...{repoKey:..}...}` component). In Anthropic's
-+  # Windows 6.28899 that row lives in another chunk and this chunk holds several
-+  # six-child jsxs calls (one is a ViewTransition, not a Fragment), so each
-+  # candidate is checked against the vendor-frame bundle's jsx-runtime exports.
-+  var jsxsLocal, fragmentLocal: string
-+  let prBarRow = notice.findAll(
-+    re2"""function [\w$]+\([\w$]+,[\w$]+\)\{let [\w$]+=[\w$]+\(\d+\),\{repoKey:[\w$]+,sessionRef:[\w$]+,sessionRepo:[\w$]+,isPrimary:[\w$]+,[\s\S]*?([\w$]+)\(([\w$]+),\{children:\[[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+\]\}\)\):[\w$]+\[\d+\]\}"""
-   )
-+  if prBarRow.len == 1:
-+    jsxsLocal = notice[prBarRow[0].group(0)]
-+    fragmentLocal = notice[prBarRow[0].group(1)]
-+  else:
-+    let runtime = jsxRuntimeExports(readFile(assetsDir / imports.file))
-+    var pairs: seq[(string, string)]
-+    for m in notice.findAll(
-+      re2"""([\w$]+)\(([\w$]+),\{children:\[[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+\]\}\)\):[\w$]+\[\d+\]\}"""
-+    ):
-+      let jsxsName = notice[m.group(0)]
-+      let fragName = notice[m.group(1)]
-+      if jsxsName in imports.byLocal and fragName in imports.byLocal and
-+          imports.byLocal[jsxsName] == runtime.jsxs and
-+          imports.byLocal[fragName] == runtime.fragment:
-+        pairs.add (jsxsName, fragName)
-+    pairs = pairs.deduplicate
-+    if pairs.len != 1:
-+      raise newException(
-+        ValueError, "jsxs/Fragment: expected one verified pair, got " & $pairs.len
-+      )
-+    jsxsLocal = pairs[0][0]
-+    fragmentLocal = pairs[0][1]
-   let locals = [
-     notice[subscriber.group(0)],
-     notice[subscriber.group(1)],
-     notice[jsx.group(0)],
--    notice[fragment.group(0)],
--    notice[fragment.group(1)],
-+    jsxsLocal,
-+    fragmentLocal,
-   ]
--  let imports = vendorImports(notice)
-   result.vendor = imports.file
-   for i, local in locals:
-     if local notin imports.byLocal:
-@@ -234,7 +309,7 @@ when isMainModule:
-     # original text and must re-apply byte-identically.
-     let noticeOriginal = restoreNotice(noticeInput)
-     let railOriginal = restoreRail(railInput)
--    let aliases = resolveAliases(noticeOriginal)
-+    let aliases = resolveAliases(noticeOriginal, paramStr(1) / "assets" / "v1")
-     let noticeOutput = applyNotice(noticeOriginal, aliases)
-     let railOutput = applyRail(railOriginal, aliases)
-     if (marker in noticeInput and noticeOutput != noticeInput) or
-@@ -242,6 +317,7 @@ when isMainModule:
-       raise newException(ValueError, "injection incomplete or stale")
-     writeFile(noticePath, noticeOutput)
-     writeFile(railPath, railOutput)
--  except ValueError as e:
-+  except CatchableError as e:
-+    # ValueError from an anchor, or an IOError reading the vendor-frame bundle.
-     quit("[FAIL] archive grace UI: " & e.msg, 1)
-   echo "[OK] archive grace UI: notice and session rail verified"
-diff --git a/patches/community/add_feature_custom_models.nim b/patches/community/add_feature_custom_models.nim
-index 166412d..4b0e5c2 100644
---- a/patches/community/add_feature_custom_models.nim
-+++ b/patches/community/add_feature_custom_models.nim
-@@ -104,7 +104,7 @@ proc identRe(name: string): string =
- proc envSiteRe(fn: string): Regex2 =
-   re2(
-     "(async function " & identRe(fn) &
--      """\([\w$]+,[\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let [\w$]+=await [\w$]+(?:\.[\w$]+)?\()([\w$]+)\.sessionEnv([,)])"""
-+      """\([\w$]+,[\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let (?:[\w$]+(?:=[\w$.?]+)?,)*[\w$]+=await [\w$]+(?:\.[\w$]+)?\()([\w$]+)\.sessionEnv([,)])"""
-   )
- 
- # Our injected end-state, asserted positively (Rule 6): the splice, made with
-@@ -112,7 +112,7 @@ proc envSiteRe(fn: string): Regex2 =
- proc envEndStateRe(fn: string): Regex2 =
-   re2(
-     "async function " & identRe(fn) &
--      """\([\w$]+,[\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let [\w$]+=await [\w$]+(?:\.[\w$]+)?\(\{\.\.\.([\w$]+)\.sessionEnv,\.\.\.\(\(globalThis\.__cdbCustomModels&&globalThis\.__cdbCustomModels\.cliEnv\(([\w$]+)\.sessionEnv\)\)\|\|\{\}\)\}[,)]"""
-+      """\([\w$]+,[\w$]+,([\w$]+)(?:,[\w$]+(?:=[^,(){}]+)?)*\)\{let (?:[\w$]+(?:=[\w$.?]+)?,)*[\w$]+=await [\w$]+(?:\.[\w$]+)?\(\{\.\.\.([\w$]+)\.sessionEnv,\.\.\.\(\(globalThis\.__cdbCustomModels&&globalThis\.__cdbCustomModels\.cliEnv\(([\w$]+)\.sessionEnv\)\)\|\|\{\}\)\}[,)]"""
-   )
- 
- # The function buildSessionEnv forwards to, or "" unless exactly one forwarder.
-diff --git a/patches/community/add_feature_files_quick_open_worker.nim b/patches/community/add_feature_files_quick_open_worker.nim
-index 56fbde3..e5821b8 100644
---- a/patches/community/add_feature_files_quick_open_worker.nim
-+++ b/patches/community/add_feature_files_quick_open_worker.nim
-@@ -28,7 +28,7 @@ const DIRECTIVES = ["\"use strict\";", "'use strict';"]
- # doc comment, so a substring test would report "call present" the moment the
- # helper is prepended, even if the rewrite never happened (Rule 6: an [OK] must
- # rest on a positively verified end-state).
--let callRe = re2"\}of __cdbQoSearch\(this\.index,[\w$]+,[\w$]+\)\)"
-+let callRe = re2"\}of __cdbQoSearch\((?:this\.index,[\w$]+,[\w$]+|[\w$]+,[\w$]+,[\w$]+,this\.files\.size)\)\)"
- 
- proc hasCallSite(s: string): bool = s.contains(callRe)
- 
-@@ -36,6 +36,15 @@ proc hasCallSite(s: string): bool = s.contains(callRe)
- # Groups: 0 = everything up to and including "of ", 1 = q, 2 = lim, 3 = q2, 4 = lim2
- let anchor = re2"(search\(([\w$]+),([\w$]+)\)\{let [\w$]+=\[\];if\(this\.index\)for\(let\{path:[\w$]+,positions:[\w$]+\}of )this\.index\.search\(([\w$]+),([\w$]+)\)\)"
- 
-+# Anthropic's Windows 6.28899 worker restructured the index: the scorer is now a
-+# private-field class wrapped by an index class, and FileIndexHost.search reads
-+#   search(<q>,<lim>){let <acc>=[],<idx>=this.builtIndex();if(<idx>)for(let{path:<p>,positions:<pos>}of <idx>.search(<q>,<lim>))
-+# Nothing exposes `readyCount` any more. The index is built from exactly
-+# `this.files.keys()`, so the call site hands the helper `this.files.size` as its
-+# total. Groups: 0 = prefix up to "of ", 1/2 = method params, 3/4/5 = the index
-+# variable (declared, tested, searched), 6/7 = the inner search() args.
-+let anchorNew = re2"(search\(([\w$]+),([\w$]+)\)\{let [\w$]+=\[\],([\w$]+)=this\.builtIndex\(\);if\(([\w$]+)\)for\(let\{path:[\w$]+,positions:[\w$]+\}of )([\w$]+)\.search\(([\w$]+),([\w$]+)\)\)"
-+
- # PRECONDITION for the helper's multi-piece path: js/files_quick_open_worker.js
- # scans the WHOLE ready set per piece (`index.search(piece, index.readyCount)`),
- # because intersecting two top-N lists would drop the very files the space fix
-@@ -60,11 +69,36 @@ proc apply*(input: string): string =
-       " call=" & $hasCall & ") - refusing to patch on top; re-audit the worker bundle"
-     quit(1)
- 
--  if not result.contains(readyCountRe) or "this.readyCount=" notin result:
--    echo "  [FAIL] files quick open worker: scorer no longer exposes readyCount - the helper's full-set scan would silently return nothing; re-audit"
-+  # Two worker shapes, told apart by which anchor matches; each has its own
-+  # precondition for the helper's full-set scan.
-+  if result.contains(anchor):
-+    if not result.contains(readyCountRe) or "this.readyCount=" notin result:
-+      echo "  [FAIL] files quick open worker: scorer no longer exposes readyCount - the helper's full-set scan would silently return nothing; re-audit"
-+      quit(1)
-+  elif result.contains(anchorNew):
-+    if "this.files.size" notin result:
-+      echo "  [FAIL] files quick open worker: FileIndexHost no longer has files.size - the helper's total would be wrong; re-audit"
-+      quit(1)
-+  else:
-+    echo "  [FAIL] files quick open worker: neither FileIndexHost.search shape found; re-audit"
-     quit(1)
- 
-   var count = 0
-+  # At most one of the two replacements can match.
-+  result = result.replace(anchorNew, proc(m: RegexMatch2, s: string): string =
-+    let q = s[m.group(1)]
-+    let lim = s[m.group(2)]
-+    let idx = s[m.group(3)]
-+    if s[m.group(4)] != idx or s[m.group(5)] != idx:
-+      echo "  [FAIL] files quick open worker: index variable differs between its declaration, test and search"
-+      quit(1)
-+    if s[m.group(6)] != q or s[m.group(7)] != lim:
-+      echo "  [FAIL] files quick open worker: inner search() args (" & s[m.group(6)] & "," &
-+        s[m.group(7)] & ") are not the method parameters (" & q & "," & lim & ")"
-+      quit(1)
-+    inc count
-+    s[m.group(0)] & "__cdbQoSearch(" & idx & "," & q & "," & lim & ",this.files.size))"
-+  )
-   result = result.replace(anchor, proc(m: RegexMatch2, s: string): string =
-     let q = s[m.group(1)]
-     let lim = s[m.group(2)]
 diff --git a/patches/community/add_feature_theme_picker.nim b/patches/community/add_feature_theme_picker.nim
 index 38265f3..9355c1f 100644
 --- a/patches/community/add_feature_theme_picker.nim
@@ -826,34 +552,6 @@ index 38265f3..9355c1f 100644
  __cdbPk_win.on("closed",function(){__cdbPk_win=null});
  __cdbPk_win.loadFile(a.html);
  __cdbPk_log("window opened ("+a.html+")");
-diff --git a/patches/community/add_feature_transcript_limits.nim b/patches/community/add_feature_transcript_limits.nim
-index bbfc05a..4798107 100644
---- a/patches/community/add_feature_transcript_limits.nim
-+++ b/patches/community/add_feature_transcript_limits.nim
-@@ -142,9 +142,11 @@ proc apply*(input: string): string =
-   # --- precondition P: upstream still reads the loadLimits option ---------------
-   # Without it C would "succeed" into an option nothing reads (see the header).
-   let (ctorReads, configReads) = limitsReadCounts(result)
--  if ctorReads != 1 or configReads != 1:
-+  # Anthropic's Windows 6.28899 reads `this.config.loadLimits` twice (the
-+  # truncation prediction and searchLeftFile's mainBytes), so one (Linux) or two (Windows) are the audited layouts.
-+  if ctorReads != 1 or configReads notin [1, 2]:
-     echo "  [FAIL] transcript limits: expected upstream to read loadLimits at exactly 1 " &
--      "`new <Reader>(<cfg>.loadLimits)` and 1 `this.config.loadLimits`, found " &
-+      "`new <Reader>(<cfg>.loadLimits)` and 1 or 2 `this.config.loadLimits`, found " &
-       $ctorReads & " and " & $configReads & " - the option was renamed or its reads " &
-       "moved, so passing it would change nothing; re-audit before re-fitting C"
-     quit(1)
-@@ -199,7 +201,8 @@ when isMainModule:
-     echo "  [PASS] transcript limits applied"
-   else:
-     if MARKER notin output or forkEndStateCount(output) != 1 or
--        limitsReadCounts(output) != (1, 1) or ctorEndStateCount(output) != CTOR_SITES:
-+        limitsReadCounts(output)[0] != 1 or limitsReadCounts(output)[1] notin [1, 2] or
-+        ctorEndStateCount(output) != CTOR_SITES:
-       echo "  [FAIL] No changes made and the end-state is absent"
-       quit(1)
-     echo "  [OK] Already applied (no changes needed)"
 diff --git a/patches/core/add_feature_custom_themes.nim b/patches/core/add_feature_custom_themes.nim
 index 9b0a6d6..c8dd48c 100644
 --- a/patches/core/add_feature_custom_themes.nim
@@ -895,102 +593,8 @@ index f03ea70..0c45304 100644
      else:
        # Groups: 0 the cache assigned, 1 the cache the IIFE returns, 2 the memo,
        # 3 the getter, 4 the cache the getter returns. 0, 1 and 4 must agree.
-diff --git a/patches/core/add_growthbook_overrides.nim b/patches/core/add_growthbook_overrides.nim
-index 249923c..0fdc29d 100644
---- a/patches/core/add_growthbook_overrides.nim
-+++ b/patches/core/add_growthbook_overrides.nim
-@@ -69,7 +69,7 @@ const EXPECTED_PATCHES = 2
- # 2 = transform call "jit(e)", 3 = e again (must equal group 1), 4 = tail
- # ";let r=Object.keys(DS).length...loaded %d features...".
- const SETTER_PAT =
--  re2"""(function [\w$]+\(([\w$]+),[\w$]+\)\{[\w$]+=[\w$]+;(?:const|let|var) [\w$]+=[\w$]+;[\w$]+=)([\w$]+\(([\w$]+)\))(;(?:const|let|var) [\w$]+=Object\.keys\([\w$]+\)\.length[^"`]{0,100}[^"`]{0,100}["`]\[growthbook\] loaded %d features \(%d changed\)["`])"""
-+  re2"""(function [\w$]+\(([\w$]+),[\w$]+(?:,[\w$]+=[^,(){}]+)?\)\{[\w$]+=[\w$]+(?:,[\w$]+=[\w$]+)?;(?:const|let|var) [\w$]+=[\w$]+;[\w$]+=)([\w$]+\(([\w$]+)\))(;(?:const|let|var) [\w$]+=Object\.keys\([\w$]+\)\.length[^"`]{0,100}[^"`]{0,100}["`]\[growthbook\] loaded %d features \(%d changed\)["`])"""
- 
- proc apply*(input: string): string =
-   result = input
-diff --git a/patches/core/fix_profile_window_title.nim b/patches/core/fix_profile_window_title.nim
-index 1f31112..85ab164 100644
---- a/patches/core/fix_profile_window_title.nim
-+++ b/patches/core/fix_profile_window_title.nim
-@@ -121,6 +121,58 @@ proc countMainWindowTitleLocks(s, factory: string): int =
- const FACTORY_PATTERN =
-   re2"function ([\w$]+)\(([\w$]+)\)\{return ([\w$]+(?:\.[\w$]+)*)=new ([\w$]+)\.BrowserWindow\(([\w$]+)\),"
- 
-+# The per-window title injection: a short-circuit comma expression ending in
-+# a comma, evaluating to `false` (no-op) when CLAUDE_PROFILE is unset.
-+#
-+# Upstream owns the main-window title (it preventDefaults page-title-updated;
-+# up to v4.4212.0 it also called win.setTitle() on navigation). A one-shot
-+# setTitle could be overwritten, so we wrap THIS window's setTitle: every
-+# title, ours or upstream's, gets the suffix exactly once. Other windows keep
-+# their own setTitle.
-+proc titleHook(winVar: string): string =
-+  "process.env.CLAUDE_PROFILE&&((globalThis." & SENTINEL &
-+    "=true),((__cdb_w,__cdb_s)=>{" & "const __cdb_o=__cdb_w.setTitle.bind(__cdb_w);" &
-+    "__cdb_w.setTitle=(__cdb_t)=>{__cdb_t=String(__cdb_t??\"\");" &
-+    "return __cdb_o(__cdb_t.endsWith(__cdb_s)?__cdb_t:__cdb_t+__cdb_s)};" &
-+    "__cdb_w.setTitle(__cdb_w.getTitle())})(" & winVar &
-+    ",\" (\"+process.env.CLAUDE_PROFILE+\")\")," & POPOUT_HOOK &
-+    "(\" (\"+process.env.CLAUDE_PROFILE+\")\")),"
-+
-+# Anthropic's Windows 6.28899 builds the main window inline, with no factory
-+# function:
-+#   WIN=(e=>qEe(new ELECTRON.BrowserWindow(e)))(XAr({...})), ... ,LOCK(WIN),
-+# where LOCK is the page-title-updated preventDefault helper (PREVENT_HELPER).
-+# Groups: 0 = WIN, 1 = the arrow's parameter, 2 = the constructor's argument
-+# (must equal group 1).
-+const INLINE_CTOR =
-+  re2"""(?:^|[^\w$.])([\w$]+)=\(([\w$]+)=>(?:[\w$]+\()?new [\w$]+\.BrowserWindow\(([\w$]+)\)\)\)?\("""
-+
-+proc inlineLockSites(s: string): seq[tuple[at: int, win: string]] =
-+  ## Where `LOCK(WIN),` ends, for each inline main-window construction whose
-+  ## page-title-updated preventDefault helper is called on it within
-+  ## PREVENT_CALL_WINDOW. Exactly one such site is the main window.
-+  var helpers: seq[string]
-+  for m in s.findAll(PREVENT_HELPER):
-+    if s[m.group(1)] == s[m.group(2)] and s[m.group(3)] == s[m.group(4)]:
-+      helpers.add s[m.group(0)]
-+  if helpers.len == 0:
-+    return
-+  for m in s.findAll(INLINE_CTOR):
-+    if s[m.group(1)] != s[m.group(2)]:
-+      continue
-+    let win = s[m.group(0)]
-+    let a = m.boundaries.b
-+    let b = min(s.len, a + PREVENT_CALL_WINDOW)
-+    block found:
-+      for h in helpers:
-+        let needle = h & "(" & win & "),"
-+        var i = s.find(needle, a)
-+        while i >= 0 and i < b:
-+          if i == 0 or not (isIdentChar(s[i - 1]) or s[i - 1] == '.'):
-+            result.add (at: i + needle.len, win: win)
-+            break found
-+          i = s.find(needle, i + 1)
-+
- proc apply*(input: string): string =
-   result = input
- 
-@@ -141,6 +193,17 @@ proc apply*(input: string): string =
-   for m in result.findAll(FACTORY_PATTERN):
-     if result[m.group(1)] == result[m.group(4)]:
-       factories.add result[m.group(0)]
-+  if factories.len == 0:
-+    let sites = inlineLockSites(result)
-+    if sites.len != 1:
-+      echo &"  [FAIL] main-window BrowserWindow factory: 0 matches, and {sites.len} inline construction sites with a title lock, expected 1"
-+      raise newException(
-+        ValueError, "fix_profile_window_title: main-window construction not found - re-audit"
-+      )
-+    echo "  [OK] upstream locks the main-window title (inline construction, 1 match)"
-+    result = result[0 ..< sites[0].at] & titleHook(sites[0].win) & result[sites[0].at .. ^1]
-+    echo "  [OK] Main window title hook injected (inline construction)"
-+    return
-   if factories.len != 1:
-     echo &"  [FAIL] main-window BrowserWindow factory: {factories.len} matches, expected 1"
-     raise
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
-index 7e5801b..370f8d1 100644
+index 0d5ae06..7078ac9 100644
 --- a/scripts/apply_patches.py
 +++ b/scripts/apply_patches.py
 @@ -11,7 +11,11 @@ target location.
@@ -1008,7 +612,7 @@ index 7e5801b..370f8d1 100644
  path that build-patched-tarball.sh uses as "$WORK_DIR/app".
 @@ -35,6 +39,40 @@ PATCH_SUBDIRS = ("linux", "core", "community")
  # remove a patch.
- EXPECTED_PATCH_COUNT = 76
+ EXPECTED_PATCH_COUNT = 78
  
 +# The Windows build (--windows). patches/windows/ holds the Windows-only
 +# patches; they are applied AFTER the shared ones (on a shared target, their
@@ -1121,7 +725,7 @@ index 7e5801b..370f8d1 100644
      nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
  
 diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
-index 5caea23..e357bae 100755
+index 55e3bf7..e4444a0 100755
 --- a/scripts/run-feature-tests.sh
 +++ b/scripts/run-feature-tests.sh
 @@ -1,5 +1,5 @@
@@ -1139,7 +743,7 @@ index 5caea23..e357bae 100755
  
  set -uo pipefail
  
-@@ -34,17 +35,25 @@ EXPECTED_TEST_HARNESSES=103
+@@ -34,17 +35,25 @@ EXPECTED_TEST_HARNESSES=104
  CATEGORIES=(community core linux)
  
  usage() {
@@ -1168,7 +772,7 @@ index 5caea23..e357bae 100755
      echo "[ERROR] node is required to run the feature test harnesses" >&2
      exit 1
 diff --git a/scripts/tests/community/test-auto-archive-grace.mjs b/scripts/tests/community/test-auto-archive-grace.mjs
-index 71097b7..5574c9c 100644
+index 2f1c5dc..4b0a0ae 100644
 --- a/scripts/tests/community/test-auto-archive-grace.mjs
 +++ b/scripts/tests/community/test-auto-archive-grace.mjs
 @@ -217,7 +217,7 @@ await test("injected: a null lookup between sweeps keeps the deadline, OPEN clea
@@ -1206,98 +810,7 @@ index 71097b7..5574c9c 100644
        assert.equal((await call("read")).minutes, 0);
        const json = path.join(userData, "claude-desktop-extra.json"), jsonc = path.join(userData, "claude-desktop-extra.jsonc");
        const unrelated = { autoFixTrustedAuthors: ["github.com/my-app[bot]"], other: true };
-@@ -295,16 +295,19 @@ const railFixture = [
-   'import{Ga as o,Ka as c,Wa as u,To as l,go as h}from"./vendor-frame-test.js";',
-   'function Side(e){let $=Q7(124),{session:t,pullRequests:n,plan:r,artifacts:i,repoMenuItems:a,outputsSession:s,controls:k}=e;let x=o(Vb,{id:"environment",title:"Environment"}),z=o(Vb,{id:"pullRequests",title:"Changes"});if(!t)return null;let je="header",We="content";return J4($,118,ke,Ae,je,We)?K4($,118,ke,Ae,je,We,c("aside",{ref:De,"aria-label":ke,tabIndex:-1,onMouseDownCapture:Km,onClickCapture:Km,onDoubleClickCapture:Km,className:Ae,children:[je,We]})):$[122]}function After(){}'
- ].join("\n");
--function runIon(notice, rail) {
-+// `extra` stages more assets next to the chunks ({ "vendor-frame-x.js": text|Buffer }):
-+// the resolver reads the vendor-frame bundle when the PR bar row anchor is gone.
-+function runIon(notice, rail, extra = {}) {
-   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cdb-grace-ion-")), assets = path.join(dir, "assets/v1");
-   fs.mkdirSync(assets, { recursive: true });
-   const noticeFile = path.join(assets, "notice.js"), railFile = path.join(assets, "rail.js");
-   fs.writeFileSync(noticeFile, notice); fs.writeFileSync(railFile, rail);
-+  for (const [name, body] of Object.entries(extra)) fs.writeFileSync(path.join(assets, name), body);
-   const run = spawnSync(ionBinary, [dir], { encoding: "utf8" });
-   return { dir, noticeFile, railFile, run };
- }
--function checkIon(notice, rail) {
--  const first = runIon(notice, rail);
-+function checkIon(notice, rail, extra = {}) {
-+  const first = runIon(notice, rail, extra);
-   try {
-     assert.equal(first.run.status, 0, first.run.stdout + first.run.stderr);
-     for (const file of [first.noticeFile, first.railFile]) execFileSync(process.execPath, ["--check", file]);
-@@ -329,7 +332,8 @@ await test("ion patch: applies to upstream's shapes with renamed aliases and slo
- await test("ion patch: fails closed on changed anchors, a missing chunk and a stale injection", async () => {
-   const out = checkIon(noticeFixture, railFixture);
-   const broken = [
--    [noticeFixture.replace("onPreferencesChanged", "onPrefs"), railFixture],
-+    // The subscriber resolver keys on the preference callback reading the flag.
-+    [noticeFixture.replace("ccAutoArchiveOnPrClose===!0", "ccAutoArchiveOnPrClose===1"), railFixture],
-     [noticeFixture.replace("{hold:t,sessionRef:n}", "{reason:t,sessionRef:n}"), railFixture],
-     [noticeFixture.replace("isPrimary:a", "primary:a"), railFixture],
-     [noticeFixture.replace("Ka as jxs", "Ka as jxz"), railFixture],
-@@ -349,6 +353,30 @@ await test("ion patch: fails closed on changed anchors, a missing chunk and a st
-     finally { fs.rmSync(r.dir, { recursive: true, force: true }); }
-   }
- });
-+// Anthropic's Windows 6.28899 shape: the preference callback registers through a
-+// helper (no onPreferencesChanged), and the notice chunk has no PR bar row, so
-+// jsxs / Fragment are verified against the vendor-frame jsx-runtime exports. A
-+// second six-child jsxs call whose first argument is NOT the Fragment export (a
-+// ViewTransition) must not be taken for it.
-+const vendorFixture = "var ce={},le=ce.Fragment,q=ce.jsx,ue=ce.jsxs;export{le as Wa,q as Ga,ue as Ka,vt as Ba,x as To,y as go};";
-+const windowsNotice = noticeFixture
-+  .replace("Zn?.onPreferencesChanged?.(t)", "Ki(t)")
-+  .replace("go as eff,", "go as eff,Ba as ViewT,")
-+  .replace(/function Row\(e,t\)\{let \$=Q7\(441\),\{repoKey:n,sessionRef:r,sessionRepo:i,isPrimary:a,inRail:D\}=e;/,
-+    "var Row=memo(function(e){let $=Q7(441),{item:n}=e;")
-+  .replace("$[440]}", "$[440]})")
-+  .concat("\nfunction Decoy(e){return J5($,75,u,d)?K5($,75,u,d,jxs(ViewT,{children:[u,d,c,p,m,g]})):$[81]}");
-+await test("ion patch: Windows shapes - helper-registered subscriber, jsxs/Fragment from the vendor-frame runtime, not the ViewTransition decoy", async () => {
-+  const extra = { "vendor-frame-test.js": vendorFixture };
-+  const out = checkIon(windowsNotice, railFixture, extra);
-+  for (const alias of ["= st(null)", "eff(() =>", "jxs(Frag, {children:"]) assert.ok(out.notice.includes(alias), "notice helper uses " + alias);
-+  const noVendor = runIon(windowsNotice, railFixture);
-+  try { assert.notEqual(noVendor.run.status, 0, "the vendor bundle is required on this path"); assert.match(noVendor.run.stdout + noVendor.run.stderr, /\[FAIL\]/); }
-+  finally { fs.rmSync(noVendor.dir, { recursive: true, force: true }); }
-+  const wrongExport = runIon(windowsNotice, railFixture, { "vendor-frame-test.js": vendorFixture.replace("le as Wa", "le as Zz") });
-+  try { assert.notEqual(wrongExport.run.status, 0, "Fragment no longer exported under the imported name"); assert.match(wrongExport.run.stdout + wrongExport.run.stderr, /\[FAIL\]/); }
-+  finally { fs.rmSync(wrongExport.dir, { recursive: true, force: true }); }
-+});
- await test("ion wrappers: the keep control is appended inside the rail's aside, ref/key kept; the notice wrapper passes hold and class", async () => {
-   const out = checkIon(noticeFixture, railFixture);
-   const ctx = { o: (type, props, key) => ({ type, props, key: key ?? null }), c: (type, props, key) => ({ type, props, key: key ?? null }),
-@@ -386,6 +414,7 @@ function readAsarChunks(file) {
-       const buf = Buffer.alloc(entry.size); fs.readSync(fd, buf, 0, entry.size, base + Number(entry.offset));
-       if (buf.includes(ION_TARGET)) found.notice = { name, buf };
-       if (isRailChunk(buf)) found.rail = { name, buf };
-+      if (/^vendor-frame-.*\.js$/.test(name)) found.vendor = { name, buf };
-     }
-   } finally { fs.closeSync(fd); }
-   return found;
-@@ -401,6 +430,7 @@ function pristineIonChunks() {
-       const buf = fs.readFileSync(path.join(assets, name));
-       if (buf.includes(ION_TARGET)) found.notice = { name, buf };
-       if (isRailChunk(buf)) found.rail = { name, buf };
-+      if (/^vendor-frame-.*\.js$/.test(name)) found.vendor = { name, buf };
-     }
-     return found;
-   }
-@@ -411,7 +441,9 @@ function pristineIonChunks() {
-   if (!real || !real.notice || !real.rail) console.log("SKIP ion patch on the real chunks: " + (real ? "target chunks not found in " + real.from : "no pristine ion-dist (set CDB_ION_DIST or extract to tmp/extract)"));
-   else if (real.notice.buf.includes("__cdb") || real.rail.buf.includes("__cdb")) console.log("SKIP ion patch on the real chunks: " + real.from + " is already patched");
-   else await test(`ion patch: applies to the real pristine chunks (${real.notice.name}, ${real.rail.name}), node --check, idempotent`, async () => {
--    const out = checkIon(real.notice.buf, real.rail.buf);
-+    // The resolver reads the vendor-frame bundle on shapes without the PR bar row:
-+    // stage it under its real name, beside the chunks.
-+    const out = checkIon(real.notice.buf, real.rail.buf, real.vendor ? { [real.vendor.name]: real.vendor.buf } : {});
-     for (const text of [out.notice, out.rail]) assert.equal(text.split("/*cdb-archive-grace-ui*/").length, 2);
-     assert.ok(out.notice.includes("function __cdbArchiveNativeNotice(") && out.rail.includes("function __cdbArchiveNativeRail("));
-   });
-@@ -564,14 +596,14 @@ const webMainSource = () => {
+@@ -595,14 +595,14 @@ const webMainSource = () => {
  };
  await test("web main: runs the page script on dom-ready in claude.ai pages only, linux only; refresh re-runs it", async () => {
    const code = webMainSource();
@@ -1315,12 +828,12 @@ index 71097b7..5574c9c 100644
      for (const p of pages) { created({}, p); p.handlers["dom-ready"](); }
      assert.deepEqual(pages.map(p => p.ran.length), [1, 1, 0, 0, 0]);
 diff --git a/scripts/tests/community/test-files-quick-open-worker.mjs b/scripts/tests/community/test-files-quick-open-worker.mjs
-index 559441a..ebd5f5a 100644
+index 49aa356..f82518d 100644
 --- a/scripts/tests/community/test-files-quick-open-worker.mjs
 +++ b/scripts/tests/community/test-files-quick-open-worker.mjs
-@@ -123,6 +123,16 @@ const SPEC = ["abstract.pdf-data-provider.ts", "user-service.spec.ts"];
-   ok(idx.calls.length > 0 && idx.calls.every(([q, l]) => !/\s/.test(q)), "the index never sees a query containing whitespace");
-   ok(idx.calls.some(([q, l]) => l === PATHS.length), "per-piece scans ask for every ready path so the intersection is not lossy");
+@@ -135,6 +135,16 @@ const SPEC = ["abstract.pdf-data-provider.ts", "user-service.spec.ts"];
+   empty.readyCount = 0;
+   eq(h(empty, "user service", 10), [], "legacy index still building (readyCount 0): nothing, as before");
  }
 +// --- scorers without `readyCount` (Windows 6.28899): the call site passes the total ---
 +{
@@ -1353,10 +866,10 @@ index e926faf..ca0926e 100644
    assert.equal(withSort("assignee = currentUser()", "updated"), "assignee = currentUser() ORDER BY updated DESC");
    assert.equal(withSort("assignee = currentUser()", "priority"), "assignee = currentUser() ORDER BY priority DESC, updated DESC");
 diff --git a/scripts/tests/community/test-jira-ipc.mjs b/scripts/tests/community/test-jira-ipc.mjs
-index 36ea74d..47dc0a1 100644
+index dfa49bd..af35240 100644
 --- a/scripts/tests/community/test-jira-ipc.mjs
 +++ b/scripts/tests/community/test-jira-ipc.mjs
-@@ -226,8 +226,18 @@ try {
+@@ -233,8 +233,18 @@ try {
      assert.equal(store.state().template, "");
      assert.equal(fs.statSync(path.join(dir, "cdb-jira-state.json")).mode & 0o777, 0o600);
    });
@@ -1377,7 +890,7 @@ index 36ea74d..47dc0a1 100644
    });
    await test("bridge: fixed jira channels, shaped arguments; preload: fixed methods", () => {
      const calls = []; let exposed = null;
-@@ -557,9 +567,11 @@ try {
+@@ -752,9 +762,11 @@ try {
    const RECT = { x: 260, y: 0, width: 940, height: 800 };
    const on = (w) => w.call("cdb-jira-pref:set", w.claude, { enabled: true });
  
@@ -1409,10 +922,10 @@ index 406b6a1..33c1ce4 100644
  const temp = fs.mkdtempSync(join(os.tmpdir(), "cdb-jira-send-"));
  const repo = join(temp, "repo"), link = join(temp, "repo-link"), plainDir = join(temp, "plain");
 diff --git a/scripts/tests/core/test-extra-settings-dom.mjs b/scripts/tests/core/test-extra-settings-dom.mjs
-index 878e76a..49455c1 100644
+index 402441e..581efd0 100644
 --- a/scripts/tests/core/test-extra-settings-dom.mjs
 +++ b/scripts/tests/core/test-extra-settings-dom.mjs
-@@ -3746,11 +3746,33 @@ async function run() {
+@@ -4022,11 +4022,33 @@ async function run() {
    const box = navbox();
  
    // --- the Windows build: the page runs with navigator.platform "Win32" and
@@ -1450,7 +963,7 @@ index 878e76a..49455c1 100644
      window.__cmConfig = { ok: true, enabled: true, configured: true, lockedByJsonc: false, source: "default",
        surfaces: ["ccd", "code"], models: 1, webSearch: "", webSearchLocked: false,
        smallFastModel: "", smallFastModelLocked: false, searchConflict: "", subagentModel: "", subagentModelLocked: false,
-@@ -3766,8 +3788,8 @@ async function run() {
+@@ -4042,8 +4064,8 @@ async function run() {
          keySource: "stored", preset: "opencode-go", sessionHeader: "x-opencode-session", effort: ["low", "max"], context: "1m",
          models: [{ id: "glm-5.3", alias: "claude-glm-5.3", listedAs: ["claude-glm-5.3[1m]"], name: "GLM-5.3",
            description: "", vision: false, thinking: true, context: "1m", effort: ["low", "max"], effortDefault: "max", badge: "", agent: false }] }] };
