@@ -501,6 +501,56 @@ index 4dca16d..f2ca567 100644
 +
  clean:
  	@rm -rf $(BINS) .nimcache
+diff --git a/patches/community/add_feature_allow_non_anthropic_models.nim b/patches/community/add_feature_allow_non_anthropic_models.nim
+index a8ae4b4..f36a38f 100644
+--- a/patches/community/add_feature_allow_non_anthropic_models.nim
++++ b/patches/community/add_feature_allow_non_anthropic_models.nim
+@@ -121,7 +121,44 @@ proc apply*(input: string): string =
+   if discoveryCallees.len != 1:
+     echo &"  [FAIL] allow-non-anthropic-models: gateway discovery no longer goes through the guarded validator (discovery filter matched {discoveryCallees.len}/1) - re-audit"
+     quit(1)
+-  let validatorName = discoveryCallees[0].replace("$", "\\$")
++  var validatorName = discoveryCallees[0].replace("$", "\\$")
++  # Anthropic's Windows 7.37095.0 keeps the validators in managedConfigSchemas.js
++  # (staged with this bundle by apply_patches.py) and the chunk binds them by
++  # digest through an accessor over that module's `values`:
++  #   var{values:amt}=require("./managedConfigSchemas.js"),K=e=>{...return amt[e]}, ... tAt=K("0255f8c401ae")
++  # and managedConfigSchemas.js maps the digest to the validator:
++  #   values:{...,"0255f8c401ae":ax,...}   function ax(e,t){...switch(e){...case"gateway":case"mantle":return ix(t)}}
++  # The digest is followed to that function; each link must be unique.
++  if not result.contains(re2("function " & validatorName & """\(""")):
++    let accessors = result.findAll(
++      re2"""var\{values:([\w$]+)\}=require\("\./managedConfigSchemas\.js"\),([\w$]+)=([\w$]+)=>\{if\(!Object\.hasOwn\(([\w$]+),([\w$]+)\)\)throw Error\(`[^`]*`\);return ([\w$]+)\[([\w$]+)\]\}"""
++    )
++    var accessorNames: seq[string] = @[]
++    for m in accessors:
++      let values = result[m.group(0)]
++      let param = result[m.group(2)]
++      if result[m.group(3)] == values and result[m.group(4)] == param and
++          result[m.group(5)] == values and result[m.group(6)] == param:
++        accessorNames.add result[m.group(1)]
++    var digests: seq[string] = @[]
++    for m in result.findAll(
++      re2("""(?:^|[^\w$.])""" & validatorName & """=([\w$]+)\("([0-9a-f]{12})"\)""")
++    ):
++      if result[m.group(0)] in accessorNames:
++        digests.add result[m.group(1)]
++    if accessorNames.len != 1 or digests.len != 1:
++      echo &"  [FAIL] allow-non-anthropic-models: discovery validator {discoveryCallees[0]} is neither a function here nor one digest binding through the managedConfigSchemas.js accessor (accessors {accessorNames}, digests {digests}) - re-audit"
++      quit(1)
++    var targets: seq[string] = @[]
++    for m in result.findAll(
++      re2("""[{,]"?""" & digests[0] & """"?:([\w$]+)[,}]""")
++    ):
++      targets.add result[m.group(0)]
++    if targets.len != 1:
++      echo &"  [FAIL] allow-non-anthropic-models: digest {digests[0]} maps to {targets} in managedConfigSchemas.js, expected one validator - re-audit"
++      quit(1)
++    echo &"  [OK] B precondition: discovery validator {discoveryCallees[0]} is managedConfigSchemas.js digest {digests[0]} ({targets[0]})"
++    validatorName = targets[0].replace("$", "\\$")
+   let armRe = re2(
+     "function " & validatorName &
+       """\([\w$]+,[\w$]+\)[{].{0,100}?switch\([\w$]+\)[{].{0,100}?.{0,100}?.{0,100}?case["`]gateway["`]:case["`]mantle["`]:return ([\w$]+)\("""
 diff --git a/patches/community/add_feature_auto_archive_grace.nim b/patches/community/add_feature_auto_archive_grace.nim
 index 1166c31..cda8e22 100644
 --- a/patches/community/add_feature_auto_archive_grace.nim
@@ -545,6 +595,108 @@ index 1166c31..cda8e22 100644
      ".sessionId),"
  
    # What C, D, E and G sit in front of; asserted on the patched result too.
+diff --git a/patches/community/add_feature_auto_archive_grace_ion.nim b/patches/community/add_feature_auto_archive_grace_ion.nim
+index e3679c8..38b1cbb 100644
+--- a/patches/community/add_feature_auto_archive_grace_ion.nim
++++ b/patches/community/add_feature_auto_archive_grace_ion.nim
+@@ -65,12 +65,15 @@ type Aliases = object
+   vendor: string
+   exports: array[5, string] # in `placeholders` order
+ 
+-proc resolveAliases(notice, row: string): Aliases =
+-  let subscriber = unique(
+-    notice,
+-    re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?getPreferences[^;]*?,([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}""",
+-    "preference subscriber",
+-  )
++# The ccAutoArchiveOnPrClose preference subscriber. It shares the notice chunk
++# up to Anthropic's Windows 6.28899; in Windows 7.37095.0 the notice has its own
++# chunk and the subscriber stays behind, so it is found by content across the
++# SPA, like the PR bar row.
++let subscriberRe =
++  re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?getPreferences[^;]*?,([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}"""
++
++proc resolveAliases(notice, sub, row: string): Aliases =
++  let subscriber = unique(sub, subscriberRe, "preference subscriber")
+   let jsx = unique(
+     notice,
+     re2"""([\w$]+)\("div",\{role:"status","aria-live":"polite","data-find-omitted":"",className:""",
+@@ -83,21 +86,29 @@ proc resolveAliases(notice, row: string): Aliases =
+     "PR bar row fragment",
+   )
+   let locals = [
+-    notice[subscriber.group(0)],
+-    notice[subscriber.group(1)],
++    sub[subscriber.group(0)],
++    sub[subscriber.group(1)],
+     notice[jsx.group(0)],
+     row[fragment.group(0)],
+     row[fragment.group(1)],
+   ]
+   let imports = vendorImports(notice)
++  let subImports = vendorImports(sub)
+   let rowImports = vendorImports(row)
+-  if rowImports.file != imports.file:
++  if rowImports.file != imports.file or subImports.file != imports.file:
+     raise newException(
+-      ValueError, "notice and PR bar row import different vendor-frame files"
++      ValueError,
++      "notice, preference subscriber and PR bar row import different vendor-frame files",
+     )
+   result.vendor = imports.file
+   for i, local in locals:
+-    let byLocal = if i < 3: imports.byLocal else: rowImports.byLocal
++    let byLocal =
++      if i < 2:
++        subImports.byLocal
++      elif i < 3:
++        imports.byLocal
++      else:
++        rowImports.byLocal
+     if local notin byLocal:
+       raise newException(
+         ValueError, placeholders[i] & ": " & local & " is not a vendor-frame import"
+@@ -223,8 +234,8 @@ proc isRow(s: string): bool =
+ when isMainModule:
+   if paramCount() != 1:
+     quit("Usage: add_feature_auto_archive_grace_ion <ion-dist>", 1)
+-  var noticePath, railPath, noticeInput, railInput, rowInput: string
+-  var notices, rails, rows = 0
++  var noticePath, railPath, noticeInput, railInput, rowInput, subPath, subInput: string
++  var notices, rails, rows, subs = 0
+   for kind, file in walkDir(paramStr(1) / "assets" / "v1"):
+     if kind != pcFile or not file.endsWith(".js"):
+       continue
+@@ -240,9 +251,14 @@ when isMainModule:
+     if input.isRow:
+       inc rows
+       rowInput = input
+-  if notices != 1 or rails != 1 or rows != 1 or noticePath == railPath:
++    if input.findAll(subscriberRe).len > 0:
++      subs += input.findAll(subscriberRe).len
++      subPath = file
++      subInput = input
++  if notices != 1 or rails != 1 or rows != 1 or subs != 1 or noticePath == railPath or
++      subPath == railPath:
+     quit(
+-      "[FAIL] archive grace UI: expected one notice, one PR bar row and one distinct session rail chunk",
++      "[FAIL] archive grace UI: expected one notice, one PR bar row, one preference subscriber and one distinct session rail chunk",
+       1,
+     )
+   try:
+@@ -251,8 +267,11 @@ when isMainModule:
+     let noticeOriginal = restoreNotice(noticeInput)
+     let railOriginal = restoreRail(railInput)
+     # The row chunk is never written, unless it is the notice chunk itself.
++    # The subscriber chunk is never written either, unless it is the notice chunk.
+     let aliases = resolveAliases(
+-      noticeOriginal, if rowInput == noticeInput: noticeOriginal else: rowInput
++      noticeOriginal,
++      if subPath == noticePath: noticeOriginal else: subInput,
++      if rowInput == noticeInput: noticeOriginal else: rowInput,
+     )
+     let noticeOutput = applyNotice(noticeOriginal, aliases)
+     let railOutput = applyRail(railOriginal, aliases)
 diff --git a/patches/community/add_feature_files_quick_open.nim b/patches/community/add_feature_files_quick_open.nim
 index fa148b9..e63b788 100644
 --- a/patches/community/add_feature_files_quick_open.nim
@@ -670,7 +822,7 @@ index f03ea70..0c45304 100644
        # Groups: 0 the cache assigned, 1 the cache the IIFE returns, 2 the memo,
        # 3 the getter, 4 the cache the getter returns. 0, 1 and 4 must agree.
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
-index 0d5ae06..7078ac9 100644
+index 0d5ae06..bc2c996 100644
 --- a/scripts/apply_patches.py
 +++ b/scripts/apply_patches.py
 @@ -11,7 +11,11 @@ target location.
@@ -727,7 +879,59 @@ index 0d5ae06..7078ac9 100644
  # Byte strings that only ever appear in a bundle one of our builds already
  # patched: every injected identifier starts with `__cdb`, and
  # `__nav_spoof_applied` is the marker of the navigator spoof removed for issue
-@@ -214,12 +252,58 @@ def run_nim_patch(nim_bin: Path, target_file: Path) -> bool:
+@@ -117,6 +155,9 @@ MARKER_PREFIX = "/*__CDB_SPLIT__"
+ MARKER_RE = re.compile(rb"\n/\*__CDB_SPLIT__([^*\n]+?)__\*/\n")
+ 
+ 
++SHARED_BUNDLE_MODULES = ("managedConfigSchemas.js",)
++
++
+ def chunk_parts(target_path: Path) -> list[Path] | None:
+     """Return [target, chunk1, chunk2, ...] if code-split siblings exist, else None.
+ 
+@@ -127,7 +168,40 @@ def chunk_parts(target_path: Path) -> list[Path] | None:
+     (index*.chunk-*) so both layouts are staged the same way.
+     """
+     chunks = sorted(target_path.parent.glob(f"{target_path.stem}*.chunk-*{target_path.suffix}"))
+-    return [target_path] + chunks if chunks else None
++    if chunks:
++        # Anthropic's Windows 7.37095.0 moved the managed-config schemas and the
++        # 3P model validators out of the main bundle into
++        # managedConfigSchemas.js, which the stub's chunks read by digest
++        # (`var{values:X}=require("./managedConfigSchemas.js")`). No patch
++        # targets that module on its own, so it is staged with the bundle that
++        # requires it and patches see the validators where they now live.
++        shared = [
++            target_path.parent / name
++            for name in SHARED_BUNDLE_MODULES
++            if (target_path.parent / name).is_file()
++            and any(
++                f'require("./{name}")'.encode() in p.read_bytes() for p in [target_path] + chunks
++            )
++        ]
++        return [target_path] + chunks + shared
++    # Anthropic's Windows 7.37095.0 splits the file-index worker too:
++    # fileIndexWorker.js keeps the host and require()s its scorer from a
++    # content-hashed sibling (./sdk-<hash>.js, plus ./rolldown-runtime-<hash>.js).
++    # A target without a chunk family is staged with the content-hashed
++    # same-directory modules it requires (`<name>-<8-char hash>.js`), so a patch
++    # still sees the whole logical worker. Named modules (index.js,
++    # managedConfigSchemas.js, earlyShell.js) are never pulled in: they are
++    # targets or bundles of their own.
++    required = sorted(
++        {
++            target_path.parent / name.decode()
++            for name in re.findall(
++                rb'require\("\./([\w$.-]+-[\w$-]{8}\.js)"\)', target_path.read_bytes()
++            )
++        }
++    )
++    required = [p for p in required if p != target_path and p.is_file()]
++    return [target_path] + required if required else None
+ 
+ 
+ def marker_for(name: str) -> bytes:
+@@ -214,12 +288,58 @@ def run_nim_patch(nim_bin: Path, target_file: Path) -> bool:
          return False
  
  
@@ -790,7 +994,7 @@ index 0d5ae06..7078ac9 100644
  
      if not patches_dir.is_dir():
          print(f"[ERROR] patches_dir not found: {patches_dir}", file=sys.stderr)
-@@ -268,6 +352,9 @@ def main():
+@@ -268,6 +388,9 @@ def main():
          )
          sys.exit(1)
  
@@ -847,8 +1051,47 @@ index 55e3bf7..6550c2d 100755
  if ! command -v node >/dev/null 2>&1; then
      echo "[ERROR] node is required to run the feature test harnesses" >&2
      exit 1
+diff --git a/scripts/tests/community/test-allow-non-anthropic-models.mjs b/scripts/tests/community/test-allow-non-anthropic-models.mjs
+index e5cbe38..40dc649 100644
+--- a/scripts/tests/community/test-allow-non-anthropic-models.mjs
++++ b/scripts/tests/community/test-allow-non-anthropic-models.mjs
+@@ -251,6 +251,34 @@ if (!binRunnable) {
+   let refused = false;
+   try { execFileSync(BIN, [half], { encoding: "utf8" }); } catch (e) { refused = /half-patched/.test(String(e.stdout)); }
+   ok(refused, "a half-patched bundle (one site missing) fails loud");
++
++  // Windows 7.37095.0: the validators live in managedConfigSchemas.js (staged
++  // with the bundle by apply_patches.py) and the chunk binds the discovery
++  // validator by digest through an accessor over that module's `values`.
++  const schemasPart = 'var __schemas={values:{b1059f0e1d33:HCe,"0255f8c401ae":Mo,"65b711526108":pIe}};var require=()=>__schemas;';
++  const digestBinding = 'var{values:amt}=require("./managedConfigSchemas.js"),K=e=>{if(!Object.hasOwn(amt,e))throw Error(`./managedConfigSchemas.js has no export with digest ${e}: it is from another build`);return amt[e]},tAt=K("0255f8c401ae");';
++  const fixture7 = FIXTURE
++    .replace("function ZEn(l,a,d){", schemasPart + digestBinding + "function ZEn(l,a,d){")
++    .replace("l.filter((e=>Mo(p,e.id).ok", "l.filter((e=>tAt(p,e.id).ok");
++  const f7 = join(dir, "staged_index_v7.js");
++  writeFileSync(f7, fixture7);
++  const out7 = execFileSync(BIN, [f7], { encoding: "utf8" });
++  ok(/digest 0255f8c401ae \(Mo\)/.test(out7) && /\[PASS\]/.test(out7), "7.37095 digest chain: discovery validator followed to Mo, all 4 parts applied");
++  const patched7 = readFileSync(f7, "utf8");
++  const stock7 = runFixture(fixture7, false), off7 = runFixture(patched7, false), on7 = runFixture(patched7, true);
++  ok(JSON.stringify(off7) === JSON.stringify(stock7) && JSON.stringify(stock7.disc) === JSON.stringify(stock.disc), "7.37095 digest chain: switch OFF is stock, and stock matches the direct-call layout");
++  ok(IDS.every((id) => on7.disc.includes(id)) && on7.hce.every((v) => v === true), "7.37095 digest chain: discovery ON keeps every row (through B)");
++  for (const [label, text] of [
++    ["no accessor over managedConfigSchemas.js", fixture7.replace('require("./managedConfigSchemas.js")', 'require("./other.js")')],
++    ["digest mapped twice", fixture7.replace('"65b711526108":pIe', '"65b711526108":pIe,x:{"0255f8c401ae":HCe}')],
++    ["digest not exported", fixture7.replace('"0255f8c401ae":Mo,', "")],
++  ]) {
++    const fb = join(dir, "broken7.js");
++    writeFileSync(fb, text);
++    let failed = false;
++    try { execFileSync(BIN, [fb], { encoding: "utf8" }); } catch (e) { failed = /\[FAIL\]/.test(String(e.stdout)); }
++    ok(failed && !readFileSync(fb, "utf8").includes(GUARD), "7.37095 digest chain fails closed: " + label);
++  }
+   rmSync(dir, { recursive: true, force: true });
+ }
+ 
 diff --git a/scripts/tests/community/test-auto-archive-grace.mjs b/scripts/tests/community/test-auto-archive-grace.mjs
-index 2f1c5dc..4b0a0ae 100644
+index 2f1c5dc..1786bdd 100644
 --- a/scripts/tests/community/test-auto-archive-grace.mjs
 +++ b/scripts/tests/community/test-auto-archive-grace.mjs
 @@ -217,7 +217,7 @@ await test("injected: a null lookup between sweeps keeps the deadline, OPEN clea
@@ -886,7 +1129,96 @@ index 2f1c5dc..4b0a0ae 100644
        assert.equal((await call("read")).minutes, 0);
        const json = path.join(userData, "claude-desktop-extra.json"), jsonc = path.join(userData, "claude-desktop-extra.jsonc");
        const unrelated = { autoFixTrustedAuthors: ["github.com/my-app[bot]"], other: true };
-@@ -595,14 +595,14 @@ const webMainSource = () => {
+@@ -297,17 +297,19 @@ const railFixture = [
+ ].join("\n");
+ // Since v6.28899.2 the PR bar row (jsxs / Fragment aliases) lives in its own
+ // chunk; `row` is that chunk, written only when given.
+-function runIon(notice, rail, row) {
++// `sub` is the preference-subscriber chunk (Windows 7.37095.0), written only when given.
++function runIon(notice, rail, row, sub) {
+   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cdb-grace-ion-")), assets = path.join(dir, "assets/v1");
+   fs.mkdirSync(assets, { recursive: true });
+   const noticeFile = path.join(assets, "notice.js"), railFile = path.join(assets, "rail.js");
+   fs.writeFileSync(noticeFile, notice); fs.writeFileSync(railFile, rail);
+   if (row !== undefined) fs.writeFileSync(path.join(assets, "row.js"), row);
++  if (sub !== undefined) fs.writeFileSync(path.join(assets, "sub.js"), sub);
+   const run = spawnSync(ionBinary, [dir], { encoding: "utf8" });
+   return { dir, noticeFile, railFile, run };
+ }
+-function checkIon(notice, rail, row) {
+-  const first = runIon(notice, rail, row);
++function checkIon(notice, rail, row, sub) {
++  const first = runIon(notice, rail, row, sub);
+   try {
+     assert.equal(first.run.status, 0, first.run.stdout + first.run.stderr);
+     for (const file of [first.noticeFile, first.railFile]) execFileSync(process.execPath, ["--check", file]);
+@@ -376,6 +378,30 @@ await test("ion patch: PR bar row in its own chunk (v6.28899.2) resolves jsxs /
+     finally { fs.rmSync(r.dir, { recursive: true, force: true }); }
+   }
+ });
++// Windows 7.37095.0 layout: the notice has its own chunk without the
++// ccAutoArchiveOnPrClose subscriber, which stays behind in another chunk with its
++// own local names for the same vendor exports.
++const subNotice = splitNotice.split("\n").filter(line => !line.startsWith("function Pref(")).join("\n");
++const subFixture = [
++  'import{To as A,go as B}from"./vendor-frame-test.js";',
++  'function Ro(t){let $=J9(3),[n,r]=A(),i,a;return J1($,0,t)?(i=()=>{if(!t)return;let e=e=>{r(e.ccAutoArchiveOnPrClose===!0)};return ae?.getPreferences?.().then(e,zo),ze(e)},a=[t],K2($,0,t,i,a)):(i=$[1],a=$[2]),B(i,a),n}'
++].join("\n");
++await test("ion patch: preference subscriber in its own chunk (Windows 7.37095.0) resolves useState / useEffect through that chunk's imports", async () => {
++  const out = checkIon(subNotice, railFixture, rowFixture, subFixture);
++  for (const alias of ["= st(null)", "eff(() =>", "jxs(Frag, {children:"]) assert.ok(out.notice.includes(alias), "notice helper uses " + alias);
++  for (const alias of ["= l(null)", "h(() =>", "c(u, {children:"]) assert.ok(out.rail.includes(alias), "rail helper uses " + alias);
++  const broken = [
++    [subNotice, railFixture, rowFixture, subFixture.replace("vendor-frame-test", "vendor-frame-other")],
++    [subNotice, railFixture, rowFixture, subFixture.replace("To as A,", "")],
++    [subNotice, railFixture, rowFixture, undefined],
++    [splitNotice, railFixture, rowFixture, subFixture]
++  ];
++  for (const [notice, rail, row, sub] of broken) {
++    const r = runIon(notice, rail, row, sub);
++    try { assert.notEqual(r.run.status, 0, "must fail"); assert.match(r.run.stdout + r.run.stderr, /\[FAIL\]/); }
++    finally { fs.rmSync(r.dir, { recursive: true, force: true }); }
++  }
++});
+ await test("ion wrappers: the keep control is appended inside the rail's aside, ref/key kept; the notice wrapper passes hold and class", async () => {
+   const out = checkIon(noticeFixture, railFixture);
+   const ctx = { o: (type, props, key) => ({ type, props, key: key ?? null }), c: (type, props, key) => ({ type, props, key: key ?? null }),
+@@ -402,6 +428,8 @@ await test("ion wrappers: the keep control is appended inside the rail's aside,
+ // directory or ion-dist.asar), else tmp/extract's resources/ion-dist.asar.
+ const isRailChunk = buf => buf.includes('id:"environment",title:') && buf.includes('id:"pullRequests",title:') && buf.includes("outputsSession:");
+ const isRowChunk = buf => buf.includes("repoKey:") && buf.includes("sessionRepo:") && buf.includes("isPrimary:");
++// The patch's preference-subscriber anchor; Windows 7.37095.0 keeps it out of the notice chunk.
++const isSubscriberChunk = buf => /\[[\w$]+,[\w$]+\]=[\w$]+\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?getPreferences[^;]*?,[\w$]+\([\w$]+,[\w$]+\),[\w$]+\}/.test(buf.toString("utf8"));
+ function readAsarChunks(file) {
+   const fd = fs.openSync(file, "r"), found = {};
+   try {
+@@ -415,6 +443,7 @@ function readAsarChunks(file) {
+       if (buf.includes(ION_TARGET)) found.notice = { name, buf };
+       if (isRailChunk(buf)) found.rail = { name, buf };
+       if (isRowChunk(buf)) found.row = { name, buf };
++      if (isSubscriberChunk(buf)) found.sub = { name, buf };
+     }
+   } finally { fs.closeSync(fd); }
+   return found;
+@@ -431,6 +460,7 @@ function pristineIonChunks() {
+       if (buf.includes(ION_TARGET)) found.notice = { name, buf };
+       if (isRailChunk(buf)) found.rail = { name, buf };
+       if (isRowChunk(buf)) found.row = { name, buf };
++      if (isSubscriberChunk(buf)) found.sub = { name, buf };
+     }
+     return found;
+   }
+@@ -442,7 +472,8 @@ function pristineIonChunks() {
+   else if (real.notice.buf.includes("__cdb") || real.rail.buf.includes("__cdb")) console.log("SKIP ion patch on the real chunks: " + real.from + " is already patched");
+   else await test(`ion patch: applies to the real pristine chunks (${real.notice.name}, ${real.rail.name}), node --check, idempotent`, async () => {
+     const row = real.row && real.row.name !== real.notice.name && real.row.name !== real.rail.name ? real.row.buf : undefined;
+-    const out = checkIon(real.notice.buf, real.rail.buf, row);
++    const sub = real.sub && ![real.notice.name, real.rail.name, real.row && real.row.name].includes(real.sub.name) ? real.sub.buf : undefined;
++    const out = checkIon(real.notice.buf, real.rail.buf, row, sub);
+     for (const text of [out.notice, out.rail]) assert.equal(text.split("/*cdb-archive-grace-ui*/").length, 2);
+     assert.ok(out.notice.includes("function __cdbArchiveNativeNotice(") && out.rail.includes("function __cdbArchiveNativeRail("));
+   });
+@@ -595,14 +626,14 @@ const webMainSource = () => {
  };
  await test("web main: runs the page script on dom-ready in claude.ai pages only, linux only; refresh re-runs it", async () => {
    const code = webMainSource();

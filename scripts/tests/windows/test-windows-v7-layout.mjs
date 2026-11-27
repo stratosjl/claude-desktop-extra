@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 /*
- * test-windows-fork-wrapper.mjs - sub-patch B of
- * patches/community/add_feature_files_quick_open.nim on the fork-site shapes
- * the Windows build meets: the direct `utilityProcess.fork(` call (Anthropic's
- * Windows 6.28899) and the pass-through wrapper of Windows 7.37095.0, where the
- * generic worker host calls `Gun(r,[],{serviceName:t,stdio:"pipe",...},n)`.
+ * test-windows-v7-layout.mjs - what the Windows build relies on for Anthropic's
+ * Windows 7.37095.0 layout:
+ *   - sub-patch B of patches/community/add_feature_files_quick_open.nim on both
+ *     fork-site shapes: the direct `utilityProcess.fork(` call (Windows 6.28899)
+ *     and 7.37095.0's pass-through wrapper, where the generic worker host calls
+ *     `Gun(r,[],{serviceName:t,stdio:"pipe",...},n)`;
+ *   - scripts/apply_patches.py's staging: a worker is staged with the
+ *     content-hashed modules it requires, and the index bundle with
+ *     managedConfigSchemas.js when its chunks require it.
  *
- * Runs the compiled patch on small staged bundles. Needs `make` in patches/.
+ * Runs the compiled patch on small staged bundles. Needs `make` in patches/,
+ * and the overlaid sources (scripts/windows/prepare-sources.sh).
  */
-import { writeFileSync, readFileSync, mkdtempSync, rmSync, accessSync, constants } from "node:fs";
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync, accessSync, constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,6 +91,39 @@ for (const [label, wrapper] of [
   const text = readFileSync(first.file, "utf8"); cleanup();
   ok(again.status === 0 && /already forks with main's env/.test(again.stdout), "second run: idempotent [OK]");
   ok(text === first.text, "second run: byte-identical");
+}
+
+// 6. apply_patches.py staging (chunk_parts) on a synthetic build directory.
+{
+  const dir = mkdtempSync(join(tmpdir(), "cdb-v7-staging-"));
+  try {
+    const build = join(dir, ".vite/build"), worker = join(build, "file-index-worker"), heavy = join(build, "heavy-work-worker");
+    for (const d of [worker, heavy]) mkdirSync(d, { recursive: true });
+    const w = (p, t) => writeFileSync(join(build, p), t);
+    w("file-index-worker/fileIndexWorker.js", 'require("./rolldown-runtime-CI_2c2Xz.js");const s=require("./sdk-DUs7ylS-.js");require("./named.js");');
+    w("file-index-worker/sdk-DUs7ylS-.js", "sdk"); w("file-index-worker/rolldown-runtime-CI_2c2Xz.js", "rt"); w("file-index-worker/named.js", "n");
+    w("heavy-work-worker/heavyWorkWorker.js", "no requires");
+    w("index.js", 'require("./index.chunk-AAAAAAAA.js");');
+    w("index.chunk-AAAAAAAA.js", 'var{values:amt}=require("./managedConfigSchemas.js");');
+    w("managedConfigSchemas.js", "schemas");
+    w("index.pre.js", 'require("./index.js");require("./managedConfigSchemas.js");');
+    const py = 'import sys,json;sys.path.insert(0,sys.argv[1]);import apply_patches as ap;from pathlib import Path\n' +
+      'b=Path(sys.argv[2]);print(json.dumps({t:[p.name for p in (ap.chunk_parts(b/t) or [])] for t in sys.argv[3:]}))';
+    const targets = ["file-index-worker/fileIndexWorker.js", "heavy-work-worker/heavyWorkWorker.js", "index.js", "index.pre.js"];
+    const r = spawnSync("python3", ["-I", "-c", py, join(ROOT, "scripts"), build, ...targets], { encoding: "utf8" });
+    const parts = r.status === 0 ? JSON.parse(r.stdout) : {};
+    ok(r.status === 0, "staging: apply_patches.chunk_parts runs" + (r.status === 0 ? "" : ": " + r.stderr));
+    ok(JSON.stringify(parts[targets[0]]) === JSON.stringify(["fileIndexWorker.js", "rolldown-runtime-CI_2c2Xz.js", "sdk-DUs7ylS-.js"]),
+       "staging: the worker gets its hashed modules, not a named one: " + JSON.stringify(parts[targets[0]]));
+    ok(JSON.stringify(parts[targets[1]]) === "[]", "staging: a worker that requires nothing is staged alone");
+    ok(JSON.stringify(parts[targets[2]]) === JSON.stringify(["index.js", "index.chunk-AAAAAAAA.js", "managedConfigSchemas.js"]),
+       "staging: the index bundle takes managedConfigSchemas.js after its chunks: " + JSON.stringify(parts[targets[2]]));
+    ok(JSON.stringify(parts[targets[3]]) === "[]", "staging: index.pre.js never pulls in index.js or the schemas");
+    w("index.chunk-AAAAAAAA.js", "no schemas here");
+    const r2 = spawnSync("python3", ["-I", "-c", py, join(ROOT, "scripts"), build, "index.js"], { encoding: "utf8" });
+    ok(r2.status === 0 && JSON.stringify(JSON.parse(r2.stdout)["index.js"]) === JSON.stringify(["index.js", "index.chunk-AAAAAAAA.js"]),
+       "staging: managedConfigSchemas.js stays out when no chunk requires it (6.28899 layout)");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
