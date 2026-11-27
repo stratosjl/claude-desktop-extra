@@ -545,6 +545,58 @@ index 1166c31..cda8e22 100644
      ".sessionId),"
  
    # What C, D, E and G sit in front of; asserted on the patched result too.
+diff --git a/patches/community/add_feature_files_quick_open.nim b/patches/community/add_feature_files_quick_open.nim
+index fa148b9..e63b788 100644
+--- a/patches/community/add_feature_files_quick_open.nim
++++ b/patches/community/add_feature_files_quick_open.nim
+@@ -74,6 +74,26 @@ const EXPECTED_PATCHES = 2 # A: page/main injection, B: worker-host env passthro
+ # Groups: 0 = the worker bundle path, 1 = the service name, 2 = the quote char.
+ let forkRe =
+   re2"""utilityProcess\.fork\(([\w$]+),\[\],\{serviceName:([\w$]+),stdio:(["`])pipe["`](?=[,}])"""
++# Anthropic's Windows 7.37095.0 routes every fork through one pass-through
++# wrapper and the worker host calls that instead:
++#   function Gun(e,t,n,{exitsOnSigterm:r=!1}={}){return u.utilityProcess.fork(e,t,n)}
++#   o=Gun(r,[],{serviceName:t,stdio:"pipe",...this.opts.env&&{env:this.opts.env()},...},n)
++# A call through a name counts only once that name is proven to be such a
++# wrapper (its first three parameters handed to utilityProcess.fork unchanged).
++# Groups: 0 = wrapper name, 1/2/3 = its first three parameters, 4/5/6 = the
++# fork() arguments.
++let forkWrapperRe =
++  re2"""function ([\w$]+)\(([\w$]+),([\w$]+),([\w$]+)(?:,\{[^{}()]*\}=\{\})?\)\{return [\w$]+\.utilityProcess\.fork\(([\w$]+),([\w$]+),([\w$]+)\)\}"""
++# Groups: 0 = callee, 1 = the worker bundle path, 2 = the service name, 3 = the
++# quote char.
++let forkCallRe =
++  re2"""([\w$]+)\(([\w$]+),\[\],\{serviceName:([\w$]+),stdio:(["`])pipe["`](?=[,}])"""
++
++proc forkWrappers(s: string): seq[string] =
++  for m in s.findAll(forkWrapperRe):
++    if s[m.group(1)] == s[m.group(4)] and s[m.group(2)] == s[m.group(5)] and
++        s[m.group(3)] == s[m.group(6)]:
++      result.add s[m.group(0)]
+ # Our injected end-state, asserted positively (Rule 6) rather than inferred from
+ # the absence of the pre-patch shape. Quote-agnostic for the same reason.
+ let forkEndStateRe =
+@@ -140,6 +160,20 @@ proc apply*(input: string): string =
+         "utilityProcess.fork(" & s[m.group(0)] & ",[],{serviceName:" & s[m.group(1)] &
+           ",stdio:" & q & "pipe" & q & ",env:Object.assign({},process.env)",
+     )
++    if count == 0:
++      let wrappers = forkWrappers(result)
++      result = result.replace(
++        forkCallRe,
++        proc(m: RegexMatch2, s: string): string =
++          let callee = s[m.group(0)]
++          let at = m.boundaries.a
++          if callee notin wrappers or (at > 0 and s[at - 1] == '.'):
++            return s[m.boundaries]
++          inc count
++          let q = s[m.group(3)]
++          callee & "(" & s[m.group(1)] & ",[],{serviceName:" & s[m.group(2)] & ",stdio:" & q &
++            "pipe" & q & ",env:Object.assign({},process.env)",
++      )
+     if count != 1:
+       echo "  [FAIL] files quick open: expected exactly 1 generic worker-host fork site, found " &
+         $count &
 diff --git a/patches/community/add_feature_theme_picker.nim b/patches/community/add_feature_theme_picker.nim
 index 38265f3..9355c1f 100644
 --- a/patches/community/add_feature_theme_picker.nim
@@ -749,7 +801,7 @@ index 0d5ae06..7078ac9 100644
      nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
  
 diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
-index 55e3bf7..e4444a0 100755
+index 55e3bf7..6550c2d 100755
 --- a/scripts/run-feature-tests.sh
 +++ b/scripts/run-feature-tests.sh
 @@ -1,5 +1,5 @@
@@ -789,7 +841,7 @@ index 55e3bf7..e4444a0 100755
 +# lines so that upstream adding a harness does not break this overlay.
 +if [ "$ENFORCE_COUNT" = true ]; then
 +    CATEGORIES+=(windows)
-+    EXPECTED_TEST_HARNESSES=$((EXPECTED_TEST_HARNESSES + 3))
++    EXPECTED_TEST_HARNESSES=$((EXPECTED_TEST_HARNESSES + 4))
 +fi
 +
  if ! command -v node >/dev/null 2>&1; then
