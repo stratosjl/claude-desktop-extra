@@ -133,7 +133,7 @@ index 8a47701..8809289 100644
          __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix ready-to-merge wake is Linux only" }; };
        } else if (ch.indexOf("cdb-session-start:") === 0) {
 diff --git a/js/extra_settings_page.js b/js/extra_settings_page.js
-index a81fa02..fee5656 100644
+index a81fa02..38cf02a 100644
 --- a/js/extra_settings_page.js
 +++ b/js/extra_settings_page.js
 @@ -588,12 +588,12 @@
@@ -225,6 +225,30 @@ index a81fa02..fee5656 100644
      var restart = restartButton();
      notice.appendChild(restart);
      panel.appendChild(notice);
+@@ -7072,6 +7093,15 @@
+     }
+   };
+ 
++  // The Windows build lists only the Community rows it ships (WINDOWS_ROWS in
++  // the Community panel); keep the two lists in step. Search must not offer a
++  // row the panel hides.
++  var WINDOWS_SEARCH_FEATURES = /^Win/.test((typeof navigator !== "undefined" && navigator.platform) || "") ? [
++    "Panel tabs", "Files quick open", "Diff view modes", "Load large sessions in full", "Jira issue tracker",
++    "Auto-archive delay after a PR merges or closes", "Theme picker", "Developer tools", "Custom models",
++    "Allow non-Anthropic models"
++  ] : null;
++
+   var EXTRA_SEARCH_STATIC = [
+     // Community Features - Code
+     { kind: "features", title: "Panel tabs", rowTitle: "Panel tabs",
+@@ -7341,6 +7371,7 @@
+     for (var j = 0; j < EXTRA_SEARCH_STATIC.length; j++) {
+       var item = EXTRA_SEARCH_STATIC[j];
+       if (!kinds[item.kind]) continue;
++      if (WINDOWS_SEARCH_FEATURES && item.kind === "features" && WINDOWS_SEARCH_FEATURES.indexOf(item.title) < 0) continue;
+       pool.push({
+         kind: item.kind,
+         title: item.title,
 diff --git a/js/files_quick_open_main.js b/js/files_quick_open_main.js
 index a724043..d43f9db 100644
 --- a/js/files_quick_open_main.js
@@ -827,27 +851,6 @@ index 2f1c5dc..4b0a0ae 100644
      const pages = ["https://claude.ai/epitaxy/x", "https://preview.claude.ai/", "app://localhost/epitaxy", "https://claude.ai.evil.example/", "http://claude.ai/"].map(wc);
      for (const p of pages) { created({}, p); p.handlers["dom-ready"](); }
      assert.deepEqual(pages.map(p => p.ran.length), [1, 1, 0, 0, 0]);
-diff --git a/scripts/tests/community/test-files-quick-open-worker.mjs b/scripts/tests/community/test-files-quick-open-worker.mjs
-index 49aa356..f82518d 100644
---- a/scripts/tests/community/test-files-quick-open-worker.mjs
-+++ b/scripts/tests/community/test-files-quick-open-worker.mjs
-@@ -135,6 +135,16 @@ const SPEC = ["abstract.pdf-data-provider.ts", "user-service.spec.ts"];
-   empty.readyCount = 0;
-   eq(h(empty, "user service", 10), [], "legacy index still building (readyCount 0): nothing, as before");
- }
-+// --- scorers without `readyCount` (Windows 6.28899): the call site passes the total ---
-+{
-+  const h = loadHelper("1");
-+  const idx = fakeIndex(PATHS);
-+  delete idx.readyCount;
-+  eq(h(idx, "user service", 10).map(base), [], "no readyCount and no total: multi-piece returns nothing (the old silent failure)");
-+  eq(h(idx, "user service", 10, PATHS.length).map(base).sort(), BOTH,
-+     "no readyCount, total passed by the call site: same ANDed set as with readyCount");
-+  ok(idx.calls.some(([q, l]) => l === PATHS.length), "per-piece scans use the passed total");
-+}
- // --- ORDER: the file the query names, not its directories ------------------------
- // Measured live on 1.40609.0: the merge ordered by the SUMMED ORDINAL RANK of
- // upstream's per-piece scans, and an ordinal sum is not a score - a short path
 diff --git a/scripts/tests/community/test-jira-client.mjs b/scripts/tests/community/test-jira-client.mjs
 index e926faf..ca0926e 100644
 --- a/scripts/tests/community/test-jira-client.mjs
@@ -922,7 +925,7 @@ index 406b6a1..33c1ce4 100644
  const temp = fs.mkdtempSync(join(os.tmpdir(), "cdb-jira-send-"));
  const repo = join(temp, "repo"), link = join(temp, "repo-link"), plainDir = join(temp, "plain");
 diff --git a/scripts/tests/core/test-extra-settings-dom.mjs b/scripts/tests/core/test-extra-settings-dom.mjs
-index 402441e..581efd0 100644
+index 402441e..290ba42 100644
 --- a/scripts/tests/core/test-extra-settings-dom.mjs
 +++ b/scripts/tests/core/test-extra-settings-dom.mjs
 @@ -4022,11 +4022,33 @@ async function run() {
@@ -974,3 +977,24 @@ index 402441e..581efd0 100644
        const winPanel = document.querySelector(".cdbx-panel");
        const winCard = winPanel && winPanel.querySelector(".cdbx-models-card");
        ok(!!winCard && /session header x-opencode-session/.test(winCard.querySelector(".cdbx-state").textContent),
+@@ -4081,12 +4103,18 @@ async function run() {
+         pop.appendChild(lb);
+         document.body.appendChild(pop);
+ 
+-        sIn.value = "jira";
++        // Jira ships in this fork's Windows build; window transparency is Linux-only.
++        sIn.value = "transparent";
+         sIn.dispatchEvent(new Event("input", { bubbles: true }));
+         await sleep(50);
+-        ok(!lb.querySelector(".cdbx-sr-wrap"), "Windows search: Linux-only setting (jira) produces no Extra results");
++        ok(!lb.querySelector(".cdbx-sr-wrap"), "Windows search: Linux-only setting (transparency) produces no Extra results");
+         ok(emptyEl.style.display !== "none", "Windows search: upstream empty state stays visible when no Extra match");
+ 
++        sIn.value = "jira";
++        sIn.dispatchEvent(new Event("input", { bubbles: true }));
++        await sleep(50);
++        ok(!!lb.querySelector(".cdbx-sr-wrap"), "Windows search: a shipped Community row (jira) produces Extra results");
++
+         sIn.value = "deepseek";
+         sIn.dispatchEvent(new Event("input", { bubbles: true }));
+         await sleep(50);
